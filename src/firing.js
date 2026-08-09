@@ -1,9 +1,9 @@
 // Fires one reminder: expires any stale nag, sends sticker + nag message,
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
-import { sendMessage, pinMessage } from './tg.js';
+import { sendMessage } from './tg.js';
 import { nextOccurrence } from './time.js';
-import { nagButtons, nagHtml, expireFiring } from './handlers.js';
+import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
 
 export async function fireReminder(env, r, now, tz) {
@@ -20,14 +20,12 @@ export async function fireReminder(env, r, now, tz) {
   ).bind(r.id, r.chat_id, now, now + intervals[0] * 60000).run();
   const firingId = ins.meta.last_row_id;
 
-  const cat = await sendRandomSticker(env, r.chat_id, firingId);
-  const sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, cat), nagButtons(firingId));
-  if (sent.ok) {
-    await env.DB.prepare('UPDATE firings SET last_message_id = ? WHERE id = ?')
-      .bind(sent.result.message_id, firingId).run();
-    await pinMessage(env, r.chat_id, sent.result.message_id);
-  }
+  const s = await sendRandomSticker(env, r.chat_id, firingId);
+  const sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId));
+  await env.DB.prepare('UPDATE firings SET last_message_id = ?, last_sticker_id = ?, cat = ? WHERE id = ?')
+    .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat, firingId).run();
 
   const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
   await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+  await updateDashboard(env, r.chat_id);
 }

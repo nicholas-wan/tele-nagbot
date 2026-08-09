@@ -1,9 +1,8 @@
 // Runs every minute: fire due reminders, re-send unacknowledged nags,
 // expire firings older than 24h.
 
-import { sendMessage, editMessage, esc, pinMessage, unpinMessage, mentionHtml } from './tg.js';
+import { sendMessage, deleteMessage, esc, mentionHtml } from './tg.js';
 import { getTz, nagButtons, nagHtml, expireFiring, EXPIRE_AFTER_MS } from './handlers.js';
-import { sendRandomSticker } from './stickers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock } from './time.js';
 
@@ -47,7 +46,7 @@ async function sendDigests(env, now) {
       lines.push('Still hanging over you:');
       for (const r of nagging.results) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
     }
-    await sendMessage(env, chat_id, lines.join('\n'));
+    await sendMessage(env, chat_id, lines.join('\n'), null, { silent: true });
   }
 }
 
@@ -79,26 +78,21 @@ async function renagPending(env, now) {
       continue;
     }
 
-    // Strike through the previous nag so only the newest message is live.
-    if (f.last_message_id) {
-      await editMessage(env, f.chat_id, f.last_message_id, `🔕 <s>${esc(r.text)}</s>`);
-    }
+    // One live nag per chore: remove the previous nag and its sticker.
+    if (f.last_message_id) await deleteMessage(env, f.chat_id, f.last_message_id);
+    if (f.last_sticker_id) await deleteMessage(env, f.chat_id, f.last_sticker_id);
 
     const intervals = JSON.parse(r.nag_intervals);
     const nagCount = f.nag_count + 1;
     const interval = intervals[Math.min(nagCount, intervals.length - 1)];
-    const cat = await sendRandomSticker(env, f.chat_id, f.id * 7 + nagCount);
-    const sent = await sendMessage(env, f.chat_id, nagHtml(r, nagCount, cat), nagButtons(f.id));
+    // Loudness ladder: first re-nag is silent; later ones notify again.
+    const sent = await sendMessage(env, f.chat_id, nagHtml(r, nagCount, f.cat || 'both'),
+      nagButtons(f.id), { silent: nagCount === 1 });
     await env.DB.prepare(
-      'UPDATE firings SET nag_count = ?, next_nag_at = ?, last_message_id = ? WHERE id = ?'
+      'UPDATE firings SET nag_count = ?, next_nag_at = ?, last_message_id = ?, last_sticker_id = NULL WHERE id = ?'
     ).bind(
       nagCount, now + interval * 60000,
-      sent.ok ? sent.result.message_id : f.last_message_id, f.id
+      sent.ok ? sent.result.message_id : null, f.id
     ).run();
-    // Keep the pin on the newest live nag.
-    if (sent.ok) {
-      if (f.last_message_id) await unpinMessage(env, f.chat_id, f.last_message_id);
-      await pinMessage(env, f.chat_id, sent.result.message_id);
-    }
   }
 }

@@ -11,10 +11,15 @@ export async function tg(env, method, body) {
   return data;
 }
 
-export function sendMessage(env, chatId, html, replyMarkup) {
+export function sendMessage(env, chatId, html, replyMarkup, opts = {}) {
   const body = { chat_id: chatId, text: html, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = replyMarkup;
+  if (opts.silent) body.disable_notification = true;
   return tg(env, 'sendMessage', body);
+}
+
+export function deleteMessage(env, chatId, messageId) {
+  return tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
 }
 
 export function editMessage(env, chatId, messageId, html, replyMarkup) {

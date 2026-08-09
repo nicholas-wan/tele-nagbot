@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS firings (
   next_nag_at INTEGER,
   snoozes_used INTEGER NOT NULL DEFAULT 0,
   last_message_id INTEGER,
+  last_sticker_id INTEGER,              -- sticker sent with the first nag, cleaned up later
+  cat TEXT,                             -- which cat was on that sticker; re-nag lines match
   done_by TEXT,
   done_at INTEGER
 );
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS settings (
   chat_id INTEGER PRIMARY KEY,
   tz TEXT NOT NULL DEFAULT 'America/New_York',
   sticker_set TEXT,                     -- NULL = the bot's own Latte & Mocha pack
-  last_digest TEXT                      -- local Y-M-D of the last morning digest sent
+  last_digest TEXT,                     -- local Y-M-D of the last morning digest sent
+  dashboard_msg_id INTEGER              -- pinned "outstanding chores" message
 );
 
 -- Which cat appears in a given sticker (keyed by Telegram's stable file id).

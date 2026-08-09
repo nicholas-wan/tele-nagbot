@@ -228,20 +228,22 @@ export async function listTags(env, chatId) {
   }
   return { ok: true, name, entries };
 }
+// Returns which cat is on the sent sticker plus its message id so it can be
+// cleaned up on re-nag/completion. Never throws.
 export async function sendRandomSticker(env, chatId, seed) {
   try {
     const name = await activeSetName(env, chatId);
-    if (!name) return 'both';
+    if (!name) return { cat: 'both', messageId: null };
     const stickers = await setStickers(env, name);
-    if (!stickers) return 'both';
+    if (!stickers) return { cat: 'both', messageId: null };
     const pick = stickers[Math.abs(seed) % stickers.length];
-    await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
+    const sent = await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
     const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
       .bind(pick.uid).first();
-    return (tag && tag.cat) || 'both';
+    return { cat: (tag && tag.cat) || 'both', messageId: sent.ok ? sent.result.message_id : null };
   } catch (e) {
     console.log(`sendRandomSticker failed: ${e}`);
-    return 'both';
+    return { cat: 'both', messageId: null };
   }
 }
 

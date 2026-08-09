@@ -1,8 +1,8 @@
 // Webhook update handling: commands and inline-button callbacks.
 
-import { sendMessage, editMessage, answerCallback, esc, mentionHtml, unpinMessage } from './tg.js';
+import { sendMessage, editMessage, deleteMessage, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtTime, localParts, zonedEpoch } from './time.js';
+import { nextOccurrence, fmtLocal, fmtTime, fmtClock, localParts, zonedEpoch } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
@@ -77,12 +77,13 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
       env, firing.chat_id, firing.last_message_id,
       `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. The cats purr approvingly.`
     );
-    await unpinMessage(env, firing.chat_id, firing.last_message_id);
   }
+  if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
   await sendCelebrationSticker(env, firing.chat_id, firing.id);
   if (reminder.schedule_kind === 'once') {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
+  await updateDashboard(env, firing.chat_id);
 }
 
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
@@ -90,13 +91,62 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
     "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?"
   ).bind(firing.id).run();
   await silenceOldNag(env, firing, reminder.text, '🙀');
-  if (firing.last_message_id) await unpinMessage(env, firing.chat_id, firing.last_message_id);
+  if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
   if (!silent) {
     await sendMessage(env, firing.chat_id,
       `🙀 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`);
   }
   if (reminder.schedule_kind === 'once') {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
+  }
+  await updateDashboard(env, firing.chat_id);
+}
+
+// One pinned message per chat, silently edited in place, listing everything
+// currently nagging. Created on first need, unpinned and removed when clear.
+export async function updateDashboard(env, chatId) {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT r.text, r.assignee_name, r.assignee_user_id, f.fired_at
+       FROM firings f JOIN reminders r ON r.id = f.reminder_id
+       WHERE f.chat_id = ? AND f.state = 'nagging' ORDER BY f.fired_at`
+    ).bind(chatId).all();
+    const row = await env.DB.prepare(
+      'SELECT dashboard_msg_id, tz FROM settings WHERE chat_id = ?'
+    ).bind(chatId).first();
+    const msgId = row && row.dashboard_msg_id;
+
+    if (!results.length) {
+      if (msgId) {
+        await unpinMessage(env, chatId, msgId);
+        await deleteMessage(env, chatId, msgId);
+        await env.DB.prepare('UPDATE settings SET dashboard_msg_id = NULL WHERE chat_id = ?').bind(chatId).run();
+      }
+      return;
+    }
+
+    const tz = (row && row.tz) || 'America/New_York';
+    const lines = ['📋 <b>Outstanding chores</b>'];
+    for (const r of results) {
+      const who = r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
+      lines.push(`• <b>${esc(r.text)}</b>${who} — since ${fmtClock(r.fired_at, tz)}`);
+    }
+    const html = lines.join('\n');
+
+    if (msgId) {
+      const res = await editMessage(env, chatId, msgId, html);
+      if (res.ok || String(res.description || '').includes('not modified')) return;
+      // Message was deleted by hand — fall through and recreate it.
+    }
+    const sent = await sendMessage(env, chatId, html, null, { silent: true });
+    if (sent.ok) {
+      await pinMessage(env, chatId, sent.result.message_id);
+      await env.DB.prepare(
+        'INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET dashboard_msg_id = excluded.dashboard_msg_id'
+      ).bind(chatId, sent.result.message_id).run();
+    }
+  } catch (e) {
+    console.log(`updateDashboard failed: ${e}`);
   }
 }
 
@@ -291,6 +341,7 @@ async function cmdDelete(env, chatId, args) {
   await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
   await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
   await sendMessage(env, chatId, `🗑️ Deleted #${r.display_num} <s>${esc(r.text)}</s>`);
+  await updateDashboard(env, chatId);
 }
 
 async function cmdPauseResume(env, chatId, args, tz, pause) {
