@@ -2,7 +2,7 @@
 
 import { sendMessage, editMessage, deleteMessage, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtTime, fmtClock, localParts, zonedEpoch } from './time.js';
+import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
@@ -491,14 +491,10 @@ async function cmdTz(env, chatId, args) {
   await sendMessage(env, chatId, `🌍 Timezone set to <code>${esc(tz)}</code>.`);
 }
 
-const STATS_MAX_ROWS = 30;
+const STATS_MAX_PER_PERSON = 15;
 
 async function cmdStats(env, chatId, tz) {
   const since = Date.now() - 183 * 24 * 3600000; // ~6 months
-  const counts = await env.DB.prepare(
-    `SELECT done_by, COUNT(*) AS n FROM firings
-     WHERE chat_id = ? AND state = 'done' AND done_at > ? GROUP BY done_by ORDER BY n DESC`
-  ).bind(chatId, since).all();
   const expired = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"
   ).bind(chatId, since).first();
@@ -506,19 +502,37 @@ async function cmdStats(env, chatId, tz) {
     `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
      FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
      WHERE f.chat_id = ? AND f.state = 'done' AND f.done_at > ?
-     ORDER BY f.done_at DESC LIMIT ${STATS_MAX_ROWS + 1}`
+     ORDER BY f.done_at DESC`
   ).bind(chatId, since).all();
 
   if (!history.results.length && !expired.n) {
     return sendMessage(env, chatId, 'Nothing completed in the last 6 months yet. The cats are patient.');
   }
 
-  const tally = counts.results.map((r) => `${esc(r.done_by || '?')}: ${r.n} ✅`).join(' · ');
-  const lines = [`<b>Last 6 months</b> — ${tally}${expired.n ? ` · ${expired.n} 🪦` : ''}`];
-  for (const h of history.results.slice(0, STATS_MAX_ROWS)) {
-    lines.push(`• ${fmtLocal(h.done_at, tz)} — <b>${esc(h.text)}</b> — ${esc(h.done_by || '?')}`);
+  // Group by person, most completions first.
+  const byPerson = new Map();
+  for (const h of history.results) {
+    const who = h.done_by || '?';
+    if (!byPerson.has(who)) byPerson.set(who, []);
+    byPerson.get(who).push(h);
   }
-  if (history.results.length > STATS_MAX_ROWS) lines.push('…and more (showing the latest 30).');
+  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
+
+  const lines = ['📜 <b>Chore log — last 6 months</b>'];
+  for (const [who, items] of people) {
+    lines.push('');
+    lines.push(`<b>${esc(who)}</b> — ${items.length} ✅`);
+    for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
+      lines.push(`  • ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
+    }
+    if (items.length > STATS_MAX_PER_PERSON) {
+      lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
+    }
+  }
+  if (expired.n) {
+    lines.push('');
+    lines.push(`🪦 Expired unclaimed: ${expired.n}`);
+  }
   await sendMessage(env, chatId, lines.join('\n'));
 }
 

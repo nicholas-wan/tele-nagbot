@@ -88,6 +88,12 @@ export function fmtLocal(epochMs, tz) {
   }).format(new Date(epochMs));
 }
 
+export function fmtShort(epochMs, tz) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date(epochMs));
+}
+
 export function fmtClock(epochMs, tz) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true,
