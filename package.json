@@ -1,0 +1,11 @@
+{
+  "name": "nag-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute nagbot --remote --file=schema.sql",
+    "logs": "wrangler tail"
+  }
+}

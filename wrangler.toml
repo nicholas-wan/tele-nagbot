@@ -1,0 +1,16 @@
+name = "nag-bot"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# Fires the scheduled handler every minute to send due reminders and re-nags.
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nagbot"
+database_id = "d5ffcebe-7dff-4ada-8ae4-925b0175c3a8"
+
+# Vision model for /autotag (classifying which cat is on each sticker).
+[ai]
+binding = "AI"
