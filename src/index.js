@@ -48,18 +48,13 @@ export default {
       const cmdRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // Lean menu: daily drivers only. Every other command still works
+        // when typed; /help lists them all.
         body: JSON.stringify({ commands: [
           { command: 'remind', description: 'New reminder — e.g. trash 7pm daily, dishes now' },
           { command: 'list', description: 'Active reminders' },
           { command: 'done', description: 'Mark a reminder done without the button' },
-          { command: 'delete', description: 'Remove a reminder' },
-          { command: 'pause', description: 'Pause a reminder' },
-          { command: 'resume', description: 'Resume a paused reminder' },
-          { command: 'skip', description: 'Skip just the next occurrence' },
-          { command: 'stats', description: 'Who did what, last 30 days' },
-          { command: 'usepack', description: 'Choose the sticker pack for nags' },
-          { command: 'tags', description: 'See which cat each sticker is tagged as' },
-          { command: 'help', description: 'How everything works' },
+          { command: 'help', description: 'All commands and examples' },
         ] }),
       });
       const cmdData = await cmdRes.json();
