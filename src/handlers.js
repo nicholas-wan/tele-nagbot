@@ -1,6 +1,6 @@
 // Webhook update handling: commands and inline-button callbacks.
 
-import { sendMessage, editMessage, answerCallback, esc, mentionHtml } from './tg.js';
+import { sendMessage, editMessage, answerCallback, esc, mentionHtml, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtTime, localParts, zonedEpoch } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -77,6 +77,7 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
       env, firing.chat_id, firing.last_message_id,
       `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. The cats purr approvingly.`
     );
+    await unpinMessage(env, firing.chat_id, firing.last_message_id);
   }
   await sendCelebrationSticker(env, firing.chat_id, firing.id);
   if (reminder.schedule_kind === 'once') {
@@ -89,6 +90,7 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
     "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?"
   ).bind(firing.id).run();
   await silenceOldNag(env, firing, reminder.text, '🙀');
+  if (firing.last_message_id) await unpinMessage(env, firing.chat_id, firing.last_message_id);
   if (!silent) {
     await sendMessage(env, firing.chat_id,
       `🙀 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`);

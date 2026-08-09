@@ -88,6 +88,12 @@ export function fmtLocal(epochMs, tz) {
   }).format(new Date(epochMs));
 }
 
+export function fmtClock(epochMs, tz) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true,
+  }).format(new Date(epochMs));
+}
+
 export function fmtTime(h, mi) {
   const ampm = h >= 12 ? 'pm' : 'am';
   const h12 = h % 12 === 0 ? 12 : h % 12;

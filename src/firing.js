@@ -1,7 +1,7 @@
 // Fires one reminder: expires any stale nag, sends sticker + nag message,
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
-import { sendMessage } from './tg.js';
+import { sendMessage, pinMessage } from './tg.js';
 import { nextOccurrence } from './time.js';
 import { nagButtons, nagHtml, expireFiring } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
@@ -25,6 +25,7 @@ export async function fireReminder(env, r, now, tz) {
   if (sent.ok) {
     await env.DB.prepare('UPDATE firings SET last_message_id = ? WHERE id = ?')
       .bind(sent.result.message_id, firingId).run();
+    await pinMessage(env, r.chat_id, sent.result.message_id);
   }
 
   const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);

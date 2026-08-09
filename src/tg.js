@@ -27,6 +27,16 @@ export function answerCallback(env, callbackId, text) {
   return tg(env, 'answerCallbackQuery', { callback_query_id: callbackId, text });
 }
 
+// Pinning needs the bot to be a group admin with "Pin messages"; both calls
+// fail quietly (logged) without it.
+export function pinMessage(env, chatId, messageId) {
+  return tg(env, 'pinChatMessage', { chat_id: chatId, message_id: messageId, disable_notification: true });
+}
+
+export function unpinMessage(env, chatId, messageId) {
+  return tg(env, 'unpinChatMessage', { chat_id: chatId, message_id: messageId });
+}
+
 export function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
