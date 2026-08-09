@@ -93,14 +93,19 @@ const CELEBRATION_UIDS = new Set(['AgADxB8AAhaJwFc', 'AgADlh0AAqbNwVc', 'AgADIB4
 export async function sendCelebrationSticker(env, chatId, seed) {
   try {
     const name = await activeSetName(env, chatId);
-    if (!name) return;
+    if (!name) return { cat: 'both' };
     const stickers = await setStickers(env, name);
-    if (!stickers) return;
+    if (!stickers) return { cat: 'both' };
     const fav = stickers.filter((s) => CELEBRATION_UIDS.has(s.uid));
     const pool = fav.length ? fav : stickers;
-    await tg(env, 'sendSticker', { chat_id: chatId, sticker: pool[Math.abs(seed) % pool.length].id });
+    const pick = pool[Math.abs(seed) % pool.length];
+    await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
+    const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
+      .bind(pick.uid).first();
+    return { cat: (tag && tag.cat) || 'both' };
   } catch (e) {
     console.log(`sendCelebrationSticker failed: ${e}`);
+    return { cat: 'both' };
   }
 }
 

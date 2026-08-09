@@ -16,8 +16,8 @@ export async function fireReminder(env, r, now, tz) {
 
   const intervals = JSON.parse(r.nag_intervals);
   const ins = await env.DB.prepare(
-    'INSERT INTO firings (reminder_id, chat_id, fired_at, next_nag_at) VALUES (?, ?, ?, ?)'
-  ).bind(r.id, r.chat_id, now, now + intervals[0] * 60000).run();
+    'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(r.id, r.chat_id, r.text, now, now + intervals[0] * 60000).run();
   const firingId = ins.meta.last_row_id;
 
   const s = await sendRandomSticker(env, r.chat_id, firingId);

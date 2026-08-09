@@ -72,14 +72,17 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   await env.DB.prepare(
     "UPDATE firings SET state = 'done', done_by = ?, done_at = ?, next_nag_at = NULL WHERE id = ?"
   ).bind(byName, now, firing.id).run();
+  if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
+  const celebration = await sendCelebrationSticker(env, firing.chat_id, firing.id);
+  const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
+    : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
+    : 'The cats purr approvingly.';
   if (firing.last_message_id) {
     await editMessage(
       env, firing.chat_id, firing.last_message_id,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. The cats purr approvingly.`
+      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. ${purr}`
     );
   }
-  if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
-  await sendCelebrationSticker(env, firing.chat_id, firing.id);
   if (reminder.schedule_kind === 'once') {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
@@ -184,7 +187,7 @@ export async function handleUpdate(env, update) {
     if (cmd === 'skip') return await cmdSkip(env, chatId, args, tz);
     if (cmd === 'done') return await cmdDone(env, chatId, args, by, tz);
     if (cmd === 'tz') return await cmdTz(env, chatId, args);
-    if (cmd === 'stats') return await cmdStats(env, chatId);
+    if (cmd === 'stats') return await cmdStats(env, chatId, tz);
     if (cmd === 'makestickers') return await cmdMakeStickers(env, chatId, msg);
     if (cmd === 'delsticker') return await cmdDelSticker(env, chatId, args);
     if (cmd === 'usepack') return await cmdUsePack(env, chatId, args);
@@ -488,19 +491,35 @@ async function cmdTz(env, chatId, args) {
   await sendMessage(env, chatId, `🌍 Timezone set to <code>${esc(tz)}</code>.`);
 }
 
-async function cmdStats(env, chatId) {
-  const since = Date.now() - 30 * 24 * 3600000;
-  const { results } = await env.DB.prepare(
+const STATS_MAX_ROWS = 30;
+
+async function cmdStats(env, chatId, tz) {
+  const since = Date.now() - 183 * 24 * 3600000; // ~6 months
+  const counts = await env.DB.prepare(
     `SELECT done_by, COUNT(*) AS n FROM firings
      WHERE chat_id = ? AND state = 'done' AND done_at > ? GROUP BY done_by ORDER BY n DESC`
   ).bind(chatId, since).all();
   const expired = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"
   ).bind(chatId, since).first();
-  if (!results.length && !expired.n) return sendMessage(env, chatId, 'No completed reminders in the last 30 days yet.');
-  const lines = results.map((r) => `${esc(r.done_by || '?')}: ${r.n} done ✅`);
-  if (expired.n) lines.push(`nobody: ${expired.n} expired 🪦`);
-  await sendMessage(env, chatId, `<b>Last 30 days</b>\n${lines.join('\n')}`);
+  const history = await env.DB.prepare(
+    `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
+     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
+     WHERE f.chat_id = ? AND f.state = 'done' AND f.done_at > ?
+     ORDER BY f.done_at DESC LIMIT ${STATS_MAX_ROWS + 1}`
+  ).bind(chatId, since).all();
+
+  if (!history.results.length && !expired.n) {
+    return sendMessage(env, chatId, 'Nothing completed in the last 6 months yet. The cats are patient.');
+  }
+
+  const tally = counts.results.map((r) => `${esc(r.done_by || '?')}: ${r.n} ✅`).join(' · ');
+  const lines = [`<b>Last 6 months</b> — ${tally}${expired.n ? ` · ${expired.n} 🪦` : ''}`];
+  for (const h of history.results.slice(0, STATS_MAX_ROWS)) {
+    lines.push(`• ${fmtLocal(h.done_at, tz)} — <b>${esc(h.text)}</b> — ${esc(h.done_by || '?')}`);
+  }
+  if (history.results.length > STATS_MAX_ROWS) lines.push('…and more (showing the latest 30).');
+  await sendMessage(env, chatId, lines.join('\n'));
 }
 
 async function handleCallback(env, cb) {

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS firings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   reminder_id INTEGER NOT NULL,
   chat_id INTEGER NOT NULL,
+  reminder_text TEXT,                   -- snapshot; survives the reminder's deletion
   fired_at INTEGER NOT NULL,
   state TEXT NOT NULL DEFAULT 'nagging',  -- nagging | done | expired
   nag_count INTEGER NOT NULL DEFAULT 0,
