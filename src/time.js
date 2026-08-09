@@ -88,6 +88,13 @@ export function fmtLocal(epochMs, tz) {
   }).format(new Date(epochMs));
 }
 
+// Midnight at the start of the current week (Monday) in tz.
+export function weekStart(epochMs, tz) {
+  const p = localParts(epochMs, tz);
+  const dt = new Date(Date.UTC(p.y, p.mo - 1, p.d - ((p.wd + 6) % 7)));
+  return zonedEpoch(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate(), 0, 0, tz);
+}
+
 export function fmtShort(epochMs, tz) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,

@@ -2,7 +2,7 @@
 
 import { sendMessage, editMessage, deleteMessage, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch } from './time.js';
+import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
@@ -187,7 +187,7 @@ export async function handleUpdate(env, update) {
     if (cmd === 'skip') return await cmdSkip(env, chatId, args, tz);
     if (cmd === 'done') return await cmdDone(env, chatId, args, by, tz);
     if (cmd === 'tz') return await cmdTz(env, chatId, args);
-    if (cmd === 'stats') return await cmdStats(env, chatId, tz);
+    if (cmd === 'stats') return await cmdStats(env, chatId, tz, args);
     if (cmd === 'makestickers') return await cmdMakeStickers(env, chatId, msg);
     if (cmd === 'delsticker') return await cmdDelSticker(env, chatId, args);
     if (cmd === 'usepack') return await cmdUsePack(env, chatId, args);
@@ -492,8 +492,59 @@ async function cmdTz(env, chatId, args) {
 }
 
 const STATS_MAX_PER_PERSON = 15;
+const MEDALS = ['🥇', '🥈', '🥉'];
 
-async function cmdStats(env, chatId, tz) {
+// Fetches done-history and expired count for a window; shared by the weekly
+// leaderboard, /stats all, and the Sunday recap.
+export async function choreStats(env, chatId, since) {
+  const expired = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"
+  ).bind(chatId, since).first();
+  const history = await env.DB.prepare(
+    `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
+     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
+     WHERE f.chat_id = ? AND f.state = 'done' AND f.done_at > ?
+     ORDER BY f.done_at DESC`
+  ).bind(chatId, since).all();
+  const byPerson = new Map();
+  for (const h of history.results) {
+    const who = h.done_by || '?';
+    if (!byPerson.has(who)) byPerson.set(who, []);
+    byPerson.get(who).push(h);
+  }
+  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
+  return { people, expired: expired.n, total: history.results.length };
+}
+
+async function cmdStats(env, chatId, tz, args = '') {
+  if (/^\s*all\b/i.test(args)) return statsAll(env, chatId, tz);
+
+  const since = weekStart(Date.now(), tz);
+  const s = await choreStats(env, chatId, since);
+  if (!s.total && !s.expired) {
+    return sendMessage(env, chatId,
+      '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday; /stats all for history.)');
+  }
+
+  const lines = [`🏆 <b>Weekly leaderboard</b> — week of ${fmtShort(since, tz).replace(/,.*$/, '')}`];
+  s.people.forEach(([who, items], i) => {
+    lines.push('');
+    lines.push(`${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅`);
+    for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
+      lines.push(`  • ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
+    }
+    if (items.length > STATS_MAX_PER_PERSON) lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
+  });
+  if (s.expired) {
+    lines.push('');
+    lines.push(`🪦 Expired unclaimed this week: ${s.expired}`);
+  }
+  lines.push('');
+  lines.push('Resets Monday · /stats all for the 6-month log');
+  await sendMessage(env, chatId, lines.join('\n'));
+}
+
+async function statsAll(env, chatId, tz) {
   const since = Date.now() - 183 * 24 * 3600000; // ~6 months
   const expired = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"

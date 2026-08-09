@@ -2,17 +2,50 @@
 // expire firings older than 24h.
 
 import { sendMessage, deleteMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
-import { localParts, zonedEpoch, fmtClock } from './time.js';
+import { localParts, zonedEpoch, fmtClock, weekStart } from './time.js';
 
 export async function runCron(env) {
   const now = Date.now();
   await sendDigests(env, now);
+  await sendWeeklyRecap(env, now);
   await fireDueReminders(env, now);
   await renagPending(env, now);
   // Abandoned time-choice prompts expire after a day.
   await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(now - 86400000).run();
+}
+
+// Sunday 8pm local: the cats crown the week's winner before Monday's reset.
+async function sendWeeklyRecap(env, now) {
+  const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all();
+  for (const { chat_id } of results) {
+    const tz = await getTz(env, chat_id);
+    const p = localParts(now, tz);
+    if (p.wd !== 0 || p.h !== 20) continue;
+    const ymd = `${p.y}-${p.mo}-${p.d}`;
+    const row = await env.DB.prepare('SELECT last_weekly FROM settings WHERE chat_id = ?').bind(chat_id).first();
+    if (row && row.last_weekly === ymd) continue;
+    await env.DB.prepare(
+      'INSERT INTO settings (chat_id, last_weekly) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_weekly = excluded.last_weekly'
+    ).bind(chat_id, ymd).run();
+
+    const s = await choreStats(env, chat_id, weekStart(now, tz));
+    if (!s.total && !s.expired) continue;
+
+    const lines = ['🏁 <b>Weekly wrap from Latte &amp; Mocha</b>'];
+    if (s.people.length) {
+      const [winner, winnerItems] = s.people[0];
+      const tie = s.people.length > 1 && s.people[1][1].length === winnerItems.length;
+      lines.push(tie
+        ? `It's a tie at ${winnerItems.length} ✅ each — the cats demand a tiebreaker chore.`
+        : `🥇 ${esc(winner)} takes the week with ${winnerItems.length} ✅!`);
+      for (const [who, items] of s.people) lines.push(`• ${esc(who)}: ${items.length} ✅`);
+    }
+    if (s.expired) lines.push(`🪦 ${s.expired} expired unclaimed. The cats saw everything.`);
+    lines.push('Fresh board Monday. /stats anytime.');
+    await sendMessage(env, chat_id, lines.join('\n'), null, { silent: true });
+  }
 }
 
 // 8am local: one summary of the day's chores per chat. Skipped when there is

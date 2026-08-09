@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS settings (
   tz TEXT NOT NULL DEFAULT 'America/New_York',
   sticker_set TEXT,                     -- NULL = the bot's own Latte & Mocha pack
   last_digest TEXT,                     -- local Y-M-D of the last morning digest sent
+  last_weekly TEXT,                     -- local Y-M-D of the last Sunday recap sent
   dashboard_msg_id INTEGER              -- pinned "outstanding chores" message
 );
 
