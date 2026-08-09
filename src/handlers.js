@@ -494,6 +494,31 @@ async function cmdTz(env, chatId, args) {
 const STATS_MAX_PER_PERSON = 15;
 const MEDALS = ['🥇', '🥈', '🥉'];
 
+// Best-guess emoji for a chore, by keyword. Falls back to a paw.
+const CHORE_EMOJI = [
+  [/dish|plate|dishwasher|bowl|cutlery/i, '🍽️'],
+  [/poop|litter|litterbox|scoop/i, '💩'],
+  [/trash|garbage|rubbish|bin\b/i, '🗑️'],
+  [/laundry|clothes|fold|iron/i, '🧺'],
+  [/plant|water the|garden|flower/i, '🪴'],
+  [/vacuum|sweep|mop|clean|dust|scrub|wipe/i, '🧹'],
+  [/rent|pay|bill|tax|insurance/i, '💸'],
+  [/cook|dinner|lunch|breakfast|meal|oven|bake/i, '🍳'],
+  [/groceries|grocery|shop|buy|market/i, '🛒'],
+  [/feed|food|treat/i, '🍚'],
+  [/cat|latte|mocha|vet/i, '🐱'],
+  [/car|gas|fuel|tire|oil/i, '🚗'],
+  [/bed|sheet|pillow|blanket/i, '🛏️'],
+  [/gym|run|walk|exercise/i, '🏃'],
+  [/call|phone|email|message/i, '📞'],
+  [/doctor|dentist|meds|medicine|pill/i, '💊'],
+];
+
+function choreEmoji(text) {
+  for (const [re, emoji] of CHORE_EMOJI) if (re.test(text)) return emoji;
+  return '🐾';
+}
+
 // Fetches done-history and expired count for a window; shared by the weekly
 // leaderboard, /stats all, and the Sunday recap.
 export async function choreStats(env, chatId, since) {
@@ -531,7 +556,7 @@ async function cmdStats(env, chatId, tz, args = '') {
     lines.push('');
     lines.push(`${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅`);
     for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
-      lines.push(`  • ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
+      lines.push(`  ${choreEmoji(h.text)} ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
     }
     if (items.length > STATS_MAX_PER_PERSON) lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
   });
@@ -574,7 +599,7 @@ async function statsAll(env, chatId, tz) {
     lines.push('');
     lines.push(`<b>${esc(who)}</b> — ${items.length} ✅`);
     for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
-      lines.push(`  • ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
+      lines.push(`  ${choreEmoji(h.text)} ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
     }
     if (items.length > STATS_MAX_PER_PERSON) {
       lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
