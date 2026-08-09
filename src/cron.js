@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, deleteMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock } from './time.js';
 
@@ -94,5 +94,8 @@ async function renagPending(env, now) {
       nagCount, now + interval * 60000,
       sent.ok ? sent.result.message_id : null, f.id
     ).run();
+    // Self-heal: recreate the dashboard if it is missing (e.g. deleted by hand
+    // or the nag predates the dashboard feature).
+    await updateDashboard(env, f.chat_id);
   }
 }
