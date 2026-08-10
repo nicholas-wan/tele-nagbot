@@ -168,7 +168,8 @@ export async function handleUpdate(env, update) {
   if (update.callback_query) return handleCallback(env, update.callback_query);
 
   const msg = update.message;
-  if (!msg || !msg.text || !msg.text.startsWith('/')) return;
+  if (!msg || !msg.text) return;
+  if (!msg.text.startsWith('/')) return handlePlainText(env, msg);
   const m = msg.text.match(/^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/);
   if (!m) return;
   const [, cmdRaw, args] = m;
@@ -271,19 +272,82 @@ async function startWizard(env, chatId, partial) {
     ? [
         [btn('In 15 min', 'r15'), btn('In 1 hour', 'r60')],
         [btn('Tonight 7pm', 't19'), btn('Tomorrow 9am', 'm9')],
-        [btn('Every day 7pm', 'd19')],
+        [btn('Every day 7pm', 'd19'), btn('✏️ Type a time', 'custom')],
       ]
-    : [[btn('8am', 'h8'), btn('12pm', 'h12'), btn('7pm', 'h19'), btn('9pm', 'h21')]];
+    : [
+        [btn('8am', 'h8'), btn('12pm', 'h12'), btn('7pm', 'h19'), btn('9pm', 'h21')],
+        [btn('✏️ Type a time', 'custom')],
+      ];
 
   const kindNote = partial.kind === 'once' ? '' :
     ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
         partial.kind === 'monthly' ? 'on the ' + partial.detail.dom :
         partial.kind === 'interval' ? `every ${partial.detail.days} days` : 'daily'})`;
-  await sendMessage(env, chatId,
+  const sent = await sendMessage(env, chatId,
     `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
-    'Tap an option, or resend with a time like <code>7pm</code> or <code>in 30m</code>.',
+    'Tap an option, or ✏️ to type your own time.',
     { inline_keyboard: keyboard }
   );
+  if (sent.ok) {
+    await env.DB.prepare('UPDATE drafts SET wizard_msg_id = ? WHERE id = ?')
+      .bind(sent.result.message_id, id).run();
+  }
+}
+
+// Plain (non-command) text: only meaningful as a custom time for a pending
+// draft — either a reply to the wizard/prompt message, or freshly typed
+// after a recent popup. Anything else is ignored (normal chat).
+async function handlePlainText(env, msg) {
+  const chatId = msg.chat.id;
+  const now = Date.now();
+  const replyId = msg.reply_to_message && msg.reply_to_message.message_id;
+  let draft = null;
+  if (replyId) {
+    draft = await env.DB.prepare(
+      'SELECT * FROM drafts WHERE chat_id = ? AND (prompt_msg_id = ? OR wizard_msg_id = ?)'
+    ).bind(chatId, replyId, replyId).first();
+  }
+  const explicit = !!draft;
+  if (!draft) {
+    draft = await env.DB.prepare(
+      'SELECT * FROM drafts WHERE chat_id = ? AND created_at > ? ORDER BY id DESC LIMIT 1'
+    ).bind(chatId, now - 15 * 60000).first();
+  }
+  if (!draft) return;
+
+  const tz = await getTz(env, chatId);
+  let parsed;
+  try {
+    // Dummy task word satisfies the parser; we only want the schedule.
+    parsed = parseRemind(`x ${msg.text}`, `x ${msg.text}`, [], now, tz);
+  } catch (err) {
+    if (explicit && err instanceof ParseError) {
+      await sendMessage(env, chatId,
+        'I couldn\'t read that as a time — try <code>10am</code>, <code>tomorrow 9:30am</code>, or <code>in 30m</code>.');
+    }
+    return; // non-time chatter near a popup is ignored silently
+  }
+
+  // The typed reply carries the time; the draft carries everything else.
+  let { kind, detail, firstFireAt } = parsed;
+  if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h != null) {
+    kind = draft.schedule_kind;
+    detail = { ...JSON.parse(draft.schedule_detail), h: parsed.detail.h, mi: parsed.detail.mi };
+    firstFireAt = nextOccurrence(kind, detail, now, tz);
+  }
+  const p = {
+    text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
+    nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt,
+  };
+  const { id, html } = await createReminder(env, chatId, p, senderName(msg.from), tz);
+  await env.DB.prepare('DELETE FROM drafts WHERE id = ?').bind(draft.id).run();
+  if (draft.wizard_msg_id) await editMessage(env, chatId, draft.wizard_msg_id, html);
+  else await sendMessage(env, chatId, html);
+  if (draft.prompt_msg_id) await deleteMessage(env, chatId, draft.prompt_msg_id);
+  if (p.firstFireAt <= Date.now() + 500) {
+    const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
+    if (row) await fireReminder(env, row, Date.now(), tz);
+  }
 }
 
 function scheduleFromCode(code, draft, now, tz) {
@@ -619,6 +683,17 @@ async function handleCallback(env, cb) {
       .bind(+wiz[1], cb.message.chat.id).first();
     if (!draft) return answerCallback(env, cb.id, 'That one expired — send /remind again.');
     const tz = await getTz(env, draft.chat_id);
+    if (wiz[2] === 'custom') {
+      const prompt = await sendMessage(env, draft.chat_id,
+        `⏰ Reply to this message with a time for <b>${esc(draft.text)}</b> — e.g. <code>10am</code>, ` +
+        '<code>tomorrow 9:30am</code>, <code>in 30m</code>, or <code>now</code>.',
+        { force_reply: true, selective: true });
+      if (prompt.ok) {
+        await env.DB.prepare('UPDATE drafts SET prompt_msg_id = ? WHERE id = ?')
+          .bind(prompt.result.message_id, draft.id).run();
+      }
+      return answerCallback(env, cb.id, 'Type the time as a reply ⏰');
+    }
     const sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
     if (!sched) return answerCallback(env, cb.id, '');
     const { html } = await createReminder(env, draft.chat_id, {

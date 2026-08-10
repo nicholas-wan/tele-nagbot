@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   schedule_kind TEXT NOT NULL,
   schedule_detail TEXT NOT NULL,
   nag_intervals TEXT NOT NULL,
+  wizard_msg_id INTEGER,                -- the time-picker popup message
+  prompt_msg_id INTEGER,                -- the "reply with a time" force-reply prompt
   created_at INTEGER NOT NULL
 );
 
