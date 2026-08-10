@@ -432,12 +432,24 @@ async function handlePlainText(env, msg) {
     }
   }
 
-  // A draft only accepts times sent as a reply to its wizard/prompt message —
-  // never plucked out of ambient chat ("movie at 8pm" must stay chat).
-  if (!replyId) return;
-  const draft = await env.DB.prepare(
-    'SELECT * FROM drafts WHERE chat_id = ? AND (prompt_msg_id = ? OR wizard_msg_id = ?)'
-  ).bind(chatId, replyId, replyId).first();
+  // A draft accepts a time sent as a reply to its wizard/prompt message.
+  // Safety net: after "✏️ Type a time" was tapped (prompt exists), a message
+  // that is PURELY a time also counts — some group clients never surface the
+  // forced reply. Ambient chat ("movie at 8pm") has leftover words and is
+  // rejected below.
+  let draft = null;
+  let bareTime = false;
+  if (replyId) {
+    draft = await env.DB.prepare(
+      'SELECT * FROM drafts WHERE chat_id = ? AND (prompt_msg_id = ? OR wizard_msg_id = ?)'
+    ).bind(chatId, replyId, replyId).first();
+  }
+  if (!draft) {
+    draft = await env.DB.prepare(
+      'SELECT * FROM drafts WHERE chat_id = ? AND prompt_msg_id IS NOT NULL AND created_at > ? ORDER BY id DESC LIMIT 1'
+    ).bind(chatId, now - 15 * 60000).first();
+    bareTime = true;
+  }
   if (!draft) return;
 
   const tz = await getTz(env, chatId);
@@ -446,12 +458,14 @@ async function handlePlainText(env, msg) {
     // Dummy task word satisfies the parser; we only want the schedule.
     parsed = parseRemind(`x ${msg.text}`, `x ${msg.text}`, [], now, tz);
   } catch (err) {
-    if (err instanceof ParseError) {
+    if (!bareTime && err instanceof ParseError) {
       await sendMessage(env, chatId,
         '😿 The cats couldn\'t read that as a time — try <code>10am</code>, <code>tomorrow 9:30am</code>, or <code>in 30m</code>.');
     }
     return;
   }
+  // Non-reply path: anything beyond the bare time means normal conversation.
+  if (bareTime && parsed.text !== 'x') return;
 
   // The typed reply carries the time; the draft carries everything else.
   let { kind, detail, firstFireAt } = parsed;
@@ -1032,8 +1046,13 @@ async function handleCallback(env, cb) {
     if (!draft) return answerCallback(env, cb.id, 'That one expired — send /remind again.');
     const tz = await getTz(env, draft.chat_id);
     if (wiz[2] === 'custom') {
+      // selective force_reply only auto-opens the reply box for a mentioned
+      // user in groups — so mention whoever tapped the button.
+      const mention = cb.from.username
+        ? `@${cb.from.username}`
+        : mentionHtml(cb.from.first_name || 'you', cb.from.id);
       const prompt = await sendMessage(env, draft.chat_id,
-        `⏰ Reply to this message with a time for <b>${esc(draft.text)}</b> — e.g. <code>10am</code>, ` +
+        `⏰ ${mention} — reply with a time for <b>${esc(draft.text)}</b> — e.g. <code>10am</code>, ` +
         '<code>tomorrow 9:30am</code>, <code>in 30m</code>, or <code>now</code>.',
         { force_reply: true, selective: true });
       if (prompt.ok) {
