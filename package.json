@@ -6,6 +6,10 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute nagbot --remote --file=schema.sql",
-    "logs": "wrangler tail"
+    "logs": "wrangler tail",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
   }
 }
