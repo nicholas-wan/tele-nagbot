@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { localParts, zonedEpoch, nextOccurrence, weekStart } from '../src/time.js';
+import { localParts, zonedEpoch, nextOccurrence, weekStart, deferQuietHours } from '../src/time.js';
 
 const TZ = 'Asia/Singapore';
 // Monday 2026-08-10 12:00 SGT.
@@ -45,6 +45,25 @@ describe('nextOccurrence', () => {
 
   it('once: null', () => {
     expect(nextOccurrence('once', {}, NOW, TZ)).toBeNull();
+  });
+});
+
+describe('deferQuietHours (11pm–8am)', () => {
+  it('daytime passes through untouched', () => {
+    const noon = zonedEpoch(2026, 8, 10, 12, 0, TZ);
+    expect(deferQuietHours(noon, TZ)).toBe(noon);
+    const tenPm = zonedEpoch(2026, 8, 10, 22, 59, TZ);
+    expect(deferQuietHours(tenPm, TZ)).toBe(tenPm);
+  });
+
+  it('11pm+ defers to 8am next day', () => {
+    const lateNight = zonedEpoch(2026, 8, 10, 23, 15, TZ);
+    expect(local(deferQuietHours(lateNight, TZ))).toMatchObject({ d: 11, h: 8, mi: 0 });
+  });
+
+  it('early morning defers to 8am same day', () => {
+    const threeAm = zonedEpoch(2026, 8, 11, 3, 0, TZ);
+    expect(local(deferQuietHours(threeAm, TZ))).toMatchObject({ d: 11, h: 8, mi: 0 });
   });
 });
 

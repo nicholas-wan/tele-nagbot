@@ -4,7 +4,7 @@
 import { sendMessage, sendLong, deleteMessage, esc, mentionHtml } from './tg.js';
 import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
-import { localParts, zonedEpoch, fmtClock, weekStart } from './time.js';
+import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
 
 export async function runCron(env) {
   const now = Date.now();
@@ -180,6 +180,19 @@ async function renagPending(env, now) {
       // /pause freezes in-flight nags too (no re-nags, no expiry ticking).
       if (r.paused) continue;
 
+      const tz = await getTz(env, f.chat_id);
+      // Quiet hours: nothing nags (or announces expiry) overnight — anything
+      // due now waits for 8am instead.
+      const wake = deferQuietHours(now, tz);
+      if (wake > now) {
+        if (f.next_nag_at != null && f.next_nag_at <= now) {
+          await env.DB.prepare(
+            "UPDATE firings SET next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
+          ).bind(wake, f.id, f.next_nag_at).run();
+        }
+        continue;
+      }
+
       if (now - f.fired_at > EXPIRE_AFTER_MS) {
         await expireFiring(env, f, r);
         continue;
@@ -194,7 +207,7 @@ async function renagPending(env, now) {
       // compare-and-swap, and a Done/snooze landing mid-send isn't clobbered.
       const claim = await env.DB.prepare(
         "UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
-      ).bind(nagCount, now + interval * 60000, f.id, f.next_nag_at).run();
+      ).bind(nagCount, deferQuietHours(now + interval * 60000, tz), f.id, f.next_nag_at).run();
       if (!claim.meta.changes) continue;
 
       // One live nag per chore: remove the previous nag and its sticker.

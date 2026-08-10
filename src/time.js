@@ -81,6 +81,19 @@ export function nextOccurrence(kind, detail, afterMs, tz) {
   return null;
 }
 
+// Household quiet hours: bot-initiated re-nags never land between 11pm and
+// 8am local — anything due in that window waits for 8am. Scheduled reminder
+// times themselves are honored as set.
+export function deferQuietHours(ms, tz) {
+  const p = localParts(ms, tz);
+  if (p.h >= 23) {
+    const c = dateAdd(p.y, p.mo, p.d, 1);
+    return zonedEpoch(c.y, c.mo, c.d, 8, 0, tz);
+  }
+  if (p.h < 8) return zonedEpoch(p.y, p.mo, p.d, 8, 0, tz);
+  return ms;
+}
+
 export function fmtLocal(epochMs, tz) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: tz, weekday: 'short', month: 'short', day: 'numeric',

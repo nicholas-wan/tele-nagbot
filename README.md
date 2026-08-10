@@ -18,6 +18,7 @@ No time given → inline time-picker (tap, or reply with a custom time). Reply `
 ## Behavior
 
 - Nags re-send at 15/30/60 min (or `nag:` pace), deleting the previous nag — one live nag per chore. First re-nag silent, later ones ping. 24h unacked → expired 🪦.
+- Quiet hours 11pm–8am: re-nags and expiry notices due overnight wait for 8am. Explicitly scheduled reminder times still fire as set.
 - Sticker on first nag and on Done (once a pack exists via `/makestickers` or `/usepack`); nag lines name the cat on the sticker (per-sticker tags in D1).
 - Pinned chore-list dashboard (all chores incl. paused, nagging marked 🔔), silently edited; needs bot admin with Pin messages. Removed only when the list is empty.
 - Daily 8am digest and Sunday 8pm weekly wrap, both silent. Default timezone Asia/Singapore.
