@@ -28,9 +28,37 @@ export function nagButtons(firingId) {
   return {
     inline_keyboard: [[
       { text: '✅ Done', callback_data: `d:${firingId}` },
+      { text: '🤝 Both', callback_data: `b:${firingId}` },
       { text: '😴 Snooze…', callback_data: `s:${firingId}` },
     ]],
   };
+}
+
+// Everyone the cats have seen tap Done in this chat (combined credits split).
+const CREDIT_SEP = ' & ';
+async function householdRoster(env, chatId) {
+  const { results } = await env.DB.prepare(
+    "SELECT DISTINCT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
+  ).bind(chatId).all();
+  const set = new Set();
+  for (const r of results) {
+    for (const p of String(r.done_by).split(CREDIT_SEP)) if (p.trim()) set.add(p.trim());
+  }
+  return set;
+}
+
+// "jane" typed by hand matches the roster's "@jane" spelling.
+function canonName(roster, name) {
+  const norm = (s) => String(s).replace(/^@/, '').toLowerCase();
+  for (const r of roster) if (norm(r) === norm(name)) return r;
+  return name;
+}
+
+// Combined credit: the actor first, then the given others, deduped.
+function creditTogether(by, others) {
+  const seen = new Set([by]);
+  for (const o of others) seen.add(o);
+  return [...seen].join(CREDIT_SEP);
 }
 
 function snoozeButtons(firingId) {
@@ -271,7 +299,8 @@ async function cmdHelp(env, chatId) {
     '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
     '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
-    'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
+    'Reply <code>done</code> or <code>snooze 2h</code> to any nag, or react 👍 on it — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
+    '🤝 <code>done together</code> (or the Both button) credits everyone; <code>done with @jane</code> picks who\n' +
     '/stats — weekly board · /stats all — 6-month log\n' +
     'Stickers: /usepack &lt;link&gt; · /makestickers · /tags · /tagsticker N latte · /autotag · /delsticker N'
   );
@@ -388,7 +417,7 @@ async function handlePlainText(env, msg) {
   }
   // Bare "done" works when exactly one chore is nagging; with several, the
   // cats ask which instead of staying confusingly silent.
-  if (/^done!*\s*$/i.test(msg.text)) {
+  if (/^done(?:\s+(?:together|both|with\s+.+?))?\s*!*$/i.test(msg.text)) {
     const all = await env.DB.prepare(
       "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
     ).bind(chatId).all();
@@ -470,7 +499,20 @@ async function handleNagReply(env, msg, firing) {
   if (/^done\b/i.test(text) || text.includes('✅')) {
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (!reminder) return;
-    const won = await completeFiring(env, firing, reminder, senderName(msg.from), tz);
+    let by = senderName(msg.from);
+    // "done together"/"done both" credits the whole roster; "done with @jane"
+    // credits the replier plus the named helpers.
+    const together = /^done\s+(?:together|both)\b/i.test(text);
+    const withM = text.match(/^done\s+with\s+(.+?)\s*!*$/i);
+    if (together || withM) {
+      const roster = await householdRoster(env, msg.chat.id);
+      const others = withM
+        ? withM[1].split(/\s*(?:,|&|\+|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)
+            .map((n) => canonName(roster, n))
+        : [...roster];
+      by = creditTogether(by, others);
+    }
+    const won = await completeFiring(env, firing, reminder, by, tz);
     if (!won) return sendMessage(env, msg.chat.id, '😼 Someone beat you to it — already handled.');
     return;
   }
@@ -697,9 +739,14 @@ async function cmdDone(env, chatId, args, by, tz) {
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) throw new ParseError(`#${r.display_num} is not currently nagging.`);
-  const won = await completeFiring(env, firing, r, by, tz);
+  let credit = by;
+  if (/\b(together|both)\b/i.test(String(args))) {
+    const roster = await householdRoster(env, chatId);
+    credit = creditTogether(by, [...roster]);
+  }
+  const won = await completeFiring(env, firing, r, credit, tz);
   if (!won) return sendMessage(env, chatId, '😼 Someone beat you to it — already handled.');
-  await sendMessage(env, chatId, `😻 <b>${esc(r.text)}</b> — done by ${esc(by)}. Purrs all around.`);
+  await sendMessage(env, chatId, `😻 <b>${esc(r.text)}</b> — done by ${esc(credit)}. Purrs all around.`);
 }
 
 async function cmdMakeStickers(env, chatId, msg) {
@@ -845,9 +892,11 @@ export async function choreStats(env, chatId, since) {
   ).bind(chatId, since).all();
   const byPerson = new Map();
   for (const h of history.results) {
-    const who = h.done_by || '?';
-    if (!byPerson.has(who)) byPerson.set(who, []);
-    byPerson.get(who).push(h);
+    // "nick & jane" (done together) credits each person individually.
+    for (const who of String(h.done_by || '?').split(CREDIT_SEP)) {
+      if (!byPerson.has(who)) byPerson.set(who, []);
+      byPerson.get(who).push(h);
+    }
   }
   const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
   return { people, expired: expired.n, total: history.results.length };
@@ -861,10 +910,18 @@ export async function winnerStreak(env, chatId, tz, leader) {
     const end = start;
     start -= 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
     const { results } = await env.DB.prepare(
-      "SELECT done_by, COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'done' AND done_at > ? AND done_at <= ? GROUP BY done_by ORDER BY n DESC LIMIT 2"
+      "SELECT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND done_at > ? AND done_at <= ?"
     ).bind(chatId, start, end).all();
-    if (!results.length || results[0].done_by !== leader) break;
-    if (results[1] && results[1].n === results[0].n) break;
+    const counts = new Map();
+    for (const r of results) {
+      for (const p of String(r.done_by || '').split(CREDIT_SEP)) {
+        if (p) counts.set(p, (counts.get(p) || 0) + 1);
+      }
+    }
+    if (!counts.size) break;
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    if (sorted[0][0] !== leader) break;
+    if (sorted[1] && sorted[1][1] === sorted[0][1]) break;
     streak++;
   }
   return streak;
@@ -916,12 +973,13 @@ async function statsAll(env, chatId, tz) {
     return sendMessage(env, chatId, 'Nothing completed in the last 6 months yet. The cats are patient.');
   }
 
-  // Group by person, most completions first.
+  // Group by person, most completions first; combined credits split.
   const byPerson = new Map();
   for (const h of history.results) {
-    const who = h.done_by || '?';
-    if (!byPerson.has(who)) byPerson.set(who, []);
-    byPerson.get(who).push(h);
+    for (const who of String(h.done_by || '?').split(CREDIT_SEP)) {
+      if (!byPerson.has(who)) byPerson.set(who, []);
+      byPerson.get(who).push(h);
+    }
   }
   const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
 
@@ -1061,7 +1119,7 @@ async function handleCallback(env, cb) {
       `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);
   }
 
-  const m = (cb.data || '').match(/^([ds]):(\d+)$/);
+  const m = (cb.data || '').match(/^([dsb]):(\d+)$/);
   if (!m || !cb.message) return answerCallback(env, cb.id, '');
   const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+m[2]).first();
   if (!firing || firing.state !== 'nagging') {
@@ -1075,8 +1133,13 @@ async function handleCallback(env, cb) {
   const tz = await getTz(env, firing.chat_id);
   const by = senderName(cb.from);
 
-  if (m[1] === 'd') {
-    const won = await completeFiring(env, firing, reminder, by, tz);
+  if (m[1] === 'd' || m[1] === 'b') {
+    let credit = by;
+    if (m[1] === 'b') {
+      const roster = await householdRoster(env, firing.chat_id);
+      credit = creditTogether(by, [...roster]);
+    }
+    const won = await completeFiring(env, firing, reminder, credit, tz);
     return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
   }
 

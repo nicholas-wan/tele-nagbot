@@ -48,16 +48,26 @@ export async function fireReminder(env, r, now, tz) {
   await updateDashboard(env, r.chat_id);
 }
 
-// Household members = everyone who has ever tapped Done here (6-month window).
-// Least ✅ this week wins the chore; ties go to the lower all-time count.
+// Household members = everyone who has ever tapped Done here. Least ✅ this
+// week wins the chore; ties go to the lower all-time count. Combined credits
+// ("nick & jane" from done-together) count for each person.
 async function pickRotation(env, chatId, tz) {
   const { results } = await env.DB.prepare(
-    `SELECT done_by, COUNT(*) AS total, SUM(CASE WHEN done_at > ? THEN 1 ELSE 0 END) AS week
-     FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL
-     GROUP BY done_by`
-  ).bind(weekStart(Date.now(), tz), chatId).all();
-  if (!results.length) return null;
-  results.sort((a, b) => a.week - b.week || a.total - b.total
-    || String(a.done_by).localeCompare(String(b.done_by)));
-  return results[0].done_by;
+    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
+  ).bind(chatId).all();
+  const ws = weekStart(Date.now(), tz);
+  const stats = new Map();
+  for (const row of results) {
+    for (const p of String(row.done_by).split(' & ')) {
+      if (!p.trim()) continue;
+      const s = stats.get(p) || { week: 0, total: 0 };
+      s.total++;
+      if (row.done_at > ws) s.week++;
+      stats.set(p, s);
+    }
+  }
+  if (!stats.size) return null;
+  const sorted = [...stats.entries()].sort((a, b) =>
+    a[1].week - b[1].week || a[1].total - b[1].total || a[0].localeCompare(b[0]));
+  return sorted[0][0];
 }
