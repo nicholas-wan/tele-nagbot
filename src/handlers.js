@@ -278,6 +278,7 @@ export async function handleUpdate(env, update) {
     if (cmd === 'resume') return await cmdPauseResume(env, chatId, args, tz, false);
     if (cmd === 'skip') return await cmdSkip(env, chatId, args, tz);
     if (cmd === 'done') return await cmdDone(env, chatId, args, by, tz);
+    if (cmd === 'poke' || cmd === 'nagall') return await cmdPoke(env, chatId);
     if (cmd === 'stats') return await cmdStats(env, chatId, tz, args);
     if (cmd === 'makestickers') return await cmdMakeStickers(env, chatId, msg);
     if (cmd === 'delsticker') return await cmdDelSticker(env, chatId, args);
@@ -297,7 +298,7 @@ async function cmdHelp(env, chatId) {
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
     '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
-    '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
+    '/list · /done N · /delete N · /pause N · /resume N · /skip N · /poke (re-nag everything now)\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag, or react 👍 on it — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
     '🤝 <code>done together</code> (or the Both button) credits everyone; <code>done with @jane</code> picks who\n' +
@@ -747,6 +748,28 @@ async function cmdDone(env, chatId, args, by, tz) {
   const won = await completeFiring(env, firing, r, credit, tz);
   if (!won) return sendMessage(env, chatId, '😼 Someone beat you to it — already handled.');
   await sendMessage(env, chatId, `😻 <b>${esc(r.text)}</b> — done by ${esc(credit)}. Purrs all around.`);
+}
+
+// /poke: re-send every outstanding nag right now, loud. Doesn't advance the
+// escalation ladder or consume snoozes — it's a manual "oi, everyone".
+async function cmdPoke(env, chatId) {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
+  ).bind(chatId).all();
+  if (!results.length) {
+    return sendMessage(env, chatId, '😺 Nothing is outstanding — /list for what\'s coming up.');
+  }
+  for (const f of results) {
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
+    if (!r) continue;
+    if (f.last_message_id) await deleteMessage(env, chatId, f.last_message_id);
+    if (f.last_sticker_id) await deleteMessage(env, chatId, f.last_sticker_id);
+    const sent = await sendMessage(env, chatId, nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id));
+    const upd = await env.DB.prepare(
+      "UPDATE firings SET last_message_id = ?, last_sticker_id = NULL WHERE id = ? AND state = 'nagging'"
+    ).bind(sent.ok ? sent.result.message_id : null, f.id).run();
+    if (!upd.meta.changes && sent.ok) await deleteMessage(env, chatId, sent.result.message_id);
+  }
 }
 
 async function cmdMakeStickers(env, chatId, msg) {
