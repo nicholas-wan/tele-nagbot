@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS settings (
   paused_until INTEGER                  -- vacation mode: everything muted until this UTC ms
 );
 
+-- Recently /delete-d reminders, kept for a day so Undo can restore them.
+CREATE TABLE IF NOT EXISTS trash (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER NOT NULL,
+  payload TEXT NOT NULL,                -- JSON snapshot of the reminders row
+  created_at INTEGER NOT NULL
+);
+
 -- Which cat appears in a given sticker (keyed by Telegram's stable file id).
 CREATE TABLE IF NOT EXISTS sticker_tags (
   file_uid TEXT PRIMARY KEY,

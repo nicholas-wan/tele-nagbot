@@ -15,8 +15,11 @@ export async function runCron(env) {
     weekly: () => sendWeeklyRecap(env, now),
     fire: () => fireDueReminders(env, now),
     renag: () => renagPending(env, now),
-    // Abandoned time-choice prompts expire after a day.
-    drafts: () => env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(now - 86400000).run(),
+    // Abandoned time-choice prompts and /delete undo stashes expire after a day.
+    drafts: async () => {
+      await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(now - 86400000).run();
+      await env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(now - 86400000).run();
+    },
     retention: () => pruneOldFirings(env, now),
   };
   for (const [name, step] of Object.entries(steps)) {

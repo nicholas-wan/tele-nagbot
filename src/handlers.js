@@ -594,7 +594,12 @@ async function cmdDelete(env, chatId, args) {
   }
   await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
   await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-  await sendMessage(env, chatId, `🗑️ Deleted #${r.display_num} <s>${esc(r.text)}</s>`);
+  // Stash the row for a day so the Undo button can bring it back.
+  const stash = await env.DB.prepare(
+    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
+  ).bind(chatId, JSON.stringify(r), Date.now()).run();
+  await sendMessage(env, chatId, `🗑️ Deleted #${r.display_num} <s>${esc(r.text)}</s>`,
+    { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` }]] });
   await updateDashboard(env, chatId);
 }
 
@@ -978,6 +983,33 @@ async function handleCallback(env, cb) {
     await editMessage(env, r.chat_id, cb.message.message_id, `↩️ Undone — <s>${esc(r.text)}</s>`);
     await updateDashboard(env, r.chat_id);
     return answerCallback(env, cb.id, 'Undone');
+  }
+
+  // Undo a /delete: restore the stashed reminder row.
+  const tr = (cb.data || '').match(/^t:(\d+)$/);
+  if (tr && cb.message) {
+    const row = await env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?')
+      .bind(+tr[1], cb.message.chat.id).first();
+    if (!row) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
+    const r = JSON.parse(row.payload);
+    // Reclaim the old number if still free, else take the smallest unused.
+    const { results } = await env.DB.prepare('SELECT display_num FROM reminders WHERE chat_id = ?').bind(r.chat_id).all();
+    const used = new Set(results.map((x) => x.display_num));
+    let num = r.display_num;
+    if (used.has(num)) { num = 1; while (used.has(num)) num++; }
+    await env.DB.prepare(
+      `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
+         schedule_detail, next_fire_at, nag_intervals, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      r.chat_id, num, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
+      r.schedule_detail, r.next_fire_at != null ? r.next_fire_at : Date.now(), r.nag_intervals,
+      r.created_by, r.created_at
+    ).run();
+    await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
+    await updateDashboard(env, r.chat_id);
+    await editMessage(env, r.chat_id, cb.message.message_id, `↩️ Restored #${num} <b>${esc(r.text)}</b>`);
+    return answerCallback(env, cb.id, 'Restored 😺');
   }
 
   // Snooze preset picked (or Back to the main buttons).
