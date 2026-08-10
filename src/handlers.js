@@ -337,7 +337,7 @@ async function startWizard(env, chatId, partial) {
         partial.kind === 'interval' ? `every ${partial.detail.days} days` : 'daily'})`;
   const sent = await sendMessage(env, chatId,
     `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
-    'Tap an option, or ✏️ to type your own time.',
+    'Tap an option, or reply to this message with a custom time.',
     { inline_keyboard: keyboard }
   );
   if (sent.ok) {
@@ -369,18 +369,12 @@ async function handlePlainText(env, msg) {
     if (all.results.length === 1) return handleNagReply(env, msg, all.results[0]);
   }
 
-  let draft = null;
-  if (replyId) {
-    draft = await env.DB.prepare(
-      'SELECT * FROM drafts WHERE chat_id = ? AND (prompt_msg_id = ? OR wizard_msg_id = ?)'
-    ).bind(chatId, replyId, replyId).first();
-  }
-  const explicit = !!draft;
-  if (!draft) {
-    draft = await env.DB.prepare(
-      'SELECT * FROM drafts WHERE chat_id = ? AND created_at > ? ORDER BY id DESC LIMIT 1'
-    ).bind(chatId, now - 15 * 60000).first();
-  }
+  // A draft only accepts times sent as a reply to its wizard/prompt message —
+  // never plucked out of ambient chat ("movie at 8pm" must stay chat).
+  if (!replyId) return;
+  const draft = await env.DB.prepare(
+    'SELECT * FROM drafts WHERE chat_id = ? AND (prompt_msg_id = ? OR wizard_msg_id = ?)'
+  ).bind(chatId, replyId, replyId).first();
   if (!draft) return;
 
   const tz = await getTz(env, chatId);
@@ -389,11 +383,11 @@ async function handlePlainText(env, msg) {
     // Dummy task word satisfies the parser; we only want the schedule.
     parsed = parseRemind(`x ${msg.text}`, `x ${msg.text}`, [], now, tz);
   } catch (err) {
-    if (explicit && err instanceof ParseError) {
+    if (err instanceof ParseError) {
       await sendMessage(env, chatId,
-        'I couldn\'t read that as a time — try <code>10am</code>, <code>tomorrow 9:30am</code>, or <code>in 30m</code>.');
+        '😿 The cats couldn\'t read that as a time — try <code>10am</code>, <code>tomorrow 9:30am</code>, or <code>in 30m</code>.');
     }
-    return; // non-time chatter near a popup is ignored silently
+    return;
   }
 
   // The typed reply carries the time; the draft carries everything else.
