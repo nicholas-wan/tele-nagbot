@@ -12,12 +12,12 @@ Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers fre
 /usepack <link>   sticker pack for nags · /tags · /tagsticker N latte · /autotag · /makestickers · /delsticker N
 ```
 
-No time given → inline time-picker (tap or type a custom time). Reply `done` or `snooze 2h` to any nag. Creation confirmations have Undo.
+No time given → inline time-picker (tap, or reply with a custom time). Reply `done` or `snooze 2h` to any nag (max 3 snoozes, capped at the 24h expiry). Creation confirmations have Undo.
 
 ## Behavior
 
 - Nags re-send at 15/30/60 min (or `nag:` pace), deleting the previous nag — one live nag per chore. First re-nag silent, later ones ping. 24h unacked → expired 🪦.
-- Sticker on first nag and on Done; nag lines name the cat on the sticker (per-sticker tags in D1).
+- Sticker on first nag and on Done (once a pack exists via `/makestickers` or `/usepack`); nag lines name the cat on the sticker (per-sticker tags in D1).
 - Pinned "Outstanding chores" dashboard, silently edited; needs bot admin with Pin messages.
 - Daily 8am digest and Sunday 8pm weekly wrap, both silent. Default timezone Asia/Singapore.
 

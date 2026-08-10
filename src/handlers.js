@@ -11,6 +11,9 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MAX_SNOOZES = 3;
 export const EXPIRE_AFTER_MS = 24 * 3600000;
 
+// Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
+let botUsername = null;
+
 export async function getTz(env, chatId) {
   const row = await env.DB.prepare('SELECT tz FROM settings WHERE chat_id = ?').bind(chatId).first();
   return row ? row.tz : 'Asia/Singapore';
@@ -221,9 +224,17 @@ export async function handleUpdate(env, update) {
   if (msg.new_chat_members && msg.new_chat_members.length) return handleNewMembers(env, msg);
   if (!msg.text) return;
   if (!msg.text.startsWith('/')) return handlePlainText(env, msg);
-  const m = msg.text.match(/^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/);
+  const m = msg.text.match(/^\/(\w+)(?:@(\w+))?\s*([\s\S]*)$/);
   if (!m) return;
-  const [, cmdRaw, args] = m;
+  const [, cmdRaw, atBot, args] = m;
+  // "/list@otherbot" is someone else's command — stay quiet.
+  if (atBot) {
+    if (!botUsername) {
+      const me = await tg(env, 'getMe', {});
+      if (me.ok) botUsername = me.result.username;
+    }
+    if (botUsername && atBot.toLowerCase() !== botUsername.toLowerCase()) return;
+  }
   const cmd = cmdRaw.toLowerCase();
   const chatId = msg.chat.id;
   const tz = await getTz(env, chatId);
@@ -249,7 +260,7 @@ export async function handleUpdate(env, update) {
   } catch (err) {
     if (err instanceof ParseError) return sendMessage(env, chatId, esc(err.message));
     console.log(`command /${cmd} failed: ${err.stack || err}`);
-    return sendMessage(env, chatId, 'Something went wrong handling that. 🐛');
+    return sendMessage(env, chatId, '🙀 The cats knocked something over — that didn\'t work. Try again?');
   }
 }
 
@@ -257,10 +268,12 @@ async function cmdHelp(env, chatId, tz) {
   await sendMessage(env, chatId,
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
-    '(also: <code>every mon,thu 8am</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
-    '/list · /delete N · /pause N · /done N · /stats\n' +
-    'Reply <code>done</code> or <code>snooze 2h</code> to any nag.\n' +
-    `/usepack &lt;link&gt; — nag stickers · /tz — timezone (<code>${esc(tz)}</code>)`
+    '(also: <code>every mon,thu 8am</code>, <code>every 8 days 9pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
+    '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
+    'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
+    '/stats — weekly board · /stats all — 6-month log\n' +
+    'Stickers: /usepack &lt;link&gt; · /makestickers · /tags · /tagsticker N latte · /autotag · /delsticker N\n' +
+    `/tz — timezone (<code>${esc(tz)}</code>)`
   );
 }
 
@@ -361,12 +374,20 @@ async function handlePlainText(env, msg) {
     ).bind(chatId, replyId).first();
     if (firing) return handleNagReply(env, msg, firing);
   }
-  // Bare "done" works when exactly one chore is nagging.
+  // Bare "done" works when exactly one chore is nagging; with several, the
+  // cats ask which instead of staying confusingly silent.
   if (/^done!*\s*$/i.test(msg.text)) {
     const all = await env.DB.prepare(
       "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
     ).bind(chatId).all();
     if (all.results.length === 1) return handleNagReply(env, msg, all.results[0]);
+    if (all.results.length > 1) {
+      const rows = await env.DB.prepare(
+        "SELECT r.display_num, r.text FROM firings f JOIN reminders r ON r.id = f.reminder_id WHERE f.chat_id = ? AND f.state = 'nagging' ORDER BY r.display_num"
+      ).bind(chatId).all();
+      return sendMessage(env, chatId, '😺 Mrow — which one?\n' +
+        rows.results.map((r) => `/done ${r.display_num} — ${esc(r.text)}`).join('\n'));
+    }
   }
 
   // A draft only accepts times sent as a reply to its wizard/prompt message —
@@ -476,7 +497,7 @@ async function cmdList(env, chatId, tz) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
   ).bind(chatId).all();
-  if (!results.length) return sendMessage(env, chatId, 'No reminders. Add one with /remind.');
+  if (!results.length) return sendMessage(env, chatId, '😺 No chores on the list. Add one with /remind.');
   const lines = results.map((r) => {
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const next = r.paused ? '⏸️ paused'
@@ -487,9 +508,9 @@ async function cmdList(env, chatId, tz) {
   await sendLong(env, chatId, lines.join('\n'));
 }
 
-async function findReminder(env, chatId, args) {
+async function findReminder(env, chatId, args, cmd = 'delete') {
   const num = parseInt(String(args).replace('#', '').trim(), 10);
-  if (!num) throw new ParseError('Give me a reminder number, e.g. /delete 3 (see /list).');
+  if (!num) throw new ParseError(`Give me a reminder number, e.g. /${cmd} 3 (see /list).`);
   const r = await env.DB.prepare(
     'SELECT * FROM reminders WHERE display_num = ? AND chat_id = ?'
   ).bind(num, chatId).first();
@@ -515,7 +536,7 @@ async function cmdDelete(env, chatId, args) {
 }
 
 async function cmdPauseResume(env, chatId, args, tz, pause) {
-  const r = await findReminder(env, chatId, args);
+  const r = await findReminder(env, chatId, args, pause ? 'pause' : 'resume');
   if (pause) {
     await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
     await sendMessage(env, chatId, `⏸️ Paused #${r.display_num} <b>${esc(r.text)}</b>. /resume ${r.display_num} to re-enable.`);
@@ -536,7 +557,7 @@ async function cmdPauseResume(env, chatId, args, tz, pause) {
 }
 
 async function cmdSkip(env, chatId, args, tz) {
-  const r = await findReminder(env, chatId, args);
+  const r = await findReminder(env, chatId, args, 'skip');
   if (r.schedule_kind === 'once' || !r.next_fire_at) {
     throw new ParseError(`#${r.display_num} is a one-off — use /delete ${r.display_num} instead.`);
   }
@@ -546,7 +567,7 @@ async function cmdSkip(env, chatId, args, tz) {
 }
 
 async function cmdDone(env, chatId, args, by, tz) {
-  const r = await findReminder(env, chatId, args);
+  const r = await findReminder(env, chatId, args, 'done');
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
@@ -659,6 +680,11 @@ async function cmdUsePack(env, chatId, args) {
 
 async function cmdTz(env, chatId, args) {
   const tz = args.trim();
+  if (!tz) {
+    const cur = await getTz(env, chatId);
+    return sendMessage(env, chatId,
+      `🌍 Timezone: <code>${esc(cur)}</code>. Change with /tz Europe/London (IANA name).`);
+  }
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: tz });
   } catch {
