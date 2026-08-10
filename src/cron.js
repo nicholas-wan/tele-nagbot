@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, sendLong, deleteMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
 
@@ -90,9 +90,11 @@ async function sendWeeklyRecap(env, now) {
       if (s.people.length) {
         const [winner, winnerItems] = s.people[0];
         const tie = s.people.length > 1 && s.people[1][1].length === winnerItems.length;
+        const streak = tie ? 0 : await winnerStreak(env, chat_id, tz, winner);
         lines.push(tie
           ? `It's a tie at ${winnerItems.length} ✅ each — the cats demand a tiebreaker chore.`
-          : `🥇 ${esc(winner)} takes the week with ${winnerItems.length} ✅!`);
+          : `🥇 ${esc(winner)} takes the week with ${winnerItems.length} ✅!` +
+            (streak >= 1 ? ` 🔥 ${streak + 1} weeks running!` : ''));
         for (const [who, items] of s.people) lines.push(`• ${esc(who)}: ${items.length} ✅`);
       }
       if (s.expired) lines.push(`🪦 ${s.expired} expired unclaimed. The cats saw everything.`);

@@ -853,6 +853,23 @@ export async function choreStats(env, chatId, since) {
   return { people, expired: expired.n, total: history.results.length };
 }
 
+// Consecutive past full weeks the given person won outright (ties break it).
+export async function winnerStreak(env, chatId, tz, leader) {
+  let streak = 0;
+  let start = weekStart(Date.now(), tz);
+  for (let w = 0; w < 26; w++) {
+    const end = start;
+    start -= 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
+    const { results } = await env.DB.prepare(
+      "SELECT done_by, COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'done' AND done_at > ? AND done_at <= ? GROUP BY done_by ORDER BY n DESC LIMIT 2"
+    ).bind(chatId, start, end).all();
+    if (!results.length || results[0].done_by !== leader) break;
+    if (results[1] && results[1].n === results[0].n) break;
+    streak++;
+  }
+  return streak;
+}
+
 async function cmdStats(env, chatId, tz, args = '') {
   if (/^\s*all\b/i.test(args)) return statsAll(env, chatId, tz);
 
@@ -863,10 +880,12 @@ async function cmdStats(env, chatId, tz, args = '') {
       '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday; /stats all for history.)');
   }
 
+  const streak = s.people.length ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
   const lines = [`🏆 <b>Weekly leaderboard</b> — week of ${fmtShort(since, tz).replace(/,.*$/, '')}`];
   s.people.forEach(([who, items], i) => {
     lines.push('');
-    lines.push(`${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅`);
+    const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
+    lines.push(`${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${fire}`);
     for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
       lines.push(`  ${choreEmoji(h.text)} ${esc(h.text)} — ${fmtShort(h.done_at, tz)}`);
     }
