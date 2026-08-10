@@ -200,7 +200,11 @@ function describeSchedule(r) {
     return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')} ${fmtTime(d.h, d.mi)}`;
   }
   if (r.schedule_kind === 'monthly') return `on the ${d.dom} at ${fmtTime(d.h, d.mi)}`;
-  if (r.schedule_kind === 'interval') return `every ${d.days} days at ${fmtTime(d.h, d.mi)}`;
+  if (r.schedule_kind === 'interval') {
+    const w = d.days % 7 === 0 ? d.days / 7 : 0;
+    return w ? `every ${w} week${w > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`
+             : `every ${d.days} days at ${fmtTime(d.h, d.mi)}`;
+  }
   return 'once';
 }
 
@@ -267,7 +271,7 @@ async function cmdHelp(env, chatId) {
   await sendMessage(env, chatId,
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
-    '(also: <code>every mon,thu 8am</code>, <code>every 8 days 9pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
+    '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
     '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
@@ -492,21 +496,39 @@ function scheduleFromCode(code, draft, now, tz) {
   return null;
 }
 
+// "today 9:00 PM" / "tomorrow 9:00 AM" / "Thu 8:00 AM" / "Aug 24, 9:00 PM".
+function fmtWhen(ms, tz) {
+  const time = fmtClock(ms, tz);
+  const t = localParts(ms, tz);
+  const today = localParts(Date.now(), tz);
+  const tomorrow = localParts(Date.now() + 86400000, tz);
+  const sameDay = (a, b) => a.y === b.y && a.mo === b.mo && a.d === b.d;
+  if (sameDay(t, today)) return `today ${time}`;
+  if (sameDay(t, tomorrow)) return `tomorrow ${time}`;
+  if (ms - Date.now() < 6 * 86400000) return `${DAY_NAMES[t.wd]} ${time}`;
+  return fmtShort(ms, tz);
+}
+
 async function cmdList(env, chatId, tz) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
   ).bind(chatId).all();
   if (!results.length) return sendMessage(env, chatId, '😺 No chores on the list. Add one with /remind.');
   const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
-  const vacation = st && st.paused_until && st.paused_until > Date.now()
-    ? [`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`] : [];
-  const lines = vacation.concat(results.map((r) => {
+  const lines = ['🐾 <b>Chores</b>'];
+  if (st && st.paused_until && st.paused_until > Date.now()) {
+    lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
+  }
+  for (const r of results) {
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
-    const next = r.paused ? '⏸️ paused'
-      : r.next_fire_at ? `next ${fmtLocal(r.next_fire_at, tz)}`
-      : 'nagging now';
-    return `#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b> — ${describeSchedule(r)}${who} · ${next}`;
-  }));
+    const status = r.paused ? '⏸️ paused'
+      : !r.next_fire_at ? '🔔 nagging now'
+      : r.schedule_kind === 'once' ? fmtWhen(r.next_fire_at, tz)
+      : `${describeSchedule(r)} · next ${fmtWhen(r.next_fire_at, tz)}`;
+    lines.push('');
+    lines.push(`#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${who}`);
+    lines.push(`      ${status}`);
+  }
   await sendLong(env, chatId, lines.join('\n'));
 }
 
