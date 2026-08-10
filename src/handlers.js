@@ -192,7 +192,19 @@ function describeSchedule(r) {
   return 'once';
 }
 
+// Household lock: only chats listed in ALLOWED_CHATS (comma-separated ids)
+// are served; everything else — stranger DMs included — is dropped silently.
+// An empty/missing var means no lock, so a config slip can't brick the bot.
+function chatAllowed(env, chatId) {
+  const allowed = String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!allowed.length) return true;
+  return chatId != null && allowed.includes(String(chatId));
+}
+
 export async function handleUpdate(env, update) {
+  const chat = (update.message && update.message.chat)
+    || (update.callback_query && update.callback_query.message && update.callback_query.message.chat);
+  if (!chatAllowed(env, chat && chat.id)) return;
   if (update.callback_query) return handleCallback(env, update.callback_query);
 
   const msg = update.message;

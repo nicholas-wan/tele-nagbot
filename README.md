@@ -37,5 +37,6 @@ No time given → inline time-picker (tap or type a custom time). Reply `done` o
 ## Ops
 
 - Deploy: `npx wrangler deploy` · logs: `npx wrangler tail`
+- Access: only chat ids in `ALLOWED_CHATS` (`wrangler.toml` `[vars]`) are served; all other chats are ignored.
 - Secrets: `BOT_TOKEN`, `WEBHOOK_SECRET`. After first deploy, visit `/setup?key=<WEBHOOK_SECRET>` (registers webhook + command menu).
 - Schema changes: `wrangler d1 execute nagbot --remote` with `--file=schema.sql` (new tables) or `--command "ALTER …"`.

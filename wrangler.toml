@@ -2,6 +2,11 @@ name = "nag-bot"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
+# Chats the bot will answer (comma-separated Telegram chat ids). Updates from
+# any other chat — including stranger DMs — are ignored before touching D1/AI.
+[vars]
+ALLOWED_CHATS = "-435466607"
+
 # Fires the scheduled handler every minute to send due reminders and re-nags.
 [triggers]
 crons = ["* * * * *"]
