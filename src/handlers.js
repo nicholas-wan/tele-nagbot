@@ -1,6 +1,6 @@
 // Webhook update handling: commands and inline-button callbacks.
 
-import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
+import { sendMessage, sendLong, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -484,7 +484,7 @@ async function cmdList(env, chatId, tz) {
       : 'nagging now';
     return `#${r.display_num} <b>${esc(r.text)}</b> — ${describeSchedule(r)}${who} · ${next}`;
   });
-  await sendMessage(env, chatId, lines.join('\n'));
+  await sendLong(env, chatId, lines.join('\n'));
 }
 
 async function findReminder(env, chatId, args) {
@@ -727,7 +727,7 @@ async function cmdStats(env, chatId, tz, args = '') {
   }
   lines.push('');
   lines.push('Resets Monday · /stats all for the 6-month log');
-  await sendMessage(env, chatId, lines.join('\n'));
+  await sendLong(env, chatId, lines.join('\n'));
 }
 
 async function statsAll(env, chatId, tz) {
@@ -770,7 +770,7 @@ async function statsAll(env, chatId, tz) {
     lines.push('');
     lines.push(`🪦 Expired unclaimed: ${expired.n}`);
   }
-  await sendMessage(env, chatId, lines.join('\n'));
+  await sendLong(env, chatId, lines.join('\n'));
 }
 
 async function handleCallback(env, cb) {
