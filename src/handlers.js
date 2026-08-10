@@ -241,7 +241,7 @@ export async function handleUpdate(env, update) {
   const by = senderName(msg.from);
 
   try {
-    if (cmd === 'start' || cmd === 'help') return await cmdHelp(env, chatId, tz);
+    if (cmd === 'start' || cmd === 'help') return await cmdHelp(env, chatId);
     if (cmd === 'remind') return await cmdRemind(env, chatId, args, msg, tz, by);
     if (cmd === 'list') return await cmdList(env, chatId, tz);
     if (cmd === 'delete') return await cmdDelete(env, chatId, args);
@@ -249,7 +249,6 @@ export async function handleUpdate(env, update) {
     if (cmd === 'resume') return await cmdPauseResume(env, chatId, args, tz, false);
     if (cmd === 'skip') return await cmdSkip(env, chatId, args, tz);
     if (cmd === 'done') return await cmdDone(env, chatId, args, by, tz);
-    if (cmd === 'tz') return await cmdTz(env, chatId, args);
     if (cmd === 'stats') return await cmdStats(env, chatId, tz, args);
     if (cmd === 'makestickers') return await cmdMakeStickers(env, chatId, msg);
     if (cmd === 'delsticker') return await cmdDelSticker(env, chatId, args);
@@ -264,7 +263,7 @@ export async function handleUpdate(env, update) {
   }
 }
 
-async function cmdHelp(env, chatId, tz) {
+async function cmdHelp(env, chatId) {
   await sendMessage(env, chatId,
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
@@ -272,8 +271,7 @@ async function cmdHelp(env, chatId, tz) {
     '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
     '/stats — weekly board · /stats all — 6-month log\n' +
-    'Stickers: /usepack &lt;link&gt; · /makestickers · /tags · /tagsticker N latte · /autotag · /delsticker N\n' +
-    `/tz — timezone (<code>${esc(tz)}</code>)`
+    'Stickers: /usepack &lt;link&gt; · /makestickers · /tags · /tagsticker N latte · /autotag · /delsticker N'
   );
 }
 
@@ -676,24 +674,6 @@ async function cmdUsePack(env, chatId, args) {
   ).bind(chatId, pack.name).run();
   await sendMessage(env, chatId,
     `🐾 Nag stickers switched to <b>${esc(pack.title)}</b> (${pack.count} stickers).`);
-}
-
-async function cmdTz(env, chatId, args) {
-  const tz = args.trim();
-  if (!tz) {
-    const cur = await getTz(env, chatId);
-    return sendMessage(env, chatId,
-      `🌍 Timezone: <code>${esc(cur)}</code>. Change with /tz Europe/London (IANA name).`);
-  }
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-  } catch {
-    throw new ParseError('Not a valid timezone. Use an IANA name like America/New_York or Europe/London.');
-  }
-  await env.DB.prepare(
-    'INSERT INTO settings (chat_id, tz) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET tz = excluded.tz'
-  ).bind(chatId, tz).run();
-  await sendMessage(env, chatId, `🌍 Timezone set to <code>${esc(tz)}</code>.`);
 }
 
 const STATS_MAX_PER_PERSON = 15;
