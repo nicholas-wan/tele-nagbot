@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS drafts (
 
 CREATE TABLE IF NOT EXISTS settings (
   chat_id INTEGER PRIMARY KEY,
-  tz TEXT NOT NULL DEFAULT 'America/New_York',
+  tz TEXT NOT NULL DEFAULT 'Asia/Singapore',
   sticker_set TEXT,                     -- NULL = the bot's own Latte & Mocha pack
   last_digest TEXT,                     -- local Y-M-D of the last morning digest sent
   last_weekly TEXT,                     -- local Y-M-D of the last Sunday recap sent

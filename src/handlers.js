@@ -13,7 +13,7 @@ export const EXPIRE_AFTER_MS = 24 * 3600000;
 
 export async function getTz(env, chatId) {
   const row = await env.DB.prepare('SELECT tz FROM settings WHERE chat_id = ?').bind(chatId).first();
-  return row ? row.tz : 'America/New_York';
+  return row ? row.tz : 'Asia/Singapore';
 }
 
 function senderName(from) {
@@ -128,7 +128,7 @@ export async function updateDashboard(env, chatId) {
       return;
     }
 
-    const tz = (row && row.tz) || 'America/New_York';
+    const tz = (row && row.tz) || 'Asia/Singapore';
     const lines = ['📋 <b>Outstanding chores</b>'];
     for (const r of results) {
       const who = r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
