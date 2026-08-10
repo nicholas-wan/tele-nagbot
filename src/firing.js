@@ -2,7 +2,7 @@
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
 import { sendMessage } from './tg.js';
-import { nextOccurrence, deferQuietHours } from './time.js';
+import { nextOccurrence, deferQuietHours, weekStart } from './time.js';
 import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
 
@@ -15,6 +15,17 @@ export async function fireReminder(env, r, now, tz) {
     'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
   ).bind(next, r.id, r.next_fire_at).run();
   if (!claim.meta.changes) return;
+
+  // Rotation: this occurrence goes to whoever has the fewest ✅ this week.
+  if (JSON.parse(r.schedule_detail).rotate) {
+    const who = await pickRotation(env, r.chat_id, tz);
+    if (who) {
+      await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
+        .bind(who, r.id).run();
+      r.assignee_name = who;
+      r.assignee_user_id = null;
+    }
+  }
 
   // A previous occurrence still nagging when the next one fires gets
   // quietly expired so only one live nag exists per reminder.
@@ -35,4 +46,18 @@ export async function fireReminder(env, r, now, tz) {
     .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat, firingId).run();
 
   await updateDashboard(env, r.chat_id);
+}
+
+// Household members = everyone who has ever tapped Done here (6-month window).
+// Least ✅ this week wins the chore; ties go to the lower all-time count.
+async function pickRotation(env, chatId, tz) {
+  const { results } = await env.DB.prepare(
+    `SELECT done_by, COUNT(*) AS total, SUM(CASE WHEN done_at > ? THEN 1 ELSE 0 END) AS week
+     FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL
+     GROUP BY done_by`
+  ).bind(weekStart(Date.now(), tz), chatId).all();
+  if (!results.length) return null;
+  results.sort((a, b) => a.week - b.week || a.total - b.total
+    || String(a.done_by).localeCompare(String(b.done_by)));
+  return results[0].done_by;
 }

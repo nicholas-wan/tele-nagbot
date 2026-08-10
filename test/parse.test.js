@@ -95,6 +95,13 @@ describe('other forms', () => {
     expect(parse('trash 7pm nag:10m').nagIntervals).toEqual([10]);
   });
 
+  it('rotate flag', () => {
+    const r = parse('litterbox daily 9pm rotate');
+    expect(r.detail.rotate).toBe(true);
+    expect(r.text).toBe('litterbox');
+    expect(parse('dishes now rotate').detail).toMatchObject({ rotate: true });
+  });
+
   it('weekly multi-day', () => {
     expect(parse('plants every mon,thu 8am')).toMatchObject({ kind: 'weekly', detail: { days: [1, 4] } });
   });

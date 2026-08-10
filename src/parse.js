@@ -54,6 +54,14 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   let detail = {};
   let defaultH = null; // "every morning/evening" implies a time-of-day
 
+  // "rotate": each occurrence goes to whoever has the fewest ✅ this week.
+  let rotate = false;
+  const rotM = args.match(/\brotate\b/i);
+  if (rotM) {
+    rotate = true;
+    args = args.replace(rotM[0], ' ');
+  }
+
   const otherM = args.match(/\bevery\s+other\s+(day|week)\b/i);
   const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
   const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
@@ -107,7 +115,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     const ms = /^half/i.test(relWordM[1]) ? 30 * 60000 : 60 * 60000;
     args = args.replace(relWordM[0], ' ');
     return finish(args, {
-      kind: 'once', detail: {}, firstFireAt: nowMs + ms,
+      kind: 'once', detail: rotate ? { rotate } : {}, firstFireAt: nowMs + ms,
       assigneeName, assigneeUserId, nagIntervals,
     });
   }
@@ -119,7 +127,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     const ms = /^m/i.test(relM[2]) ? n * 60000 : n * 3600000;
     args = args.replace(relM[0], ' ');
     return finish(args, {
-      kind: 'once', detail: {}, firstFireAt: nowMs + ms,
+      kind: 'once', detail: rotate ? { rotate } : {}, firstFireAt: nowMs + ms,
       assigneeName, assigneeUserId, nagIntervals,
     });
   }
@@ -129,7 +137,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   if (nowKw && kind === 'once') {
     args = args.replace(nowKw[0], ' ');
     return finish(args, {
-      kind: 'once', detail: {}, firstFireAt: nowMs,
+      kind: 'once', detail: rotate ? { rotate } : {}, firstFireAt: nowMs,
       assigneeName, assigneeUserId, nagIntervals,
     });
   }
@@ -180,6 +188,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   }
   detail.h = h;
   detail.mi = mi;
+  if (rotate) detail.rotate = true;
 
   let firstFireAt;
   if (kind === 'once') {

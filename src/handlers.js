@@ -268,7 +268,7 @@ async function cmdHelp(env, chatId) {
   await sendMessage(env, chatId,
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
-    '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
+    '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
     '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
@@ -553,13 +553,14 @@ async function choreListHtml(env, chatId, tz) {
     lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
   }
   for (const r of results) {
+    const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const status = r.paused ? '⏸️ paused'
       : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
       : r.schedule_kind === 'once' ? fmtWhen(r.next_fire_at, tz)
       : `${describeSchedule(r)} · next ${fmtWhen(r.next_fire_at, tz)}`;
     lines.push('');
-    lines.push(`#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${who}`);
+    lines.push(`#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
     lines.push(`      ${status}`);
   }
   return lines.join('\n');
