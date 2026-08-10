@@ -16,6 +16,7 @@ export async function runCron(env) {
     renag: () => renagPending(env, now),
     // Abandoned time-choice prompts expire after a day.
     drafts: () => env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(now - 86400000).run(),
+    retention: () => pruneOldFirings(env, now),
   };
   for (const [name, step] of Object.entries(steps)) {
     try {
@@ -24,6 +25,16 @@ export async function runCron(env) {
       console.log(`cron step ${name} failed: ${e.stack || e}`);
     }
   }
+}
+
+// Once a day (the 03:00 UTC tick): drop settled firings older than the
+// 6-month /stats window so the table doesn't grow forever on the free tier.
+async function pruneOldFirings(env, now) {
+  const d = new Date(now);
+  if (d.getUTCHours() !== 3 || d.getUTCMinutes() !== 0) return;
+  await env.DB.prepare(
+    "DELETE FROM firings WHERE state IN ('done', 'expired') AND fired_at < ?"
+  ).bind(now - 183 * 86400000).run();
 }
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.

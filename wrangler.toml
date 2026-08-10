@@ -19,3 +19,7 @@ database_id = "d5ffcebe-7dff-4ada-8ae4-925b0175c3a8"
 # Vision model for /autotag (classifying which cat is on each sticker).
 [ai]
 binding = "AI"
+
+# Persisted Workers Logs, so "why didn't it nag?" is answerable after the fact.
+[observability]
+enabled = true

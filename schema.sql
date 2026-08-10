@@ -63,3 +63,5 @@ CREATE TABLE IF NOT EXISTS sticker_tags (
 
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (next_fire_at) WHERE paused = 0;
 CREATE INDEX IF NOT EXISTS idx_firings_nag ON firings (next_nag_at) WHERE state = 'nagging';
+-- Stats, dashboard, digest, and recap all filter firings by chat + state.
+CREATE INDEX IF NOT EXISTS idx_firings_chat ON firings (chat_id, state);
