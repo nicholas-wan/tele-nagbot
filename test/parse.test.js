@@ -99,6 +99,13 @@ describe('other forms', () => {
     expect(parse('plants every mon,thu 8am')).toMatchObject({ kind: 'weekly', detail: { days: [1, 4] } });
   });
 
+  it('every N weeks becomes an N*7-day interval', () => {
+    const r = parse('cat fountain every 2 weeks 7pm');
+    expect(r).toMatchObject({ kind: 'interval', detail: { days: 14 } });
+    expect(r.text).toBe('cat fountain');
+    expect(parse('filters every 1 week 9am')).toMatchObject({ kind: 'interval', detail: { days: 7 } });
+  });
+
   it('missing time raises the wizard with the partial intact', () => {
     try {
       parse('take out trash daily');

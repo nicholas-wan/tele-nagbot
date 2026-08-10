@@ -54,7 +54,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   let detail = {};
 
   const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
-  const intervalM = args.match(/\bevery\s+(\d+)\s+days?\b/i);
+  const intervalM = args.match(/\bevery\s+(\d+)\s+(days?|weeks?)\b/i);
   const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_WORD}(?:\\s*,\\s*${DAY_WORD})*)\\b`, 'i'));
   // Bare "on the Nth" only counts as a schedule when what follows can't be
   // prose ("on the 2nd floor" stays chore text); "monthly on the Nth" always.
@@ -65,8 +65,8 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     kind = 'daily';
     args = args.replace(dailyM[0], ' ');
   } else if (intervalM) {
-    const days = +intervalM[1];
-    if (days < 1 || days > 365) throw new ParseError('Every how many days? 1–365.');
+    const days = +intervalM[1] * (/^w/i.test(intervalM[2]) ? 7 : 1);
+    if (days < 1 || days > 365) throw new ParseError('Every how many days? 1–365 (or up to 52 weeks).');
     kind = days === 1 ? 'daily' : 'interval';
     if (kind === 'interval') detail.days = days;
     args = args.replace(intervalM[0], ' ');

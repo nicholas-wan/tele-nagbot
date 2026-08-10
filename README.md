@@ -6,7 +6,7 @@ Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers fre
 
 ```
 /remind trash 7pm daily · @jane dishes now · plumber in 20m
-        every mon,thu 8am · every 8 days 9pm · on the 1st · tomorrow 9:30am · nag:10m
+        every mon,thu 8am · every 8 days 9pm · every 2 weeks 7pm · on the 1st · tomorrow 9:30am · nag:10m
 /list  /delete N  /pause N  /resume N  /skip N  /done N
 /pause all 14     vacation mode: mute everything for N days (auto-resumes) · /resume all
 /stats            weekly leaderboard (resets Monday) · /stats all = 6-month log
