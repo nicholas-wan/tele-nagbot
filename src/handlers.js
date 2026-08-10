@@ -505,7 +505,7 @@ async function cmdList(env, chatId, tz) {
     const next = r.paused ? '⏸️ paused'
       : r.next_fire_at ? `next ${fmtLocal(r.next_fire_at, tz)}`
       : 'nagging now';
-    return `#${r.display_num} <b>${esc(r.text)}</b> — ${describeSchedule(r)}${who} · ${next}`;
+    return `#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b> — ${describeSchedule(r)}${who} · ${next}`;
   }));
   await sendLong(env, chatId, lines.join('\n'));
 }
