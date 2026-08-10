@@ -6,6 +6,7 @@ import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zone
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
+import { suggestSchedule } from './ai.js';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MAX_SNOOZES = 3;
@@ -280,7 +281,7 @@ async function cmdRemind(env, chatId, args, msg, tz, by) {
   try {
     p = parseRemind(args, msg.text, msg.entities, now, tz);
   } catch (err) {
-    if (err instanceof NoTimeError) return startWizard(env, chatId, err.partial);
+    if (err instanceof NoTimeError) return startWizard(env, chatId, err.partial, args, tz);
     throw err;
   }
   const { id, html } = await createReminder(env, chatId, p, by, tz);
@@ -318,15 +319,25 @@ async function createReminder(env, chatId, p, by, tz) {
 }
 
 // No time given: park the parsed pieces as a draft and offer tap-to-choose
-// times instead of an error.
-async function startWizard(env, chatId, partial) {
+// times instead of an error. Workers AI gets one shot at guessing the intent;
+// a valid guess becomes the top button — applied only if someone taps it.
+async function startWizard(env, chatId, partial, rawArgs, tz) {
+  let ai = null;
+  if (rawArgs && env.AI) {
+    try {
+      ai = await suggestSchedule(env, rawArgs, tz, Date.now());
+    } catch (e) {
+      console.log(`ai suggest failed: ${e}`);
+    }
+  }
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       schedule_detail, nag_intervals, ai_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
-    JSON.stringify(partial.detail), JSON.stringify(partial.nagIntervals), Date.now()
+    JSON.stringify(partial.detail), JSON.stringify(partial.nagIntervals),
+    ai ? JSON.stringify(ai) : null, Date.now()
   ).run();
   const id = res.meta.last_row_id;
 
@@ -341,6 +352,7 @@ async function startWizard(env, chatId, partial) {
         [btn('8am', 'h8'), btn('12pm', 'h12'), btn('7pm', 'h19'), btn('9pm', 'h21')],
         [btn('✏️ Type a time', 'custom')],
       ];
+  if (ai) keyboard.unshift([btn(`✨ ${ai.label}`, 'ai')]);
 
   const kindNote = partial.kind === 'once' ? '' :
     ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
@@ -903,7 +915,20 @@ async function handleCallback(env, cb) {
       }
       return answerCallback(env, cb.id, 'Type the time as a reply ⏰');
     }
-    const sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
+    let sched;
+    if (wiz[2] === 'ai') {
+      // Apply the confirmed AI suggestion; recompute recurring first-fires so
+      // a late tap doesn't schedule into the past.
+      let ai = null;
+      try { ai = draft.ai_json && JSON.parse(draft.ai_json); } catch { /* fall through */ }
+      if (!ai) return answerCallback(env, cb.id, 'That suggestion expired — pick a time below.');
+      const firstFireAt = ai.kind === 'once'
+        ? ai.firstFireAt
+        : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
+      sched = { kind: ai.kind, detail: ai.detail, firstFireAt };
+    } else {
+      sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
+    }
     if (!sched) return answerCallback(env, cb.id, '');
     const { id: newId, html } = await createReminder(env, draft.chat_id, {
       text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,

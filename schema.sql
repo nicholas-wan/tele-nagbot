@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   nag_intervals TEXT NOT NULL,
   wizard_msg_id INTEGER,                -- the time-picker popup message
   prompt_msg_id INTEGER,                -- the "reply with a time" force-reply prompt
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  ai_json TEXT                          -- validated Workers-AI schedule suggestion, applied only on tap
 );
 
 CREATE TABLE IF NOT EXISTS settings (
