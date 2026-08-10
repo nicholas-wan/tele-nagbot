@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS settings (
   sticker_set TEXT,                     -- NULL = the bot's own Latte & Mocha pack
   last_digest TEXT,                     -- local Y-M-D of the last morning digest sent
   last_weekly TEXT,                     -- local Y-M-D of the last Sunday recap sent
-  dashboard_msg_id INTEGER              -- pinned "outstanding chores" message
+  dashboard_msg_id INTEGER,             -- pinned "outstanding chores" message
+  paused_until INTEGER                  -- vacation mode: everything muted until this UTC ms
 );
 
 -- Which cat appears in a given sticker (keyed by Telegram's stable file id).

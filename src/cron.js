@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, sendLong, deleteMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart } from './time.js';
 
@@ -10,6 +10,7 @@ export async function runCron(env) {
   const now = Date.now();
   // Each step isolated: one failing must not starve the ones after it.
   const steps = {
+    wake: () => wakeLapsedPauses(env, now),
     digests: () => sendDigests(env, now),
     weekly: () => sendWeeklyRecap(env, now),
     fire: () => fireDueReminders(env, now),
@@ -27,6 +28,28 @@ export async function runCron(env) {
   }
 }
 
+// Vacation mode ("/pause all N"): end any chat pause whose deadline passed.
+async function wakeLapsedPauses(env, now) {
+  const { results } = await env.DB.prepare(
+    'SELECT chat_id FROM settings WHERE paused_until IS NOT NULL AND paused_until <= ?'
+  ).bind(now).all();
+  for (const { chat_id } of results) {
+    try {
+      await wakeChat(env, chat_id, await getTz(env, chat_id));
+    } catch (e) {
+      console.log(`wake for chat ${chat_id} failed: ${e.stack || e}`);
+    }
+  }
+}
+
+// Chats currently in vacation mode; everything below skips them.
+async function pausedChats(env, now) {
+  const { results } = await env.DB.prepare(
+    'SELECT chat_id FROM settings WHERE paused_until > ?'
+  ).bind(now).all();
+  return new Set(results.map((r) => r.chat_id));
+}
+
 // Once a day (the 03:00 UTC tick): drop settled firings older than the
 // 6-month /stats window so the table doesn't grow forever on the free tier.
 async function pruneOldFirings(env, now) {
@@ -39,9 +62,11 @@ async function pruneOldFirings(env, now) {
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.
 async function sendWeeklyRecap(env, now) {
+  const paused = await pausedChats(env, now);
   const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all();
   for (const { chat_id } of results) {
     try {
+      if (paused.has(chat_id)) continue;
       const tz = await getTz(env, chat_id);
       const p = localParts(now, tz);
       if (p.wd !== 0 || p.h !== 20) continue;
@@ -79,9 +104,11 @@ async function sendWeeklyRecap(env, now) {
 // 8am local: one summary of the day's chores per chat. Skipped when there is
 // nothing due today and nothing still nagging.
 async function sendDigests(env, now) {
+  const paused = await pausedChats(env, now);
   const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all();
   for (const { chat_id } of results) {
     try {
+      if (paused.has(chat_id)) continue;
       const tz = await getTz(env, chat_id);
       const p = localParts(now, tz);
       if (p.h !== 8) continue;
@@ -122,8 +149,10 @@ async function fireDueReminders(env, now) {
     'SELECT * FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?'
   ).bind(now).all();
 
+  const paused = await pausedChats(env, now);
   for (const r of results) {
     try {
+      if (paused.has(r.chat_id)) continue;
       const tz = await getTz(env, r.chat_id);
       await fireReminder(env, r, now, tz);
     } catch (e) {
@@ -139,8 +168,10 @@ async function renagPending(env, now) {
     "SELECT * FROM firings WHERE state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)"
   ).bind(now, now - EXPIRE_AFTER_MS).all();
 
+  const paused = await pausedChats(env, now);
   for (const f of results) {
     try {
+      if (paused.has(f.chat_id)) continue; // vacation freezes nags and expiry
       const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
       if (!r) {
         await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?").bind(f.id).run();

@@ -269,6 +269,7 @@ async function cmdHelp(env, chatId) {
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
     '(also: <code>every mon,thu 8am</code>, <code>every 8 days 9pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
     '/list · /done N · /delete N · /pause N · /resume N · /skip N\n' +
+    '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
     '/stats — weekly board · /stats all — 6-month log\n' +
     'Stickers: /usepack &lt;link&gt; · /makestickers · /tags · /tagsticker N latte · /autotag · /delsticker N'
@@ -496,13 +497,16 @@ async function cmdList(env, chatId, tz) {
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
   ).bind(chatId).all();
   if (!results.length) return sendMessage(env, chatId, '😺 No chores on the list. Add one with /remind.');
-  const lines = results.map((r) => {
+  const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
+  const vacation = st && st.paused_until && st.paused_until > Date.now()
+    ? [`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`] : [];
+  const lines = vacation.concat(results.map((r) => {
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const next = r.paused ? '⏸️ paused'
       : r.next_fire_at ? `next ${fmtLocal(r.next_fire_at, tz)}`
       : 'nagging now';
     return `#${r.display_num} <b>${esc(r.text)}</b> — ${describeSchedule(r)}${who} · ${next}`;
-  });
+  }));
   await sendLong(env, chatId, lines.join('\n'));
 }
 
@@ -533,7 +537,59 @@ async function cmdDelete(env, chatId, args) {
   await updateDashboard(env, chatId);
 }
 
+// Vacation mode: "/pause all 14" mutes everything for N days (auto-resumes),
+// "/resume all" ends it early. Wake-up rolls recurring chores to their next
+// natural slot and quietly clears pre-vacation nags — no flood on return.
+async function cmdPauseResumeAll(env, chatId, args, tz, pause) {
+  if (!pause) {
+    const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
+    if (!st || !st.paused_until || st.paused_until <= Date.now()) {
+      return sendMessage(env, chatId, '😺 Chores aren\'t paused — nothing to resume.');
+    }
+    return wakeChat(env, chatId, tz);
+  }
+  const days = +(String(args).match(/(\d+)/) || [])[1];
+  if (!days || days < 1 || days > 90) {
+    throw new ParseError('For how long? e.g. /pause all 14 (days, 1–90).');
+  }
+  const until = Date.now() + days * 86400000;
+  await env.DB.prepare(
+    'INSERT INTO settings (chat_id, paused_until) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET paused_until = excluded.paused_until'
+  ).bind(chatId, until).run();
+  await sendMessage(env, chatId,
+    `✈️ All chores paused until ${fmtLocal(until, tz)}. The cats will nap on your luggage.\n/resume all to end early.`);
+}
+
+// Ends vacation mode: clears the flag, removes stale pre-vacation nags (and
+// their spent one-off reminders), rolls recurring schedules past the gap.
+export async function wakeChat(env, chatId, tz) {
+  const now = Date.now();
+  await env.DB.prepare('UPDATE settings SET paused_until = NULL WHERE chat_id = ?').bind(chatId).run();
+  const firings = await env.DB.prepare(
+    "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
+  ).bind(chatId).all();
+  for (const f of firings.results) {
+    if (f.last_message_id) await deleteMessage(env, chatId, f.last_message_id);
+    if (f.last_sticker_id) await deleteMessage(env, chatId, f.last_sticker_id);
+    await env.DB.prepare('DELETE FROM firings WHERE id = ?').bind(f.id).run();
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
+    if (r && r.schedule_kind === 'once' && r.next_fire_at == null) {
+      await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
+    }
+  }
+  const rems = await env.DB.prepare(
+    "SELECT * FROM reminders WHERE chat_id = ? AND schedule_kind != 'once' AND next_fire_at IS NOT NULL AND next_fire_at <= ?"
+  ).bind(chatId, now).all();
+  for (const r of rems.results) {
+    const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
+    await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+  }
+  await updateDashboard(env, chatId);
+  await sendMessage(env, chatId, '😺 The cats are back on duty — chores resume. /list to see what\'s up.');
+}
+
 async function cmdPauseResume(env, chatId, args, tz, pause) {
+  if (/^all\b/i.test(String(args).trim())) return cmdPauseResumeAll(env, chatId, args, tz, pause);
   const r = await findReminder(env, chatId, args, pause ? 'pause' : 'resume');
   if (pause) {
     await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
