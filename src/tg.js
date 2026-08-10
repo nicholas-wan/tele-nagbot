@@ -22,6 +22,10 @@ export function deleteMessage(env, chatId, messageId) {
   return tg(env, 'deleteMessage', { chat_id: chatId, message_id: messageId });
 }
 
+export function editReplyMarkup(env, chatId, messageId, replyMarkup) {
+  return tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: messageId, reply_markup: replyMarkup });
+}
+
 export function editMessage(env, chatId, messageId, html, replyMarkup) {
   const body = { chat_id: chatId, message_id: messageId, text: html, parse_mode: 'HTML' };
   if (replyMarkup) body.reply_markup = replyMarkup;

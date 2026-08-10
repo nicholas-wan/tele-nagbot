@@ -109,10 +109,11 @@ export async function sendCelebrationSticker(env, chatId, seed) {
   }
 }
 
-// Deletes the 1-based Nth sticker from the pack.
-export async function deleteSticker(env, index) {
-  const name = await stickerSetName(env);
-  if (!name) return { ok: false, description: 'could not resolve bot username' };
+// Deletes the 1-based Nth sticker from the chat's ACTIVE pack (so positions
+// match /tags). Telegram only allows this for packs the bot created.
+export async function deleteSticker(env, chatId, index) {
+  const name = await activeSetName(env, chatId);
+  if (!name) return { ok: false, description: 'no active sticker pack' };
   const set = await tg(env, 'getStickerSet', { name });
   if (!set.ok) return set;
   const stickers = set.result.stickers;

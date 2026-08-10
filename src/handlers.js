@@ -1,6 +1,6 @@
 // Webhook update handling: commands and inline-button callbacks.
 
-import { sendMessage, editMessage, deleteMessage, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
+import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -24,9 +24,37 @@ export function nagButtons(firingId) {
   return {
     inline_keyboard: [[
       { text: '✅ Done', callback_data: `d:${firingId}` },
-      { text: '😴 Snooze 1h', callback_data: `s:${firingId}` },
+      { text: '😴 Snooze…', callback_data: `s:${firingId}` },
     ]],
   };
+}
+
+function snoozeButtons(firingId) {
+  const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
+  return {
+    inline_keyboard: [
+      [z('30m', '30'), z('1h', '60'), z('2h', '120')],
+      [z('Tonight 9pm', 't'), z('↩️ Back', 'b')],
+    ],
+  };
+}
+
+function undoButtons(reminderId) {
+  return { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `u:${reminderId}` }]] };
+}
+
+// New members (or the bot itself) joining get a short intro.
+async function handleNewMembers(env, msg) {
+  const me = await tg(env, 'getMe', {});
+  const meId = me.ok ? me.result.id : null;
+  const botAdded = msg.new_chat_members.some((u) => u.id === meId);
+  const humans = msg.new_chat_members.filter((u) => !u.is_bot);
+  if (!botAdded && !humans.length) return;
+  const hello = botAdded
+    ? '🐱 Mrow! Latte &amp; Mocha here — we nag about chores until someone taps ✅ Done.'
+    : `🐱 Welcome ${humans.map((u) => esc(u.first_name)).join(', ')}! We're Latte &amp; Mocha — we nag about chores until someone taps ✅ Done.`;
+  await sendMessage(env, msg.chat.id,
+    `${hello}\nTry:\n/remind take out trash 7pm daily\n/remind dishes now\n/list · /stats · /help`);
 }
 
 // Escalating nag lines, matched to whichever cat is on the sticker that
@@ -168,7 +196,9 @@ export async function handleUpdate(env, update) {
   if (update.callback_query) return handleCallback(env, update.callback_query);
 
   const msg = update.message;
-  if (!msg || !msg.text) return;
+  if (!msg) return;
+  if (msg.new_chat_members && msg.new_chat_members.length) return handleNewMembers(env, msg);
+  if (!msg.text) return;
   if (!msg.text.startsWith('/')) return handlePlainText(env, msg);
   const m = msg.text.match(/^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/);
   if (!m) return;
@@ -208,6 +238,7 @@ async function cmdHelp(env, chatId, tz) {
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
     '(also: <code>every mon,thu 8am</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>)\n' +
     '/list · /delete N · /pause N · /done N · /stats\n' +
+    'Reply <code>done</code> or <code>snooze 2h</code> to any nag.\n' +
     `/usepack &lt;link&gt; — nag stickers · /tz — timezone (<code>${esc(tz)}</code>)`
   );
 }
@@ -222,7 +253,7 @@ async function cmdRemind(env, chatId, args, msg, tz, by) {
     throw err;
   }
   const { id, html } = await createReminder(env, chatId, p, by, tz);
-  await sendMessage(env, chatId, html);
+  await sendMessage(env, chatId, html, undoButtons(id));
   // "now" reminders fire on the spot instead of waiting for the next cron tick.
   if (p.firstFireAt <= Date.now() + 500) {
     const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
@@ -301,6 +332,22 @@ async function handlePlainText(env, msg) {
   const chatId = msg.chat.id;
   const now = Date.now();
   const replyId = msg.reply_to_message && msg.reply_to_message.message_id;
+
+  // Replying "done" / "snooze 2h" to a nag message acts on that nag.
+  if (replyId) {
+    const firing = await env.DB.prepare(
+      "SELECT * FROM firings WHERE chat_id = ? AND last_message_id = ? AND state = 'nagging'"
+    ).bind(chatId, replyId).first();
+    if (firing) return handleNagReply(env, msg, firing);
+  }
+  // Bare "done" works when exactly one chore is nagging.
+  if (/^done!*\s*$/i.test(msg.text)) {
+    const all = await env.DB.prepare(
+      "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
+    ).bind(chatId).all();
+    if (all.results.length === 1) return handleNagReply(env, msg, all.results[0]);
+  }
+
   let draft = null;
   if (replyId) {
     draft = await env.DB.prepare(
@@ -341,12 +388,35 @@ async function handlePlainText(env, msg) {
   };
   const { id, html } = await createReminder(env, chatId, p, senderName(msg.from), tz);
   await env.DB.prepare('DELETE FROM drafts WHERE id = ?').bind(draft.id).run();
-  if (draft.wizard_msg_id) await editMessage(env, chatId, draft.wizard_msg_id, html);
-  else await sendMessage(env, chatId, html);
+  if (draft.wizard_msg_id) await editMessage(env, chatId, draft.wizard_msg_id, html, undoButtons(id));
+  else await sendMessage(env, chatId, html, undoButtons(id));
   if (draft.prompt_msg_id) await deleteMessage(env, chatId, draft.prompt_msg_id);
   if (p.firstFireAt <= Date.now() + 500) {
     const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
     if (row) await fireReminder(env, row, Date.now(), tz);
+  }
+}
+
+async function handleNagReply(env, msg, firing) {
+  const text = msg.text.trim();
+  const tz = await getTz(env, msg.chat.id);
+  if (/^done\b/i.test(text) || text.includes('✅')) {
+    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+    if (!reminder) return;
+    return completeFiring(env, firing, reminder, senderName(msg.from), tz);
+  }
+  const sn = text.match(/^snooze(?:\s+(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours)?)?\s*$/i);
+  if (sn) {
+    if (firing.snoozes_used >= MAX_SNOOZES) {
+      return sendMessage(env, msg.chat.id, `😾 No more snoozes (max ${MAX_SNOOZES}). The chore remains.`);
+    }
+    const n = sn[1] ? +sn[1] : 60;
+    const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
+    const until = Date.now() + Math.min(ms, 24 * 3600000);
+    await env.DB.prepare(
+      'UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ?'
+    ).bind(until, firing.id).run();
+    return sendMessage(env, msg.chat.id, `😴 Snoozed until ${fmtClock(until, tz)}.`);
   }
 }
 
@@ -460,12 +530,14 @@ async function cmdMakeStickers(env, chatId, msg) {
 
 async function cmdDelSticker(env, chatId, args) {
   const index = parseInt(args, 10);
-  if (!index) throw new ParseError('Which one? e.g. /delsticker 3 (position in the pack, left to right).');
-  const res = await deleteSticker(env, index);
+  if (!index) throw new ParseError('Which one? e.g. /delsticker 3 (position in the pack, per /tags).');
+  const res = await deleteSticker(env, chatId, index);
   if (res.ok) {
     await sendMessage(env, chatId, `🗑️ Sticker ${index} removed — ${res.remaining} left in the pack.`);
   } else {
-    await sendMessage(env, chatId, `😿 ${esc(res.description || 'Telegram refused.')}`);
+    await sendMessage(env, chatId,
+      `😿 ${esc(res.description || 'Telegram refused.')}\n` +
+      'Note: only packs created by this bot can be edited here — packs made via @Stickers are edited there.');
   }
 }
 
@@ -696,13 +768,56 @@ async function handleCallback(env, cb) {
     }
     const sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
     if (!sched) return answerCallback(env, cb.id, '');
-    const { html } = await createReminder(env, draft.chat_id, {
+    const { id: newId, html } = await createReminder(env, draft.chat_id, {
       text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
       nagIntervals: JSON.parse(draft.nag_intervals), ...sched,
     }, senderName(cb.from), tz);
     await env.DB.prepare('DELETE FROM drafts WHERE id = ?').bind(draft.id).run();
-    await editMessage(env, draft.chat_id, cb.message.message_id, html);
+    await editMessage(env, draft.chat_id, cb.message.message_id, html, undoButtons(newId));
     return answerCallback(env, cb.id, 'Scheduled 📝');
+  }
+
+  // Undo a just-created reminder: remove it and any live nag it produced.
+  const um = (cb.data || '').match(/^u:(\d+)$/);
+  if (um && cb.message) {
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
+      .bind(+um[1], cb.message.chat.id).first();
+    if (!r) return answerCallback(env, cb.id, 'Already gone.');
+    const firings = await env.DB.prepare(
+      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
+    ).bind(r.id).all();
+    for (const f of firings.results) {
+      if (f.last_message_id) await deleteMessage(env, r.chat_id, f.last_message_id);
+      if (f.last_sticker_id) await deleteMessage(env, r.chat_id, f.last_sticker_id);
+    }
+    await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
+    await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
+    await editMessage(env, r.chat_id, cb.message.message_id, `↩️ Undone — <s>${esc(r.text)}</s>`);
+    await updateDashboard(env, r.chat_id);
+    return answerCallback(env, cb.id, 'Undone');
+  }
+
+  // Snooze preset picked (or Back to the main buttons).
+  const zm = (cb.data || '').match(/^z:(\d+):(\w+)$/);
+  if (zm && cb.message) {
+    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+zm[1]).first();
+    if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
+    if (zm[2] === 'b') {
+      await editReplyMarkup(env, firing.chat_id, cb.message.message_id, nagButtons(firing.id));
+      return answerCallback(env, cb.id, '');
+    }
+    if (firing.snoozes_used >= MAX_SNOOZES) {
+      return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
+    }
+    const tz = await getTz(env, firing.chat_id);
+    const until = zm[2] === 't'
+      ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
+      : Date.now() + (+zm[2]) * 60000;
+    await env.DB.prepare(
+      'UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ?'
+    ).bind(until, firing.id).run();
+    await editReplyMarkup(env, firing.chat_id, cb.message.message_id, nagButtons(firing.id));
+    return answerCallback(env, cb.id, `Snoozed until ${fmtClock(until, tz)} 😴`);
   }
 
   const m = (cb.data || '').match(/^([ds]):(\d+)$/);
@@ -724,12 +839,10 @@ async function handleCallback(env, cb) {
     return answerCallback(env, cb.id, 'Purrs 😻');
   }
 
-  // Snooze
+  // Snooze tapped: swap the keyboard for duration presets.
   if (firing.snoozes_used >= MAX_SNOOZES) {
     return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
   }
-  await env.DB.prepare(
-    'UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ?'
-  ).bind(Date.now() + 3600000, firing.id).run();
-  return answerCallback(env, cb.id, `Snoozed 1h (${firing.snoozes_used + 1}/${MAX_SNOOZES}) 😴`);
+  await editReplyMarkup(env, firing.chat_id, cb.message.message_id, snoozeButtons(firing.id));
+  return answerCallback(env, cb.id, '');
 }
