@@ -106,6 +106,19 @@ describe('other forms', () => {
     expect(parse('filters every 1 week 9am')).toMatchObject({ kind: 'interval', detail: { days: 7 } });
   });
 
+  it('natural phrasings', () => {
+    expect(parse('stretch every morning')).toMatchObject({ kind: 'daily', detail: { h: 8 } });
+    expect(parse('wash up every night')).toMatchObject({ kind: 'daily', detail: { h: 21 } });
+    expect(parse('gym weekdays 6pm')).toMatchObject({ kind: 'weekly', detail: { days: [1, 2, 3, 4, 5], h: 18 } });
+    expect(parse('brunch weekends noon')).toMatchObject({ kind: 'weekly', detail: { days: [0, 6], h: 12 } });
+    expect(parse('water every other day 9am')).toMatchObject({ kind: 'interval', detail: { days: 2 } });
+    expect(parse('sheets every other week 10am')).toMatchObject({ kind: 'interval', detail: { days: 14 } });
+    expect(parse('meds midnight')).toMatchObject({ kind: 'once', detail: { h: 0, mi: 0 } });
+    expect(parse('tea in an hour').firstFireAt).toBe(NOW + 3600000);
+    expect(parse('tea in half an hour').firstFireAt).toBe(NOW + 1800000);
+    expect(parse('lunch at noon').detail).toMatchObject({ h: 12, mi: 0 });
+  });
+
   it('missing time raises the wizard with the partial intact', () => {
     try {
       parse('take out trash daily');

@@ -52,7 +52,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   // Schedule kind.
   let kind = 'once';
   let detail = {};
+  let defaultH = null; // "every morning/evening" implies a time-of-day
 
+  const otherM = args.match(/\bevery\s+other\s+(day|week)\b/i);
+  const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
+  const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
   const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
   const intervalM = args.match(/\bevery\s+(\d+)\s+(days?|weeks?)\b/i);
   const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_WORD}(?:\\s*,\\s*${DAY_WORD})*)\\b`, 'i'));
@@ -61,7 +65,19 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   const monthlyM = args.match(/\bmonthly\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/i)
     || args.match(/\bon\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s+(?!at\b|nag:)[a-z])/i);
 
-  if (dailyM) {
+  if (otherM) {
+    kind = 'interval';
+    detail.days = otherM[1].toLowerCase() === 'day' ? 2 : 14;
+    args = args.replace(otherM[0], ' ');
+  } else if (weekdaysM) {
+    kind = 'weekly';
+    detail.days = /weekend/i.test(weekdaysM[1]) ? [0, 6] : [1, 2, 3, 4, 5];
+    args = args.replace(weekdaysM[0], ' ');
+  } else if (periodM) {
+    kind = 'daily';
+    defaultH = { morning: 8, afternoon: 15, evening: 19, night: 21 }[periodM[1].toLowerCase()];
+    args = args.replace(periodM[0], ' ');
+  } else if (dailyM) {
     kind = 'daily';
     args = args.replace(dailyM[0], ' ');
   } else if (intervalM) {
@@ -83,6 +99,17 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     kind = 'monthly';
     detail.dom = dom;
     args = args.replace(monthlyM[0], ' ');
+  }
+
+  // Relative one-off in words: "in an hour", "in half an hour".
+  const relWordM = args.match(/\bin\s+(half\s+an?|an?)\s+hour\b/i);
+  if (relWordM && kind === 'once') {
+    const ms = /^half/i.test(relWordM[1]) ? 30 * 60000 : 60 * 60000;
+    args = args.replace(relWordM[0], ' ');
+    return finish(args, {
+      kind: 'once', detail: {}, firstFireAt: nowMs + ms,
+      assigneeName, assigneeUserId, nagIntervals,
+    });
   }
 
   // Relative one-off: "in 20m", "in 2 hours".
@@ -126,6 +153,15 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     if (h > 23 || mi > 59) throw new ParseError(`"${t24[0].trim()}" is not a valid time.`);
     args = args.replace(t24[0], ' ');
   }
+  // Word times: "noon", "midnight"; then the implied hour from "every morning".
+  if (h === null) {
+    const wordT = args.match(/\b(?:at\s+)?(noon|midday|midnight)\b/i);
+    if (wordT) {
+      h = /midnight/i.test(wordT[1]) ? 0 : 12;
+      args = args.replace(wordT[0], ' ');
+    }
+  }
+  if (h === null && defaultH != null) h = defaultH;
   if (h === null) {
     const text = cleanText(args);
     if (text) {
