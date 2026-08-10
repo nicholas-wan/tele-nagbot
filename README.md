@@ -1,65 +1,41 @@
 # Nag-Bot (Latte & Mocha ☕🐈)
 
-A Telegram bot for household chores that **keeps nagging until someone taps ✅ Done** — voiced by the cats, illustrated with their sticker pack. Runs entirely on Cloudflare Workers' free tier: the bot, the every-minute scheduler, and the database all live in the cloud, so it works with every computer off.
+Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers free tier: webhook + every-minute cron + D1. Bot: [@TwoShotsNagBot](https://t.me/TwoShotsNagBot) · Worker: `nag-bot.lattemocha.workers.dev`
 
-Live at `https://nag-bot.lattemocha.workers.dev` · bot: [@TwoShotsNagBot](https://t.me/TwoShotsNagBot)
-
-## Reminders
+## Commands
 
 ```
-/remind take out trash 7pm daily
-/remind @jane water plants every mon,thu 8am
-/remind clear poop every 8 days 9am
-/remind pay rent on the 1st 10am
-/remind call the plumber tomorrow 9:30am
-/remind check the oven in 20m
-/remind feed the cats now            ← fires instantly
-/remind trash 7pm daily nag:10m      ← custom re-nag pace
+/remind trash 7pm daily · @jane dishes now · plumber in 20m
+        every mon,thu 8am · every 8 days 9pm · on the 1st · tomorrow 9:30am · nag:10m
+/list  /delete N  /pause N  /resume N  /skip N  /done N  /tz
+/stats            weekly leaderboard (resets Monday) · /stats all = 6-month log
+/usepack <link>   sticker pack for nags · /tags · /tagsticker N latte · /autotag · /makestickers · /delsticker N
 ```
 
-- **No time given?** The bot replies with tap-to-choose buttons (In 15 min / Tonight 7pm / Tomorrow 9am / …).
-- **Nag loop:** sticker + message with `✅ Done` / `😴 Snooze 1h` buttons. Ignored nags re-send at 15 → 30 → 60-minute intervals (or the `nag:` pace), each striking through the previous one, escalating in tone. Snooze delays 1h, max 3. After 24h unacked: 🪦 expired, cats disappointed.
-- **Mentions:** `@username` (or tap a name from autocomplete for users without one) assigns the reminder; every nag pings them. Anyone can still tap Done — the ack names who did it.
-- **Numbers** are per-chat, start at 1, and reuse freed slots. Manage with:
-  `/list` · `/delete N` · `/pause N` · `/resume N` · `/skip N` · `/done N` · `/stats` · `/tz Europe/London`
+No time given → inline time-picker (tap or type a custom time). Reply `done` or `snooze 2h` to any nag. Creation confirmations have Undo.
 
-## Stickers
+## Behavior
 
-Every nag comes with a random sticker from the chat's pack, and the message names whichever cat is on it. Completions get a celebration sticker.
+- Nags re-send at 15/30/60 min (or `nag:` pace), deleting the previous nag — one live nag per chore. First re-nag silent, later ones ping. 24h unacked → expired 🪦.
+- Sticker on first nag and on Done; nag lines name the cat on the sticker (per-sticker tags in D1).
+- Pinned "Outstanding chores" dashboard, silently edited; needs bot admin with Pin messages.
+- Daily 8am digest and Sunday 8pm weekly wrap, both silent. Default timezone Asia/Singapore.
 
-- `/usepack <t.me/addstickers/... link>` — use any public pack for this chat; `/usepack reset` returns to the bot's built-in pack; bare `/usepack` shows the current one.
-- `/tags` — list which cat each sticker is tagged as (`/tags N` previews one).
-- `/tagsticker N latte|mocha|both` — set a tag by hand (source of truth).
-- `/autotag` — AI first-pass tagging of untagged stickers (`redo` wipes and starts over). The vision models are mediocre at telling the cats apart — always review with `/tags`.
-- `/makestickers` — create/sync the bot's own pack from photos baked into `src/stickers-data.js` (regenerate with a 512×512 WEBP pipeline and redeploy to add more).
-- `/delsticker N` — remove a sticker from the bot's own pack.
-
-## Architecture
-
-```
-Telegram ──webhook──▶ Cloudflare Worker ──▶ D1 (SQLite)
-                            ▲   ▲
-      Cron (* * * * *) ─────┘   └── Workers AI (vision, /autotag)
-```
+## Code
 
 | File | Purpose |
 |---|---|
-| `src/index.js` | fetch (webhook + `/setup` + `/admin`) and scheduled entry points |
-| `src/handlers.js` | commands, wizard popup, Done/Snooze callbacks, nag copy |
-| `src/cron.js` | fire due reminders, re-nag, expire, cleanup |
-| `src/firing.js` | shared "fire one reminder" logic (cron + `/remind … now`) |
-| `src/parse.js` | `/remind` argument parser |
-| `src/time.js` | timezone math, next-occurrence computation |
-| `src/stickers.js` | pack management, tagging, random/celebration sends |
+| `src/index.js` | webhook + `/setup` + `/admin` routes, cron entry |
+| `src/handlers.js` | commands, wizard, callbacks, dashboard, nag copy |
+| `src/cron.js` | fire/re-nag/expire, digest, weekly wrap |
+| `src/firing.js` | fire-one-reminder (cron + `/remind … now`) |
+| `src/parse.js` | /remind parser |
+| `src/time.js` | timezone + next-occurrence math |
+| `src/stickers.js` | packs, tagging, sticker sends |
 | `src/tg.js` | Telegram API client |
-| `schema.sql` | D1 tables: reminders, firings, drafts, settings, sticker_tags |
 
-Secrets: `BOT_TOKEN`, `WEBHOOK_SECRET` (via `wrangler secret put`). The Worker registers its own webhook and command menu: visit `/setup?key=<WEBHOOK_SECRET>` once after deploy. `/admin?key=…` offers `info` (webhook status), `stickers`/`stickerimg` (tag inspection), and name/description updates.
+## Ops
 
-## Deploying changes
-
-```
-npx wrangler deploy
-```
-
-Schema changes: `npx wrangler d1 execute nagbot --remote --file=schema.sql` (new tables) or an `ALTER TABLE` via `--command`. Logs: `npx wrangler tail`.
+- Deploy: `npx wrangler deploy` · logs: `npx wrangler tail`
+- Secrets: `BOT_TOKEN`, `WEBHOOK_SECRET`. After first deploy, visit `/setup?key=<WEBHOOK_SECRET>` (registers webhook + command menu).
+- Schema changes: `wrangler d1 execute nagbot --remote` with `--file=schema.sql` (new tables) or `--command "ALTER …"`.
