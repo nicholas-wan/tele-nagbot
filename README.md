@@ -13,7 +13,7 @@ Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers fre
 /usepack <link>   sticker pack for nags · /tags · /tagsticker N latte · /autotag · /makestickers · /delsticker N
 ```
 
-No time given → inline time-picker (tap, or reply with a custom time). Reply `done` or `snooze 2h` to any nag (max 3 snoozes, capped at the 24h expiry). Creation confirmations have Undo.
+No time given → inline time-picker (tap, or reply with a custom time). Reply `done` or `snooze 2h` to any nag, or just react 👍/✅ on it (max 3 snoozes, capped at the 24h expiry). Creation confirmations have Undo.
 
 ## Behavior
 

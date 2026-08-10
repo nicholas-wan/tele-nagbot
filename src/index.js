@@ -40,7 +40,8 @@ export default {
         body: JSON.stringify({
           url: `${url.origin}/webhook`,
           secret_token: env.WEBHOOK_SECRET,
-          allowed_updates: ['message', 'callback_query'],
+          // message_reaction needs the bot to be a group admin (it is, for pins).
+          allowed_updates: ['message', 'callback_query', 'message_reaction'],
         }),
       });
       const data = await res.json();

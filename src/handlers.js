@@ -214,8 +214,10 @@ function chatAllowed(env, chatId) {
 
 export async function handleUpdate(env, update) {
   const chat = (update.message && update.message.chat)
-    || (update.callback_query && update.callback_query.message && update.callback_query.message.chat);
+    || (update.callback_query && update.callback_query.message && update.callback_query.message.chat)
+    || (update.message_reaction && update.message_reaction.chat);
   if (!chatAllowed(env, chat && chat.id)) return;
+  if (update.message_reaction) return handleReaction(env, update.message_reaction);
   if (update.callback_query) return handleCallback(env, update.callback_query);
 
   const msg = update.message;
@@ -441,6 +443,25 @@ async function handlePlainText(env, msg) {
     const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
     if (row) await fireReminder(env, row, Date.now(), tz);
   }
+}
+
+// Any thumbs-up-ish reaction on a live nag message counts as ✅ Done.
+const DONE_REACTIONS = new Set(['👍', '✅', '👌', '💯', '🫡', '💪', '❤', '🔥', '🎉']);
+
+async function handleReaction(env, rx) {
+  if (!rx.user || rx.user.is_bot) return;
+  const hit = (rx.new_reaction || []).some(
+    (r) => r.type === 'emoji' && DONE_REACTIONS.has(r.emoji)
+  );
+  if (!hit) return;
+  const firing = await env.DB.prepare(
+    "SELECT * FROM firings WHERE chat_id = ? AND last_message_id = ? AND state = 'nagging'"
+  ).bind(rx.chat.id, rx.message_id).first();
+  if (!firing) return;
+  const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  if (!reminder) return;
+  const tz = await getTz(env, rx.chat.id);
+  await completeFiring(env, firing, reminder, senderName(rx.user), tz);
 }
 
 async function handleNagReply(env, msg, firing) {
