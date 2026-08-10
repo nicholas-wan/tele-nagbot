@@ -32,10 +32,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
       args = args.replace(mentioned, ' ');
     }
   } else {
-    const m = args.match(/@(\w+)/);
+    // Only a standalone @word is an assignee — not the domain of an email.
+    const m = args.match(/(^|\s)@(\w+)/);
     if (m) {
-      assigneeName = `@${m[1]}`;
-      args = args.replace(m[0], ' ');
+      assigneeName = `@${m[2]}`;
+      args = args.replace(`@${m[2]}`, ' ');
     }
   }
 
@@ -55,7 +56,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
   const intervalM = args.match(/\bevery\s+(\d+)\s+days?\b/i);
   const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_WORD}(?:\\s*,\\s*${DAY_WORD})*)\\b`, 'i'));
-  const monthlyM = args.match(/\b(?:monthly\s+)?on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/i);
+  // Bare "on the Nth" only counts as a schedule when what follows can't be
+  // prose ("on the 2nd floor" stays chore text); "monthly on the Nth" always.
+  const monthlyM = args.match(/\bmonthly\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/i)
+    || args.match(/\bon\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s+(?!at\b|nag:)[a-z])/i);
 
   if (dailyM) {
     kind = 'daily';
@@ -103,11 +107,16 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     });
   }
 
-  // Time of day: "7pm", "9:30am", "at 19:00".
+  // Time of day: "7pm", "9:30am", "7.30pm", "at 19:00".
   let h = null, mi = 0;
-  const t12 = args.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  const t12 = args.match(/\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b/i);
   const t24 = t12 ? null : args.match(/\b(?:at\s+)?(\d{1,2}):(\d{2})\b/);
   if (t12) {
+    // Range-check so "30pm" (a mangled "7 30pm") errors instead of silently
+    // becoming 6pm via the % 12.
+    if (+t12[1] < 1 || +t12[1] > 12 || +(t12[2] || 0) > 59) {
+      throw new ParseError(`"${t12[0].trim()}" is not a valid time.`);
+    }
     h = +t12[1] % 12 + (t12[3].toLowerCase() === 'pm' ? 12 : 0);
     mi = +(t12[2] || 0);
     args = args.replace(t12[0], ' ');
@@ -142,7 +151,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     const p = localParts(nowMs, tz);
     const tomorrowM = args.match(/\btomorrow\b/i);
     const todayM = args.match(/\btoday\b/i);
-    const wdM = args.match(new RegExp(`\\b(?:on\\s+)?(${DAY_WORD})\\b`, 'i'));
+    // A weekday only counts as a date when marked ("on/next fri") or left
+    // dangling at the end — "buy sun hat" keeps its sun.
+    const wdM = args.match(new RegExp(`\\b(?:on|next)\\s+(${DAY_WORD})\\b`, 'i'))
+      || args.match(new RegExp(`\\b(${DAY_WORD})\\s*$`, 'i'));
 
     if (tomorrowM) {
       args = args.replace(tomorrowM[0], ' ');
@@ -159,11 +171,21 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
         firstFireAt = nextOccurrence('daily', detail, nowMs, tz);
       }
     }
-  } else if (kind === 'interval') {
-    // First occurrence: the next h:mi slot; the N-day gap applies after that.
-    firstFireAt = nextOccurrence('daily', { h, mi }, nowMs, tz);
   } else {
-    firstFireAt = nextOccurrence(kind, detail, nowMs, tz);
+    // "tomorrow 7pm daily" starts tomorrow; strip the tokens from the text.
+    let after = nowMs;
+    const tm = args.match(/\btomorrow\b/i);
+    if (tm) {
+      args = args.replace(tm[0], ' ');
+      const p = localParts(nowMs, tz);
+      after = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
+    }
+    const td = args.match(/\btoday\b/i);
+    if (td) args = args.replace(td[0], ' ');
+    // Interval first occurrence: the next h:mi slot; the N-day gap follows.
+    firstFireAt = kind === 'interval'
+      ? nextOccurrence('daily', { h, mi }, after, tz)
+      : nextOccurrence(kind, detail, after, tz);
   }
 
   return finish(args, { kind, detail, firstFireAt, assigneeName, assigneeUserId, nagIntervals });
