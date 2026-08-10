@@ -24,11 +24,14 @@ async function sendWeeklyRecap(env, now) {
     const p = localParts(now, tz);
     if (p.wd !== 0 || p.h !== 20) continue;
     const ymd = `${p.y}-${p.mo}-${p.d}`;
-    const row = await env.DB.prepare('SELECT last_weekly FROM settings WHERE chat_id = ?').bind(chat_id).first();
-    if (row && row.last_weekly === ymd) continue;
-    await env.DB.prepare(
-      'INSERT INTO settings (chat_id, last_weekly) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_weekly = excluded.last_weekly'
+    // The WHERE on the upsert makes the once-per-day claim atomic, so
+    // overlapping cron invocations can't both send the recap.
+    const claim = await env.DB.prepare(
+      `INSERT INTO settings (chat_id, last_weekly) VALUES (?, ?)
+       ON CONFLICT(chat_id) DO UPDATE SET last_weekly = excluded.last_weekly
+       WHERE settings.last_weekly IS NOT excluded.last_weekly`
     ).bind(chat_id, ymd).run();
+    if (!claim.meta.changes) continue;
 
     const s = await choreStats(env, chat_id, weekStart(now, tz));
     if (!s.total && !s.expired) continue;
@@ -57,11 +60,13 @@ async function sendDigests(env, now) {
     const p = localParts(now, tz);
     if (p.h !== 8) continue;
     const ymd = `${p.y}-${p.mo}-${p.d}`;
-    const row = await env.DB.prepare('SELECT last_digest FROM settings WHERE chat_id = ?').bind(chat_id).first();
-    if (row && row.last_digest === ymd) continue;
-    await env.DB.prepare(
-      'INSERT INTO settings (chat_id, last_digest) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET last_digest = excluded.last_digest'
+    // Same atomic once-per-day claim as the weekly recap.
+    const claim = await env.DB.prepare(
+      `INSERT INTO settings (chat_id, last_digest) VALUES (?, ?)
+       ON CONFLICT(chat_id) DO UPDATE SET last_digest = excluded.last_digest
+       WHERE settings.last_digest IS NOT excluded.last_digest`
     ).bind(chat_id, ymd).run();
+    if (!claim.meta.changes) continue;
 
     const endOfDay = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
     const due = await env.DB.prepare(
@@ -111,22 +116,28 @@ async function renagPending(env, now) {
       continue;
     }
 
+    const intervals = JSON.parse(r.nag_intervals);
+    const nagCount = f.nag_count + 1;
+    const interval = intervals[Math.min(nagCount, intervals.length - 1)];
+    // Claim this re-nag before any sends: an overlapping cron tick loses the
+    // compare-and-swap, and a Done/snooze landing mid-send isn't clobbered.
+    const claim = await env.DB.prepare(
+      "UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
+    ).bind(nagCount, now + interval * 60000, f.id, f.next_nag_at).run();
+    if (!claim.meta.changes) continue;
+
     // One live nag per chore: remove the previous nag and its sticker.
     if (f.last_message_id) await deleteMessage(env, f.chat_id, f.last_message_id);
     if (f.last_sticker_id) await deleteMessage(env, f.chat_id, f.last_sticker_id);
 
-    const intervals = JSON.parse(r.nag_intervals);
-    const nagCount = f.nag_count + 1;
-    const interval = intervals[Math.min(nagCount, intervals.length - 1)];
     // Loudness ladder: first re-nag is silent; later ones notify again.
     const sent = await sendMessage(env, f.chat_id, nagHtml(r, nagCount, f.cat || 'both'),
       nagButtons(f.id), { silent: nagCount === 1 });
-    await env.DB.prepare(
-      'UPDATE firings SET nag_count = ?, next_nag_at = ?, last_message_id = ?, last_sticker_id = NULL WHERE id = ?'
-    ).bind(
-      nagCount, now + interval * 60000,
-      sent.ok ? sent.result.message_id : null, f.id
-    ).run();
+    const upd = await env.DB.prepare(
+      "UPDATE firings SET last_message_id = ?, last_sticker_id = NULL WHERE id = ? AND state = 'nagging'"
+    ).bind(sent.ok ? sent.result.message_id : null, f.id).run();
+    // Done/expired won the race while we were sending — remove the orphan nag.
+    if (!upd.meta.changes && sent.ok) await deleteMessage(env, f.chat_id, sent.result.message_id);
     // Self-heal: recreate the dashboard if it is missing (e.g. deleted by hand
     // or the nag predates the dashboard feature).
     await updateDashboard(env, f.chat_id);

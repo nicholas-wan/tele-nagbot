@@ -7,6 +7,15 @@ import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.j
 import { sendRandomSticker } from './stickers.js';
 
 export async function fireReminder(env, r, now, tz) {
+  // Claim the occurrence atomically (advance next_fire_at) before any sends:
+  // an overlapping cron tick or "/remind ... now" racing the cron loses the
+  // compare-and-swap. A crash mid-fire drops one nag, not the schedule.
+  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
+  const claim = await env.DB.prepare(
+    'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
+  ).bind(next, r.id, r.next_fire_at).run();
+  if (!claim.meta.changes) return;
+
   // A previous occurrence still nagging when the next one fires gets
   // quietly expired so only one live nag exists per reminder.
   const stale = await env.DB.prepare(
@@ -25,7 +34,5 @@ export async function fireReminder(env, r, now, tz) {
   await env.DB.prepare('UPDATE firings SET last_message_id = ?, last_sticker_id = ?, cat = ? WHERE id = ?')
     .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat, firingId).run();
 
-  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
-  await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
   await updateDashboard(env, r.chat_id);
 }

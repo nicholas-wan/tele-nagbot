@@ -97,9 +97,14 @@ async function silenceOldNag(env, firing, text, note) {
 
 export async function completeFiring(env, firing, reminder, byName, tz) {
   const now = Date.now();
-  await env.DB.prepare(
-    "UPDATE firings SET state = 'done', done_by = ?, done_at = ?, next_nag_at = NULL WHERE id = ?"
+  // Only the winner of this state transition performs the side effects: a
+  // concurrent cron expiry or second Done tap loses here and returns false.
+  const res = await env.DB.prepare(
+    "UPDATE firings SET state = 'done', done_by = ?, done_at = ?, next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
   ).bind(byName, now, firing.id).run();
+  if (!res.meta.changes) return false;
+  // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.
+  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
   if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
   const celebration = await sendCelebrationSticker(env, firing.chat_id, firing.id);
   const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
@@ -115,12 +120,15 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
   await updateDashboard(env, firing.chat_id);
+  return true;
 }
 
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
-  await env.DB.prepare(
-    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?"
+  const res = await env.DB.prepare(
+    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
   ).bind(firing.id).run();
+  if (!res.meta.changes) return false;
+  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
   await silenceOldNag(env, firing, reminder.text, '🙀');
   if (firing.last_sticker_id) await deleteMessage(env, firing.chat_id, firing.last_sticker_id);
   if (!silent) {
@@ -131,6 +139,7 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
   await updateDashboard(env, firing.chat_id);
+  return true;
 }
 
 // One pinned message per chat, silently edited in place, listing everything
@@ -415,7 +424,9 @@ async function handleNagReply(env, msg, firing) {
   if (/^done\b/i.test(text) || text.includes('✅')) {
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (!reminder) return;
-    return completeFiring(env, firing, reminder, senderName(msg.from), tz);
+    const won = await completeFiring(env, firing, reminder, senderName(msg.from), tz);
+    if (!won) return sendMessage(env, msg.chat.id, '😼 Someone beat you to it — already handled.');
+    return;
   }
   const sn = text.match(/^snooze(?:\s+(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours)?)?\s*$/i);
   if (sn) {
@@ -425,9 +436,10 @@ async function handleNagReply(env, msg, firing) {
     const n = sn[1] ? +sn[1] : 60;
     const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
     const until = Date.now() + Math.min(ms, 24 * 3600000);
-    await env.DB.prepare(
-      'UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ?'
+    const res = await env.DB.prepare(
+      "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging'"
     ).bind(until, firing.id).run();
+    if (!res.meta.changes) return sendMessage(env, msg.chat.id, '😼 That one was already handled.');
     return sendMessage(env, msg.chat.id, `😴 Snoozed until ${fmtClock(until, tz)}.`);
   }
 }
@@ -521,7 +533,8 @@ async function cmdDone(env, chatId, args, by, tz) {
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) throw new ParseError(`#${r.display_num} is not currently nagging.`);
-  await completeFiring(env, firing, r, by, tz);
+  const won = await completeFiring(env, firing, r, by, tz);
+  if (!won) return sendMessage(env, chatId, '😼 Someone beat you to it — already handled.');
   await sendMessage(env, chatId, `😻 <b>${esc(r.text)}</b> — done by ${esc(by)}. Purrs all around.`);
 }
 
@@ -825,9 +838,10 @@ async function handleCallback(env, cb) {
     const until = zm[2] === 't'
       ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
-    await env.DB.prepare(
-      'UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ?'
+    const res = await env.DB.prepare(
+      "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging'"
     ).bind(until, firing.id).run();
+    if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
     await editReplyMarkup(env, firing.chat_id, cb.message.message_id, nagButtons(firing.id));
     return answerCallback(env, cb.id, `Snoozed until ${fmtClock(until, tz)} 😴`);
   }
@@ -847,8 +861,8 @@ async function handleCallback(env, cb) {
   const by = senderName(cb.from);
 
   if (m[1] === 'd') {
-    await completeFiring(env, firing, reminder, by, tz);
-    return answerCallback(env, cb.id, 'Purrs 😻');
+    const won = await completeFiring(env, firing, reminder, by, tz);
+    return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
   }
 
   // Snooze tapped: swap the keyboard for duration presets.
