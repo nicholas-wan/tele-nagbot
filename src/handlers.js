@@ -145,21 +145,19 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
   return true;
 }
 
-// One pinned message per chat, silently edited in place, listing everything
-// currently nagging. Created on first need, unpinned and removed when clear.
+// One pinned message per chat, silently edited in place: the full chore list
+// (nagging marked 🔔, paused included). Created on first need, unpinned and
+// removed only when the chore list is empty.
 export async function updateDashboard(env, chatId) {
   try {
-    const { results } = await env.DB.prepare(
-      `SELECT r.text, r.assignee_name, r.assignee_user_id, f.fired_at
-       FROM firings f JOIN reminders r ON r.id = f.reminder_id
-       WHERE f.chat_id = ? AND f.state = 'nagging' ORDER BY f.fired_at`
-    ).bind(chatId).all();
     const row = await env.DB.prepare(
       'SELECT dashboard_msg_id, tz FROM settings WHERE chat_id = ?'
     ).bind(chatId).first();
     const msgId = row && row.dashboard_msg_id;
+    const tz = (row && row.tz) || 'Asia/Singapore';
+    let html = await choreListHtml(env, chatId, tz);
 
-    if (!results.length) {
+    if (!html) {
       if (msgId) {
         await unpinMessage(env, chatId, msgId);
         await deleteMessage(env, chatId, msgId);
@@ -167,14 +165,10 @@ export async function updateDashboard(env, chatId) {
       }
       return;
     }
-
-    const tz = (row && row.tz) || 'Asia/Singapore';
-    const lines = ['📋 <b>Outstanding chores</b>'];
-    for (const r of results) {
-      const who = r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
-      lines.push(`• <b>${esc(r.text)}</b>${who} — since ${fmtClock(r.fired_at, tz)}`);
+    // A pin is a single message; past the 4096 cap, trim on a line boundary.
+    if (html.length > 4000) {
+      html = html.slice(0, html.lastIndexOf('\n', 3980)) + '\n… more — /list';
     }
-    const html = lines.join('\n');
 
     if (msgId) {
       const res = await editMessage(env, chatId, msgId, html);
@@ -316,6 +310,7 @@ async function createReminder(env, chatId, p, by, tz) {
     JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now()
   ).run();
   const id = res.meta.last_row_id;
+  await updateDashboard(env, chatId);
   const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
   const html = `📝 #${num} <b>${esc(p.text)}</b>${forWho}\nFirst reminder: ${fmtLocal(p.firstFireAt, tz)}` +
     (p.kind !== 'once' ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '');
@@ -509,12 +504,17 @@ function fmtWhen(ms, tz) {
   return fmtShort(ms, tz);
 }
 
-async function cmdList(env, chatId, tz) {
+// Renders the chore-card list shared by /list and the pinned dashboard.
+// Null when there are no chores at all.
+async function choreListHtml(env, chatId, tz) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
   ).bind(chatId).all();
-  if (!results.length) return sendMessage(env, chatId, '😺 No chores on the list. Add one with /remind.');
+  if (!results.length) return null;
   const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
+  const nagging = new Set((await env.DB.prepare(
+    "SELECT reminder_id FROM firings WHERE chat_id = ? AND state = 'nagging'"
+  ).bind(chatId).all()).results.map((f) => f.reminder_id));
   const lines = ['🐾 <b>Chores</b>'];
   if (st && st.paused_until && st.paused_until > Date.now()) {
     lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
@@ -522,14 +522,20 @@ async function cmdList(env, chatId, tz) {
   for (const r of results) {
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const status = r.paused ? '⏸️ paused'
-      : !r.next_fire_at ? '🔔 nagging now'
+      : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
       : r.schedule_kind === 'once' ? fmtWhen(r.next_fire_at, tz)
       : `${describeSchedule(r)} · next ${fmtWhen(r.next_fire_at, tz)}`;
     lines.push('');
     lines.push(`#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${who}`);
     lines.push(`      ${status}`);
   }
-  await sendLong(env, chatId, lines.join('\n'));
+  return lines.join('\n');
+}
+
+async function cmdList(env, chatId, tz) {
+  const html = await choreListHtml(env, chatId, tz);
+  if (!html) return sendMessage(env, chatId, '😺 No chores on the list. Add one with /remind.');
+  await sendLong(env, chatId, html);
 }
 
 async function findReminder(env, chatId, args, cmd = 'delete') {
@@ -578,6 +584,7 @@ async function cmdPauseResumeAll(env, chatId, args, tz, pause) {
   await env.DB.prepare(
     'INSERT INTO settings (chat_id, paused_until) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET paused_until = excluded.paused_until'
   ).bind(chatId, until).run();
+  await updateDashboard(env, chatId);
   await sendMessage(env, chatId,
     `✈️ All chores paused until ${fmtLocal(until, tz)}. The cats will nap on your luggage.\n/resume all to end early.`);
 }
@@ -615,10 +622,12 @@ async function cmdPauseResume(env, chatId, args, tz, pause) {
   const r = await findReminder(env, chatId, args, pause ? 'pause' : 'resume');
   if (pause) {
     await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
+    await updateDashboard(env, chatId);
     await sendMessage(env, chatId, `⏸️ Paused #${r.display_num} <b>${esc(r.text)}</b>. /resume ${r.display_num} to re-enable.`);
   } else {
     const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), Date.now(), tz) || r.next_fire_at;
     await env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+    await updateDashboard(env, chatId);
     if (next != null) {
       return sendMessage(env, chatId, `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
     }
@@ -639,6 +648,7 @@ async function cmdSkip(env, chatId, args, tz) {
   }
   const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
   await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+  await updateDashboard(env, chatId);
   await sendMessage(env, chatId, `⏭️ Skipping next <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
 }
 
