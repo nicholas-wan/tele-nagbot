@@ -133,6 +133,8 @@ async function renagPending(env, now) {
         await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?").bind(f.id).run();
         continue;
       }
+      // /pause freezes in-flight nags too (no re-nags, no expiry ticking).
+      if (r.paused) continue;
 
       if (now - f.fired_at > EXPIRE_AFTER_MS) {
         await expireFiring(env, f, r);

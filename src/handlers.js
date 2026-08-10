@@ -493,7 +493,16 @@ async function findReminder(env, chatId, args) {
 
 async function cmdDelete(env, chatId, args) {
   const r = await findReminder(env, chatId, args);
-  await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
+  // Like Undo: remove live nag messages and hard-delete the nagging firings,
+  // so an intentional delete never counts as "expired unclaimed" in stats.
+  const firings = await env.DB.prepare(
+    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
+  ).bind(r.id).all();
+  for (const f of firings.results) {
+    if (f.last_message_id) await deleteMessage(env, chatId, f.last_message_id);
+    if (f.last_sticker_id) await deleteMessage(env, chatId, f.last_sticker_id);
+  }
+  await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
   await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
   await sendMessage(env, chatId, `🗑️ Deleted #${r.display_num} <s>${esc(r.text)}</s>`);
   await updateDashboard(env, chatId);
@@ -507,7 +516,16 @@ async function cmdPauseResume(env, chatId, args, tz, pause) {
   } else {
     const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), Date.now(), tz) || r.next_fire_at;
     await env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
-    await sendMessage(env, chatId, `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
+    if (next != null) {
+      return sendMessage(env, chatId, `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
+    }
+    // A one-off that already fired has nothing left to schedule.
+    const nag = await env.DB.prepare(
+      "SELECT id FROM firings WHERE reminder_id = ? AND state = 'nagging'"
+    ).bind(r.id).first();
+    await sendMessage(env, chatId, nag
+      ? `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — the cats resume pestering.`
+      : `😼 #${r.display_num} already fired and has nothing scheduled — /delete ${r.display_num} or make a new /remind.`);
   }
 }
 
