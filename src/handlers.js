@@ -429,12 +429,18 @@ async function handleNagReply(env, msg, firing) {
     }
     const n = sn[1] ? +sn[1] : 60;
     const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
-    const until = Date.now() + Math.min(ms, 24 * 3600000);
+    // Never promise a nag past the 24h expiry — cap at one last call before it.
+    const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
+    let until = Date.now() + Math.min(ms, 24 * 3600000);
+    const capped = until >= expiresAt;
+    if (capped) until = expiresAt - 60000;
     const res = await env.DB.prepare(
       "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging'"
     ).bind(until, firing.id).run();
     if (!res.meta.changes) return sendMessage(env, msg.chat.id, '😼 That one was already handled.');
-    return sendMessage(env, msg.chat.id, `😴 Snoozed until ${fmtClock(until, tz)}.`);
+    return sendMessage(env, msg.chat.id, capped
+      ? `😴 Snoozed until ${fmtClock(until, tz)} — that's the 24h limit, last call.`
+      : `😴 Snoozed until ${fmtClock(until, tz)}.`);
   }
 }
 
@@ -847,15 +853,20 @@ async function handleCallback(env, cb) {
       return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
     }
     const tz = await getTz(env, firing.chat_id);
-    const until = zm[2] === 't'
+    // Same 24h-expiry cap as reply-snooze.
+    const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
+    let until = zm[2] === 't'
       ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
+    const capped = until >= expiresAt;
+    if (capped) until = expiresAt - 60000;
     const res = await env.DB.prepare(
       "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging'"
     ).bind(until, firing.id).run();
     if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
     await editReplyMarkup(env, firing.chat_id, cb.message.message_id, nagButtons(firing.id));
-    return answerCallback(env, cb.id, `Snoozed until ${fmtClock(until, tz)} 😴`);
+    return answerCallback(env, cb.id,
+      `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);
   }
 
   const m = (cb.data || '').match(/^([ds]):(\d+)$/);

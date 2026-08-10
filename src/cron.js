@@ -122,9 +122,11 @@ async function fireDueReminders(env, now) {
 }
 
 async function renagPending(env, now) {
+  // Due re-nags, plus anything past the 24h deadline regardless of snoozes —
+  // expiry must not wait for the next nag slot to come due.
   const { results } = await env.DB.prepare(
-    "SELECT * FROM firings WHERE state = 'nagging' AND next_nag_at IS NOT NULL AND next_nag_at <= ?"
-  ).bind(now).all();
+    "SELECT * FROM firings WHERE state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)"
+  ).bind(now, now - EXPIRE_AFTER_MS).all();
 
   for (const f of results) {
     try {
@@ -140,6 +142,8 @@ async function renagPending(env, now) {
         await expireFiring(env, f, r);
         continue;
       }
+      // Row was selected by the expiry clause only; its next nag isn't due yet.
+      if (f.next_nag_at == null || f.next_nag_at > now) continue;
 
       const intervals = JSON.parse(r.nag_intervals);
       const nagCount = f.nag_count + 1;
