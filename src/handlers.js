@@ -623,8 +623,8 @@ async function choreListHtml(env, chatId, tz) {
       : r.schedule_kind === 'once' ? fmtWhen(r.next_fire_at, tz)
       : `${describeSchedule(r)} · next ${fmtWhen(r.next_fire_at, tz)}`;
     lines.push('');
-    lines.push(`#${r.display_num} ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
-    lines.push(`      ${status}`);
+    lines.push(`${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
+    lines.push(`      ${status} · #${r.display_num}`);
   }
   return lines.join('\n');
 }
