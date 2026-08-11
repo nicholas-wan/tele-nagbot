@@ -596,17 +596,17 @@ function cadence(r) {
   return 'once';
 }
 
-// "today 9:00 PM" / "tomorrow 9:00 AM" / "Thu 8:00 AM" / "Aug 24, 9:00 PM".
+// Hybrid countdown + absolute: "today 9:00 PM" / "tomorrow 9:00 AM" /
+// "in 3 days · Fri 5:00 PM" / "in 13 days · Aug 24, 7:00 PM".
 function fmtWhen(ms, tz) {
   const time = fmtClock(ms, tz);
   const t = localParts(ms, tz);
-  const today = localParts(Date.now(), tz);
-  const tomorrow = localParts(Date.now() + 86400000, tz);
-  const sameDay = (a, b) => a.y === b.y && a.mo === b.mo && a.d === b.d;
-  if (sameDay(t, today)) return `today ${time}`;
-  if (sameDay(t, tomorrow)) return `tomorrow ${time}`;
-  if (ms - Date.now() < 6 * 86400000) return `${DAY_NAMES[t.wd]} ${time}`;
-  return fmtShort(ms, tz);
+  const n = localParts(Date.now(), tz);
+  const days = Math.round((Date.UTC(t.y, t.mo - 1, t.d) - Date.UTC(n.y, n.mo - 1, n.d)) / 86400000);
+  if (days <= 0) return `today ${time}`;
+  if (days === 1) return `tomorrow ${time}`;
+  const when = days < 7 ? `${DAY_NAMES[t.wd]} ${time}` : fmtShort(ms, tz);
+  return `in ${days} days · ${when}`;
 }
 
 // Renders the chore-card list shared by /list and the pinned dashboard.

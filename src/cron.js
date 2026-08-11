@@ -126,6 +126,10 @@ async function sendDigests(env, now) {
       ).bind(chat_id, ymd).run();
       if (!claim.meta.changes) continue;
 
+      // Once-a-day dashboard refresh keeps the pinned countdowns honest even
+      // when no chore event has touched it.
+      await updateDashboard(env, chat_id);
+
       const endOfDay = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
       const due = await env.DB.prepare(
         'SELECT * FROM reminders WHERE chat_id = ? AND paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ? ORDER BY next_fire_at'
