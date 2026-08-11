@@ -62,7 +62,16 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     args = args.replace(rotM[0], ' ');
   }
 
+  // "from [this|next|the] friday": anchors the first occurrence to that day.
+  let fromDay = null;
+  const fromM = args.match(new RegExp(`\\bfrom\\s+(?:this\\s+|next\\s+|the\\s+)?(${DAY_WORD})\\b`, 'i'));
+  if (fromM) {
+    fromDay = DAY_INDEX[fromM[1].slice(0, 3).toLowerCase()];
+    args = args.replace(fromM[0], ' ');
+  }
+
   const otherM = args.match(/\bevery\s+other\s+(day|week)\b/i);
+  const monthsM = args.match(/\bevery\s+(\d+)\s+months?\b/i);
   const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
   const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
   const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
@@ -77,6 +86,12 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     kind = 'interval';
     detail.days = otherM[1].toLowerCase() === 'day' ? 2 : 14;
     args = args.replace(otherM[0], ' ');
+  } else if (monthsM) {
+    const months = +monthsM[1];
+    if (months < 1 || months > 24) throw new ParseError('Every how many months? 1–24.');
+    kind = 'interval';
+    detail.months = months;
+    args = args.replace(monthsM[0], ' ');
   } else if (weekdaysM) {
     kind = 'weekly';
     detail.days = /weekend/i.test(weekdaysM[1]) ? [0, 6] : [1, 2, 3, 4, 5];
@@ -191,7 +206,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   if (rotate) detail.rotate = true;
 
   let firstFireAt;
-  if (kind === 'once') {
+  if (fromDay != null) {
+    // Anchored start: first occurrence on the coming <weekday> at h:mi; the
+    // recurring cadence (if any) continues from there.
+    firstFireAt = nextOccurrence('weekly', { days: [fromDay], h, mi }, nowMs, tz);
+  } else if (kind === 'once') {
     // One-off date: tomorrow / today / a weekday name / default (next slot).
     const p = localParts(nowMs, tz);
     const tomorrowM = args.match(/\btomorrow\b/i);

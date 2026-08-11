@@ -95,6 +95,22 @@ describe('other forms', () => {
     expect(parse('trash 7pm nag:10m').nagIntervals).toEqual([10]);
   });
 
+  it('every N months', () => {
+    const r = parse('nexgard vaccine every 3 months from this friday 7pm');
+    expect(r).toMatchObject({ kind: 'interval', detail: { months: 3, h: 19 } });
+    expect(r.text).toBe('nexgard vaccine');
+    expect(local(r.firstFireAt)).toMatchObject({ d: 14, wd: 5, h: 19 }); // Fri Aug 14
+  });
+
+  it('from <day> anchors the first occurrence', () => {
+    const r = parse('cut nails every 2 weeks from friday 5pm');
+    expect(r).toMatchObject({ kind: 'interval', detail: { days: 14 } });
+    expect(r.text).toBe('cut nails');
+    expect(local(r.firstFireAt)).toMatchObject({ d: 14, wd: 5, h: 17 });
+    const d = parse('water plants daily from monday 9am'); // today is Mon 12:00
+    expect(local(d.firstFireAt)).toMatchObject({ d: 17, wd: 1, h: 9 });
+  });
+
   it('rotate flag', () => {
     const r = parse('litterbox daily 9pm rotate');
     expect(r.detail.rotate).toBe(true);

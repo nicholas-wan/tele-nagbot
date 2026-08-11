@@ -63,7 +63,14 @@ export function nextOccurrence(kind, detail, afterMs, tz) {
   }
 
   if (kind === 'interval') {
-    // N days after the last firing's calendar date, at the set time.
+    // N months after the last firing's calendar date (day clamped), or
+    // N days after it, at the set time.
+    if (detail.months) {
+      let y = p.y, mo = p.mo + detail.months;
+      while (mo > 12) { mo -= 12; y++; }
+      const d = Math.min(p.d, daysInMonth(y, mo));
+      return zonedEpoch(y, mo, d, detail.h, detail.mi, tz);
+    }
     const c = dateAdd(p.y, p.mo, p.d, detail.days);
     return zonedEpoch(c.y, c.mo, c.d, detail.h, detail.mi, tz);
   }

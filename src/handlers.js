@@ -224,6 +224,7 @@ function describeSchedule(r) {
   }
   if (r.schedule_kind === 'monthly') return `on the ${d.dom} at ${fmtTime(d.h, d.mi)}`;
   if (r.schedule_kind === 'interval') {
+    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`;
     const w = d.days % 7 === 0 ? d.days / 7 : 0;
     return w ? `every ${w} week${w > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`
              : `every ${d.days} days at ${fmtTime(d.h, d.mi)}`;
@@ -297,7 +298,7 @@ async function cmdHelp(env, chatId) {
   await sendMessage(env, chatId,
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
-    '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
+    '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>every 3 months from friday</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
     '/list · /done N · /delete N · /pause N · /resume N · /skip N · /poke (re-nag everything now)\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag, or react 👍 on it — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
@@ -609,6 +610,11 @@ async function choreListHtml(env, chatId, tz) {
   if (st && st.paused_until && st.paused_until > Date.now()) {
     lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
   }
+  // Nagging first, then upcoming soonest-first, paused last.
+  const rank = (r) => r.paused ? 2 : (nagging.has(r.id) || !r.next_fire_at) ? 0 : 1;
+  results.sort((a, b) => rank(a) - rank(b)
+    || (a.next_fire_at || 0) - (b.next_fire_at || 0)
+    || a.display_num - b.display_num);
   for (const r of results) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
