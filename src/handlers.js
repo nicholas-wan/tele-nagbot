@@ -582,6 +582,20 @@ function scheduleFromCode(code, draft, now, tz) {
   return null;
 }
 
+// Schedule cadence without the time-of-day (list cards lead with the time).
+function cadence(r) {
+  const d = JSON.parse(r.schedule_detail);
+  if (r.schedule_kind === 'daily') return 'daily';
+  if (r.schedule_kind === 'weekly') return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')}`;
+  if (r.schedule_kind === 'monthly') return `on the ${d.dom}`;
+  if (r.schedule_kind === 'interval') {
+    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''}`;
+    const w = d.days % 7 === 0 ? d.days / 7 : 0;
+    return w ? `every ${w} week${w > 1 ? 's' : ''}` : `every ${d.days} days`;
+  }
+  return 'once';
+}
+
 // "today 9:00 PM" / "tomorrow 9:00 AM" / "Thu 8:00 AM" / "Aug 24, 9:00 PM".
 function fmtWhen(ms, tz) {
   const time = fmtClock(ms, tz);
@@ -618,13 +632,12 @@ async function choreListHtml(env, chatId, tz) {
   for (const r of results) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
-    const status = r.paused ? '⏸️ paused'
+    const lead = r.paused ? '⏸️ paused'
       : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
-      : r.schedule_kind === 'once' ? fmtWhen(r.next_fire_at, tz)
-      : `${describeSchedule(r)} · next ${fmtWhen(r.next_fire_at, tz)}`;
+      : fmtWhen(r.next_fire_at, tz);
     lines.push('');
-    lines.push(`${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
-    lines.push(`      ${status} · #${r.display_num}`);
+    lines.push(`${lead} · ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
+    lines.push(`      ${cadence(r)} · #${r.display_num}`);
   }
   return lines.join('\n');
 }
