@@ -7,6 +7,11 @@ import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
 import { tg } from './tg.js';
 
+function adminAuthorized(request, env) {
+  if (!env.ADMIN_SECRET) return false;
+  return request.headers.get('Authorization') === `Bearer ${env.ADMIN_SECRET}`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -24,11 +29,14 @@ export default {
       ctx.waitUntil(handleUpdate(env, update).catch((e) => console.log(`update failed: ${e.stack || e}`)));
       return new Response('ok');
     }
-    // One-time helper: GET /setup?key=<WEBHOOK_SECRET> makes the Worker
-    // register its own webhook with Telegram, so the bot token never needs
-    // to appear in a shell command.
-    if (request.method === 'GET' && url.pathname === '/setup') {
-      if (url.searchParams.get('key') !== env.WEBHOOK_SECRET) {
+    // One-time helper: POST /setup with ADMIN_SECRET as a bearer token makes
+    // the Worker register its own webhook with Telegram. WEBHOOK_SECRET is
+    // reserved exclusively for Telegram's webhook-authentication header.
+    if (url.pathname === '/setup') {
+      if (request.method !== 'POST') {
+        return new Response('method not allowed', { status: 405, headers: { Allow: 'POST' } });
+      }
+      if (!adminAuthorized(request, env)) {
         return new Response('forbidden', { status: 403 });
       }
       if (!env.BOT_TOKEN) {
@@ -49,13 +57,13 @@ export default {
       const cmdRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // Lean menu: daily drivers only. Every other command still works
-        // when typed; /help lists them all.
+        // Lean menu: daily drivers only. Every other command still works;
+        // /help exposes the advanced sections without crowding autocomplete.
         body: JSON.stringify({ commands: [
           { command: 'remind', description: 'New reminder — e.g. trash 7pm daily, dishes now' },
           { command: 'list', description: 'Active reminders' },
           { command: 'done', description: 'Mark a reminder done without the button' },
-          { command: 'help', description: 'All commands and examples' },
+          { command: 'help', description: 'Quick guide and more options' },
         ] }),
       });
       const cmdData = await cmdRes.json();
@@ -65,11 +73,17 @@ export default {
         { status: data.ok ? 200 : 500 }
       );
     }
-    // Admin helper: GET /admin?key=<WEBHOOK_SECRET>&name=...&desc=...&short=...
-    // updates the bot's display name / description via its own token.
-    if (request.method === 'GET' && url.pathname === '/admin') {
-      if (url.searchParams.get('key') !== env.WEBHOOK_SECRET) {
+    // Admin helper: POST /admin?name=...&desc=...&short=... with ADMIN_SECRET
+    // as a bearer token updates the bot profile via its own token.
+    if (url.pathname === '/admin') {
+      if (request.method !== 'POST') {
+        return new Response('method not allowed', { status: 405, headers: { Allow: 'POST' } });
+      }
+      if (!adminAuthorized(request, env)) {
         return new Response('forbidden', { status: 403 });
+      }
+      if (!env.BOT_TOKEN) {
+        return new Response('BOT_TOKEN secret is not set', { status: 500 });
       }
       const token = env.BOT_TOKEN.trim();
       // Tag inspection: &stickers&chat=<id> lists tags; &stickerimg=N&chat=<id>

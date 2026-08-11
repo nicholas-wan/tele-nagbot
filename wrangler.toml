@@ -7,6 +7,9 @@ compatibility_date = "2026-08-01"
 [vars]
 ALLOWED_CHATS = "-435466607"
 
+# Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET, and
+# ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.
+
 # Fires the scheduled handler every minute to send due reminders and re-nags.
 [triggers]
 crons = ["* * * * *"]

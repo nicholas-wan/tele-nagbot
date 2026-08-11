@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { localParts, zonedEpoch, nextOccurrence, weekStart, deferQuietHours } from '../src/time.js';
+import { localParts, zonedEpoch, nextOccurrence, advanceOccurrence, weekStart, deferQuietHours } from '../src/time.js';
 
 const TZ = 'Asia/Singapore';
 // Monday 2026-08-10 12:00 SGT.
@@ -45,6 +45,22 @@ describe('nextOccurrence', () => {
 
   it('once: null', () => {
     expect(nextOccurrence('once', {}, NOW, TZ)).toBeNull();
+  });
+});
+
+describe('advanceOccurrence', () => {
+  it('keeps day intervals anchored when a near-midnight fire is processed late', () => {
+    const scheduled = zonedEpoch(2026, 8, 11, 23, 59, TZ);
+    const processed = zonedEpoch(2026, 8, 12, 0, 0, TZ);
+    const next = advanceOccurrence('interval', { days: 8, h: 23, mi: 59 }, scheduled, processed, TZ);
+    expect(local(next)).toMatchObject({ y: 2026, mo: 8, d: 19, h: 23, mi: 59 });
+  });
+
+  it('keeps month intervals anchored when a near-midnight fire is processed late', () => {
+    const scheduled = zonedEpoch(2026, 8, 11, 23, 59, TZ);
+    const processed = zonedEpoch(2026, 8, 12, 0, 0, TZ);
+    const next = advanceOccurrence('interval', { months: 3, h: 23, mi: 59 }, scheduled, processed, TZ);
+    expect(local(next)).toMatchObject({ y: 2026, mo: 11, d: 11, h: 23, mi: 59 });
   });
 });
 

@@ -152,6 +152,11 @@ describe('other forms', () => {
     }
   });
 
+  it('rejects chore descriptions over 200 characters', () => {
+    expect(() => parse(`${'x'.repeat(201)} 7pm`)).toThrow(/200 characters/);
+    expect(() => parse('x'.repeat(201))).toThrow(/200 characters/);
+  });
+
   it('past time today errors', () => {
     expect(() => parse('x today 9am')).toThrow(ParseError); // it is 12:00
   });

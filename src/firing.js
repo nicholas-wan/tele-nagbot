@@ -2,7 +2,7 @@
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
 import { sendMessage } from './tg.js';
-import { nextOccurrence, deferQuietHours, weekStart } from './time.js';
+import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
 import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
 
@@ -10,7 +10,9 @@ export async function fireReminder(env, r, now, tz) {
   // Claim the occurrence atomically (advance next_fire_at) before any sends:
   // an overlapping cron tick or "/remind ... now" racing the cron loses the
   // compare-and-swap. A crash mid-fire drops one nag, not the schedule.
-  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
+  const next = advanceOccurrence(
+    r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, now, tz
+  );
   const claim = await env.DB.prepare(
     'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
   ).bind(next, r.id, r.next_fire_at).run();

@@ -1,7 +1,7 @@
 // Runs every minute: fire due reminders, re-send unacknowledged nags,
 // expire firings older than 24h.
 
-import { sendMessage, sendLong, deleteMessage, esc, mentionHtml } from './tg.js';
+import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml } from './tg.js';
 import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
@@ -16,10 +16,7 @@ export async function runCron(env) {
     fire: () => fireDueReminders(env, now),
     renag: () => renagPending(env, now),
     // Abandoned time-choice prompts and /delete undo stashes expire after a day.
-    drafts: async () => {
-      await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(now - 86400000).run();
-      await env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(now - 86400000).run();
-    },
+    drafts: () => pruneDraftsAndTrash(env, now),
     retention: () => pruneOldFirings(env, now),
   };
   for (const [name, step] of Object.entries(steps)) {
@@ -29,6 +26,23 @@ export async function runCron(env) {
       console.log(`cron step ${name} failed: ${e.stack || e}`);
     }
   }
+}
+
+async function pruneDraftsAndTrash(env, now) {
+  const cutoff = now - 86400000;
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM drafts WHERE created_at < ?'
+  ).bind(cutoff).all();
+  for (const draft of results) {
+    if (draft.wizard_msg_id) {
+      await editMessage(env, draft.chat_id, draft.wizard_msg_id,
+        `⌛ Time picker expired for <s>${esc(draft.text)}</s>. Send /remind to start again.`,
+        { inline_keyboard: [] });
+    }
+    if (draft.prompt_msg_id) await deleteMessage(env, draft.chat_id, draft.prompt_msg_id);
+  }
+  await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(cutoff).run();
+  await env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(cutoff).run();
 }
 
 // Vacation mode ("/pause all N"): end any chat pause whose deadline passed.

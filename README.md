@@ -1,47 +1,34 @@
-# Nag-Bot (Latte & Mocha ☕🐈)
+# Nag-Bot 🐈
 
-Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers free tier: webhook + every-minute cron + D1. Bot: [@TwoShotsNagBot](https://t.me/TwoShotsNagBot) · Worker: `nag-bot.lattemocha.workers.dev`
+Telegram chore bot that nags until someone marks a chore done. Runs on Cloudflare Workers, D1, and a one-minute cron. [@TwoShotsNagBot](https://t.me/TwoShotsNagBot)
 
-## Commands
+## Use
 
-```
-/remind trash 7pm daily · @jane dishes now · plumber in 20m
-        every mon,thu 8am · every 8 days 9pm · every 2 weeks 7pm · every 3 months · on the 1st
-        tomorrow 9:30am · from friday (start anchor) · nag:10m
-        rotate            assign each occurrence to whoever has the fewest ✅ this week
-/list  /delete  /pause  /resume  /skip  /done     take a chore name (/done nails) or legacy number
-/poke             re-send every outstanding nag now, loud (no ladder/snooze cost)
-/pause all 14     vacation mode: mute everything for N days (auto-resumes) · /resume all
-/stats            weekly leaderboard (resets Monday) · /stats all = 6-month log
-/usepack <link>   sticker pack for nags · /tags · /tagsticker N latte · /autotag · /makestickers · /delsticker N
+```text
+/remind trash 7pm daily
+/remind @jane dishes now
+/remind plants every mon,thu 8am nag:10m
+/list · /edit · /done · /pause · /resume · /skip · /delete
+/poke · /stats · /pause all 14 · /resume all
 ```
 
-No time given → inline time-picker (tap, or reply with a custom time). Reply `done` or `snooze 2h` to any nag, or just react 👍/✅ on it (max 3 snoozes, capped at the 24h expiry). `done together` / the 🤝 button credits everyone; `done with @jane` credits the named helpers — each person gets their own ✅ in stats. Creation and deletion have Undo.
+Missing times open a guided picker. Nags support Done, Done together, Snooze, replies (`done`, `snooze 2h`), and 👍/✅ reactions. The pinned dashboard lists and manages every chore.
 
-## Behavior
+Nags repeat at 15/30/60 minutes, respect 11pm–8am quiet hours, and expire after 24 hours. Daily digest: 8am. Weekly wrap: Sunday 8pm. Default timezone: Singapore.
 
-- Nags re-send at 15/30/60 min (or `nag:` pace), deleting the previous nag — one live nag per chore. First re-nag silent, later ones ping. 24h unacked → expired 🪦.
-- Quiet hours 11pm–8am: re-nags and expiry notices due overnight wait for 8am. Explicitly scheduled reminder times still fire as set.
-- Sticker on first nag and on Done (once a pack exists via `/makestickers` or `/usepack`); nag lines name the cat on the sticker (per-sticker tags in D1).
-- Pinned chore-list dashboard (all chores incl. paused, nagging marked 🔔), silently edited; needs bot admin with Pin messages. Removed only when the list is empty.
-- Daily 8am digest and Sunday 8pm weekly wrap, both silent. Default timezone Asia/Singapore.
+Sticker tools: `/usepack`, `/makestickers`, `/tags`, `/tagsticker`, `/autotag`, `/delsticker`.
 
-## Code
+## Deploy
 
-| File | Purpose |
-|---|---|
-| `src/index.js` | webhook + `/setup` + `/admin` routes, cron entry |
-| `src/handlers.js` | commands, wizard, callbacks, dashboard, nag copy |
-| `src/cron.js` | fire/re-nag/expire, digest, weekly wrap |
-| `src/firing.js` | fire-one-reminder (cron + `/remind … now`) |
-| `src/parse.js` | /remind parser |
-| `src/time.js` | timezone + next-occurrence math |
-| `src/stickers.js` | packs, tagging, sticker sends |
-| `src/tg.js` | Telegram API client |
+```powershell
+npm test
+npx wrangler deploy
+```
 
-## Ops
+Required secrets: `BOT_TOKEN`, `WEBHOOK_SECRET`, `ADMIN_SECRET`. Allowed chats are configured in `wrangler.toml`; missing configuration fails closed. The bot needs Pin Messages and Delete Messages permissions.
 
-- Deploy: `npx wrangler deploy` · logs: `npx wrangler tail`
-- Access: only chat ids in `ALLOWED_CHATS` (`wrangler.toml` `[vars]`) are served; all other chats are ignored.
-- Secrets: `BOT_TOKEN`, `WEBHOOK_SECRET`. After first deploy, visit `/setup?key=<WEBHOOK_SECRET>` (registers webhook + command menu).
-- Schema changes: `wrangler d1 execute nagbot --remote` with `--file=schema.sql` (new tables) or `--command "ALTER …"`.
+Register the webhook and command menu after first deployment:
+
+```powershell
+curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.lattemocha.workers.dev/setup
+```

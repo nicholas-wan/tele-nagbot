@@ -4,6 +4,7 @@
 import { localParts, zonedEpoch, nextOccurrence } from './time.js';
 
 export const DEFAULT_NAGS = [15, 30, 60];
+export const MAX_CHORE_TEXT = 200;
 
 const DAY_INDEX = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 const DAY_WORD =
@@ -188,6 +189,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   if (h === null) {
     const text = cleanText(args);
     if (text) {
+      validateText(text);
       const err = new NoTimeError('missing time');
       err.partial = { text, assigneeName, assigneeUserId, nagIntervals, kind, detail };
       throw err;
@@ -265,5 +267,12 @@ function cleanText(args) {
 function finish(args, out) {
   const text = cleanText(args);
   if (!text) throw new ParseError('The reminder needs some text, e.g. /remind take out trash 7pm daily');
+  validateText(text);
   return { ...out, text };
+}
+
+function validateText(text) {
+  if ([...text].length > MAX_CHORE_TEXT) {
+    throw new ParseError(`Keep the chore description to ${MAX_CHORE_TEXT} characters or fewer.`);
+  }
 }

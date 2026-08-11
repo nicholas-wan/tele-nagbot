@@ -88,6 +88,18 @@ export function nextOccurrence(kind, detail, afterMs, tz) {
   return null;
 }
 
+// Advance a schedule after a due occurrence is processed. Calendar schedules
+// can skip straight past an outage, but intervals must stay anchored to the
+// scheduled occurrence or a late cron tick can permanently shift their date.
+export function advanceOccurrence(kind, detail, scheduledAt, processedAt, tz) {
+  if (kind !== 'interval') return nextOccurrence(kind, detail, processedAt, tz);
+  let next = nextOccurrence(kind, detail, scheduledAt, tz);
+  while (next != null && next <= processedAt) {
+    next = nextOccurrence(kind, detail, next, tz);
+  }
+  return next;
+}
+
 // Household quiet hours: bot-initiated re-nags never land between 11pm and
 // 8am local — anything due in that window waits for 8am. Scheduled reminder
 // times themselves are honored as set.
