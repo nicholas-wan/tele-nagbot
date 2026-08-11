@@ -299,7 +299,8 @@ async function cmdHelp(env, chatId) {
     '🐱 <b>Latte &amp; Mocha</b> nag until someone taps ✅ Done.\n\n' +
     '/remind trash 7pm daily · @jane dishes now · plumber in 20m\n' +
     '(also: <code>every mon,thu 8am</code>, <code>every 2 weeks 7pm</code>, <code>every 3 months from friday</code>, <code>on the 1st</code>, <code>tomorrow 9am</code>, <code>nag:10m</code>, <code>rotate</code> 🔄 fair-shares it)\n' +
-    '/list · /done N · /delete N · /pause N · /resume N · /skip N · /poke (re-nag everything now)\n' +
+    '/list · /done · /delete · /pause · /resume · /skip — by chore name, e.g. <code>/done nails</code>\n' +
+    '/poke — re-nag everything outstanding now\n' +
     '✈️ /pause all 14 — mute everything for 14 days (auto-resumes) · /resume all\n' +
     'Reply <code>done</code> or <code>snooze 2h</code> to any nag, or react 👍 on it — max 3 snoozes, unclaimed chores expire in 24h 🪦\n' +
     '🤝 <code>done together</code> (or the Both button) credits everyone; <code>done with @jane</code> picks who\n' +
@@ -346,7 +347,7 @@ async function createReminder(env, chatId, p, by, tz) {
   const id = res.meta.last_row_id;
   await updateDashboard(env, chatId);
   const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
-  const html = `📝 #${num} <b>${esc(p.text)}</b>${forWho}\nFirst reminder: ${fmtLocal(p.firstFireAt, tz)}` +
+  const html = `📝 <b>${esc(p.text)}</b>${forWho}\nFirst reminder: ${fmtLocal(p.firstFireAt, tz)}` +
     (p.kind !== 'once' ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '');
   return { id, html };
 }
@@ -426,10 +427,10 @@ async function handlePlainText(env, msg) {
     if (all.results.length === 1) return handleNagReply(env, msg, all.results[0]);
     if (all.results.length > 1) {
       const rows = await env.DB.prepare(
-        "SELECT r.display_num, r.text FROM firings f JOIN reminders r ON r.id = f.reminder_id WHERE f.chat_id = ? AND f.state = 'nagging' ORDER BY r.display_num"
+        "SELECT r.text FROM firings f JOIN reminders r ON r.id = f.reminder_id WHERE f.chat_id = ? AND f.state = 'nagging' ORDER BY r.id"
       ).bind(chatId).all();
       return sendMessage(env, chatId, '😺 Mrow — which one?\n' +
-        rows.results.map((r) => `/done ${r.display_num} — ${esc(r.text)}`).join('\n'));
+        rows.results.map((r) => `/done ${esc(r.text)}`).join('\n'));
     }
   }
 
@@ -637,7 +638,7 @@ async function choreListHtml(env, chatId, tz) {
       : fmtWhen(r.next_fire_at, tz);
     lines.push('');
     lines.push(`${lead} · ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
-    lines.push(`      ${cadence(r)} · #${r.display_num}`);
+    lines.push(`      ${cadence(r)}`);
   }
   return lines.join('\n');
 }
@@ -648,14 +649,23 @@ async function cmdList(env, chatId, tz) {
   await sendLong(env, chatId, html);
 }
 
+// Chores are addressed by name ("/done nails"); bare numbers still work as
+// the legacy handles.
 async function findReminder(env, chatId, args, cmd = 'delete') {
-  const num = parseInt(String(args).replace('#', '').trim(), 10);
-  if (!num) throw new ParseError(`Give me a reminder number, e.g. /${cmd} 3 (see /list).`);
-  const r = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE display_num = ? AND chat_id = ?'
-  ).bind(num, chatId).first();
-  if (!r) throw new ParseError(`No reminder #${num} here. See /list.`);
-  return r;
+  const raw = String(args).replace('#', '').trim();
+  if (!raw) throw new ParseError(`Which chore? e.g. /${cmd} nails (see /list).`);
+  const { results } = await env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ?').bind(chatId).all();
+  const num = parseInt(raw, 10);
+  if (num) {
+    const r = results.find((x) => x.display_num === num);
+    if (r) return r;
+    throw new ParseError(`No reminder ${num} here. See /list.`);
+  }
+  const q = raw.toLowerCase();
+  const matches = results.filter((x) => x.text.toLowerCase().includes(q));
+  if (matches.length === 1) return matches[0];
+  if (!matches.length) throw new ParseError(`The cats can't find a chore matching "${raw}". See /list.`);
+  throw new ParseError(`"${raw}" matches: ${matches.map((x) => x.text).join(', ')} — be more specific.`);
 }
 
 async function cmdDelete(env, chatId, args) {
@@ -675,7 +685,7 @@ async function cmdDelete(env, chatId, args) {
   const stash = await env.DB.prepare(
     'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
   ).bind(chatId, JSON.stringify(r), Date.now()).run();
-  await sendMessage(env, chatId, `🗑️ Deleted #${r.display_num} <s>${esc(r.text)}</s>`,
+  await sendMessage(env, chatId, `🗑️ Deleted <s>${esc(r.text)}</s>`,
     { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` }]] });
   await updateDashboard(env, chatId);
 }
@@ -738,28 +748,28 @@ async function cmdPauseResume(env, chatId, args, tz, pause) {
   if (pause) {
     await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
     await updateDashboard(env, chatId);
-    await sendMessage(env, chatId, `⏸️ Paused #${r.display_num} <b>${esc(r.text)}</b>. /resume ${r.display_num} to re-enable.`);
+    await sendMessage(env, chatId, `⏸️ Paused <b>${esc(r.text)}</b>. /resume ${esc(r.text)} to re-enable.`);
   } else {
     const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), Date.now(), tz) || r.next_fire_at;
     await env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
     await updateDashboard(env, chatId);
     if (next != null) {
-      return sendMessage(env, chatId, `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
+      return sendMessage(env, chatId, `▶️ Resumed <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
     }
     // A one-off that already fired has nothing left to schedule.
     const nag = await env.DB.prepare(
       "SELECT id FROM firings WHERE reminder_id = ? AND state = 'nagging'"
     ).bind(r.id).first();
     await sendMessage(env, chatId, nag
-      ? `▶️ Resumed #${r.display_num} <b>${esc(r.text)}</b> — the cats resume pestering.`
-      : `😼 #${r.display_num} already fired and has nothing scheduled — /delete ${r.display_num} or make a new /remind.`);
+      ? `▶️ Resumed <b>${esc(r.text)}</b> — the cats resume pestering.`
+      : `😼 <b>${esc(r.text)}</b> already fired and has nothing scheduled — /delete it or make a new /remind.`);
   }
 }
 
 async function cmdSkip(env, chatId, args, tz) {
   const r = await findReminder(env, chatId, args, 'skip');
   if (r.schedule_kind === 'once' || !r.next_fire_at) {
-    throw new ParseError(`#${r.display_num} is a one-off — use /delete ${r.display_num} instead.`);
+    throw new ParseError(`"${r.text}" is a one-off — use /delete ${r.text} instead.`);
   }
   const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
   await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
@@ -768,11 +778,12 @@ async function cmdSkip(env, chatId, args, tz) {
 }
 
 async function cmdDone(env, chatId, args, by, tz) {
-  const r = await findReminder(env, chatId, args, 'done');
+  const target = String(args).replace(/\b(together|both)\b/i, '').trim();
+  const r = await findReminder(env, chatId, target, 'done');
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
-  if (!firing) throw new ParseError(`#${r.display_num} is not currently nagging.`);
+  if (!firing) throw new ParseError(`"${r.text}" is not currently nagging.`);
   let credit = by;
   if (/\b(together|both)\b/i.test(String(args))) {
     const roster = await householdRoster(env, chatId);
@@ -1147,7 +1158,7 @@ async function handleCallback(env, cb) {
     ).run();
     await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
     await updateDashboard(env, r.chat_id);
-    await editMessage(env, r.chat_id, cb.message.message_id, `↩️ Restored #${num} <b>${esc(r.text)}</b>`);
+    await editMessage(env, r.chat_id, cb.message.message_id, `↩️ Restored <b>${esc(r.text)}</b>`);
     return answerCallback(env, cb.id, 'Restored 😺');
   }
 

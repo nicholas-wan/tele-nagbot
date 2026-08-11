@@ -9,7 +9,7 @@ Telegram chore bot that nags until someone taps ✅ Done. Cloudflare Workers fre
         every mon,thu 8am · every 8 days 9pm · every 2 weeks 7pm · every 3 months · on the 1st
         tomorrow 9:30am · from friday (start anchor) · nag:10m
         rotate            assign each occurrence to whoever has the fewest ✅ this week
-/list  /delete N  /pause N  /resume N  /skip N  /done N
+/list  /delete  /pause  /resume  /skip  /done     take a chore name (/done nails) or legacy number
 /poke             re-send every outstanding nag now, loud (no ladder/snooze cost)
 /pause all 14     vacation mode: mute everything for N days (auto-resumes) · /resume all
 /stats            weekly leaderboard (resets Monday) · /stats all = 6-month log
