@@ -638,7 +638,7 @@ async function choreListHtml(env, chatId, tz) {
       : fmtWhen(r.next_fire_at, tz);
     lines.push('');
     lines.push(`${lead} · ${choreEmoji(r.text)} <b>${esc(r.text)}</b>${rot}${who}`);
-    lines.push(`      ${cadence(r)}`);
+    lines.push(`      <i>${cadence(r)}</i>`);
   }
   return lines.join('\n');
 }
