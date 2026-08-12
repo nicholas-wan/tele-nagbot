@@ -64,6 +64,7 @@ export default {
           { command: 'remind', description: 'Plain reminder — no points' },
           { command: 'list', description: 'Active chores and reminders' },
           { command: 'done', description: 'Mark one done without the button' },
+          { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
           { command: 'help', description: 'Quick guide and more options' },
         ] }),
       });
