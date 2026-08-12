@@ -83,19 +83,18 @@ describe('ephemeral interactions', () => {
   it('carries the callback id so a tap can be answered privately', async () => {
     await handleUpdate(env(), {
       callback_query: {
-        id: 'cb1', data: 'm:list', from: { id: 2, first_name: 'Nick' },
-        message: { message_id: 99, chat: { id: 1 }, text: 'dashboard' },
+        id: 'cb1', data: 'h:more', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 0, ephemeral_message_id: 77, chat: { id: 1 } },
       },
     });
-    const sent = find('sendMessage');
-    expect(sent.body.callback_query_id).toBe('cb1');
-    expect(sent.body.receiver_user_id).toBe(2);
+    const edited = find('editEphemeralMessageText');
+    expect(edited.body.receiver_user_id).toBe(2);
   });
 
   it('edits an ephemeral message with editEphemeralMessageText', async () => {
     await handleUpdate(env(), {
       callback_query: {
-        id: 'cb2', data: 'm:item:10', from: { id: 2, first_name: 'Nick' },
+        id: 'cb2', data: 'h:home', from: { id: 2, first_name: 'Nick' },
         message: { message_id: 0, ephemeral_message_id: 77, chat: { id: 1 } },
       },
     });
@@ -105,20 +104,22 @@ describe('ephemeral interactions', () => {
     expect(edited.body.receiver_user_id).toBe(2);
     // The public edit methods must not be used on an ephemeral message.
     expect(find('editMessageText')).toBeUndefined();
-    expect(find('editMessageReplyMarkup')).toBeUndefined();
   });
 
-  it('keeps the pinned dashboard public', async () => {
+  it('drives Manage inside the pinned dashboard, not a private message', async () => {
     await handleUpdate(env(), {
       callback_query: {
         id: 'cb3', data: 'm:list', from: { id: 2, first_name: 'Nick' },
         message: { message_id: 99, chat: { id: 1 }, text: 'dashboard' },
       },
     });
-    // Nothing may rewrite message 99, and no send may target it privately.
-    const touchesPin = calls.some((c) => c.body && c.body.message_id === 99
-      && /editMessageText|editMessageReplyMarkup|deleteMessage/.test(c.url));
-    expect(touchesPin).toBe(false);
+    const edited = find('editMessageReplyMarkup');
+    expect(edited.body.message_id).toBe(99);
+    expect(edited.body.reply_markup.inline_keyboard[0][0]).toMatchObject({
+      text: '#3 Water plants', callback_data: 'm:item:10',
+    });
+    // Manage is a shared surface: nothing about it is sent privately.
+    expect(calls.some((c) => c.url.endsWith('/sendMessage') && c.body.receiver_user_id)).toBe(false);
   });
 
   it('deletes a legacy public command but never an ephemeral one', async () => {

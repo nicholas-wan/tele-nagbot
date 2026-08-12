@@ -1,7 +1,7 @@
 // Webhook update handling: commands and inline-button callbacks.
 
 import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage,
-         replyCtx, sendPrivate, editEphemeral, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef } from './tg.js';
+         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -1417,8 +1417,6 @@ function editorSubmenu(kind, r, roster = []) {
   return { inline_keyboard: rows };
 }
 
-// Legacy only: before ephemeral managers existed the editor could be driven
-// from the pinned message itself. Kept so old public dashboards still behave.
 async function editorIsDashboard(env, cb) {
   if (!cb.message.message_id) return false;
   const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
@@ -1426,9 +1424,8 @@ async function editorIsDashboard(env, cb) {
   return Boolean(row && row.dashboard_msg_id === cb.message.message_id);
 }
 
-async function refreshEditor(env, ctx, cb, ref, r, tz, buttons = null) {
+async function refreshEditor(env, cb, r, tz, buttons = null) {
   const markup = buttons || await editorButtons(env, r);
-  if (ref && ref.ephemeral) return editEphemeral(env, ctx, ref.id, editorText(r, tz), markup);
   if (await editorIsDashboard(env, cb)) {
     const html = await choreListHtml(env, r.chat_id, tz);
     return editMessage(env, r.chat_id, cb.message.message_id, html, markup);
@@ -1473,17 +1470,11 @@ function buttonText(r) {
   return [...text].length > 42 ? `${[...text].slice(0, 41).join('')}…` : text;
 }
 
-// A manage callback is legitimate if it came from the public pinned dashboard
-// (the entry point) or from an ephemeral manager, which Telegram only ever
-// delivers to the one member it was addressed to.
-async function dashboardCallbackAllowed(env, cb, ref) {
-  if (ref && ref.ephemeral) return true;
+async function dashboardCallbackAllowed(env, cb) {
   const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
     .bind(cb.message.chat.id).first();
   return row && row.dashboard_msg_id === cb.message.message_id;
 }
-
-const MANAGER_TITLE = '⚙️ <b>Manage chores</b>\n<i>Only you can see this.</i>';
 
 async function chorePickerMarkup(env, chatId) {
   const { results } = await env.DB.prepare(
@@ -1519,13 +1510,11 @@ async function choreActionsMarkup(env, r) {
   return { inline_keyboard: rows };
 }
 
-// Draw a manager screen. Tapping the public pinned dashboard opens a fresh
-// private one; every step after that edits that private message. The pinned
-// message is never repurposed as a control surface — it stays the household's
-// read-only board and is refreshed independently by updateDashboard.
-async function renderManager(env, ctx, ref, html, markup) {
-  if (ref && ref.ephemeral) return editEphemeral(env, ctx, ref.id, html, markup);
-  return sendPrivate(env, ctx, html, markup);
+// Manage runs inside the pinned dashboard itself: swap its buttons, leave its
+// text alone. Deliberately a shared surface — anyone in the household can pick
+// up where another left off, and there is nothing private on it.
+function renderManager(env, cb, markup) {
+  return editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, markup);
 }
 
 async function handleCallback(env, cb) {
@@ -1553,13 +1542,13 @@ async function handleCallback(env, cb) {
         return answerCallback(env, cb.id, 'Closed');
       }
       if (action === 'menu') {
-        await refreshEditor(env, ctx, cb, ref, r, tz);
+        await refreshEditor(env, cb, r, tz);
         return answerCallback(env, cb.id, '');
       }
       if (['time', 'schedule', 'nag', 'assign'].includes(action)) {
         const roster = action === 'assign'
           ? [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b)) : [];
-        await refreshEditor(env, ctx, cb, ref, r, tz, editorSubmenu(action, r, roster));
+        await refreshEditor(env, cb, r, tz, editorSubmenu(action, r, roster));
         return answerCallback(env, cb.id, '');
       }
       if (action === 'rotate') {
@@ -1582,7 +1571,7 @@ async function handleCallback(env, cb) {
     r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
     if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
     await updateDashboard(env, r.chat_id);
-    await refreshEditor(env, ctx, cb, ref, r, tz);
+    await refreshEditor(env, cb, r, tz);
     return answerCallback(env, cb.id, 'Updated ✓');
   }
 
@@ -1596,18 +1585,14 @@ async function handleCallback(env, cb) {
   const manage = (cb.data || '').match(/^m:(list|close)$/);
   const manageItem = (cb.data || '').match(/^m:(item|edit|pause|resume|skip|done|doneall|delete|confirm):(\d+)$/);
   if ((manage || manageItem) && cb.message) {
-    if (!await dashboardCallbackAllowed(env, cb, ref)) {
+    if (!await dashboardCallbackAllowed(env, cb)) {
       return answerCallback(env, cb.id, 'That dashboard is no longer active.');
     }
     if (manage) {
       if (manage[1] === 'close') {
-        // Closing a private manager removes it outright. On a legacy public
-        // dashboard there is nothing to remove — just restore its own button.
-        if (ref && ref.ephemeral) await deleteEphemeral(env, ctx, ref.id);
-        else await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons());
+        await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons());
       } else {
-        await renderManager(env, ctx, ref, MANAGER_TITLE,
-          await chorePickerMarkup(env, cb.message.chat.id));
+        await renderManager(env, cb, await chorePickerMarkup(env, cb.message.chat.id));
       }
       return answerCallback(env, cb.id, '');
     }
@@ -1619,24 +1604,23 @@ async function handleCallback(env, cb) {
       await updateDashboard(env, cb.message.chat.id);
       return answerCallback(env, cb.id, 'That chore is already gone.');
     }
-    const tzM = await getTz(env, r.chat_id);
     if (action === 'item') {
-      await renderManager(env, ctx, ref, editorText(r, tzM), await choreActionsMarkup(env, r));
+      await renderManager(env, cb, await choreActionsMarkup(env, r));
       return answerCallback(env, cb.id, buttonText(r));
     }
     if (action === 'edit') {
-      await renderManager(env, ctx, ref, editorText(r, tzM), await editorButtons(env, r));
+      await renderManager(env, cb, await editorButtons(env, r));
       return answerCallback(env, cb.id, `Editing #${r.display_num}`);
     }
     if (action === 'delete') {
-      await renderManager(env, ctx, ref, editorText(r, tzM), { inline_keyboard: [
+      await renderManager(env, cb, { inline_keyboard: [
         [{ text: `Delete #${r.display_num}?`, callback_data: `m:confirm:${r.id}` }],
         [{ text: '← Cancel', callback_data: `m:item:${r.id}` }],
       ] });
       return answerCallback(env, cb.id, 'This removes the chore for everyone.');
     }
     if (action === 'confirm') {
-      await deleteReminder(env, r, ctx);
+      await deleteReminder(env, r);
       return answerCallback(env, cb.id, 'Deleted — Undo is available below.');
     }
 
