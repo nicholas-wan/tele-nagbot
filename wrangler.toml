@@ -5,7 +5,10 @@ compatibility_date = "2026-08-01"
 # Chats the bot will answer (comma-separated Telegram chat ids). Updates from
 # any other chat — including stranger DMs — are ignored before touching D1/AI.
 [vars]
-ALLOWED_CHATS = "-435466607"
+# -1004418632524 is the supergroup the original basic group (-435466607) was
+# upgraded to when an admin was promoted. The upgrade mints a new id; the old
+# one is a dead husk and is deliberately not listed.
+ALLOWED_CHATS = "-1004418632524"
 
 # Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET, and
 # ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.

@@ -326,6 +326,12 @@ export async function handleUpdate(env, update) {
     || (update.callback_query && update.callback_query.from)
     || (update.message_reaction && update.message_reaction.user);
   if (!chatAllowed(env, chat && chat.id)) {
+    // Group traffic we reject is worth a log line: the usual cause is a basic
+    // group being upgraded to a supergroup, which mints a new chat id that
+    // ALLOWED_CHATS doesn't name yet. DMs stay unlogged.
+    if (chat && chat.id < 0) {
+      console.log(`rejected chat ${chat.id} (${chat.type}) "${chat.title || ''}"`);
+    }
     // Private chats: known household members get their DM nag line; everyone
     // else stays silently ignored.
     if (!env.DB || !chat || chat.id < 0 || !from || from.is_bot) return;
