@@ -57,15 +57,14 @@ export default {
       const cmdRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // Only entry points that nothing can tap its way to. Edit, delete,
-        // pause, resume, skip and done are all buttons on the dashboard's
-        // per-item menu, and the sticker commands are one-time setup — they
-        // stay typeable, just out of the menu. Every command still executes.
+        // Only entry points that nothing can tap its way to. Anything acting
+        // on an existing chore — done, edit, delete, pause, resume, skip — is
+        // a button on the nag or the dashboard item menu, and the sticker
+        // commands are one-time setup. All stay typeable, just out of the menu.
         body: JSON.stringify({ commands: [
           { command: 'chore', description: 'New chore — counts on the leaderboard' },
           { command: 'remind', description: 'Plain reminder — no points' },
           { command: 'list', description: 'Active chores and reminders' },
-          { command: 'done', description: 'Mark one done without the button' },
           { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
           { command: 'help', description: 'Quick guide and more options' },
         ] }),
