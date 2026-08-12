@@ -127,6 +127,29 @@ export default {
         const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
         return new Response(JSON.stringify(await res.json(), null, 2), { status: 200 });
       }
+      // Diagnosis helper: is the bot still in the chat, did the chat migrate to
+      // a supergroup (new id — ALLOWED_CHATS would then silently drop it), and
+      // is privacy mode hiding group messages? Defaults to the first allowed chat.
+      if (url.searchParams.get('diag') !== null) {
+        const id = url.searchParams.get('diag')
+          || String(env.ALLOWED_CHATS || '').split(',')[0].trim();
+        const call = async (method, params) => {
+          const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params || {}),
+          });
+          return r.json();
+        };
+        const me = await call('getMe');
+        const chat = await call('getChat', { chat_id: id });
+        const member = me.ok
+          ? await call('getChatMember', { chat_id: id, user_id: me.result.id })
+          : null;
+        return new Response(JSON.stringify({
+          allowed_chats: env.ALLOWED_CHATS, probed_chat: id, me, chat, member,
+        }, null, 2), { status: 200 });
+      }
       const out = [];
       const calls = [
         ['name', 'setMyName', 'name'],
