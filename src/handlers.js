@@ -251,10 +251,19 @@ export async function updateDashboard(env, chatId) {
     }
     const sent = await sendMessage(env, chatId, html, dashboardButtons(), { silent: true });
     if (sent.ok) {
-      await pinMessage(env, chatId, sent.result.message_id);
+      // A board that exists but isn't pinned is worse than a missing one: it
+      // scrolls away and nobody notices it stopped being the board. Say so
+      // loudly rather than failing silently.
+      const pinned = await pinMessage(env, chatId, sent.result.message_id);
+      if (!pinned.ok) {
+        console.log(`dashboard pin FAILED for chat ${chatId}: ${pinned.description || 'unknown'} ` +
+          '— bot needs the Pin Messages admin right');
+      }
       await env.DB.prepare(
         'INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET dashboard_msg_id = excluded.dashboard_msg_id'
       ).bind(chatId, sent.result.message_id).run();
+    } else {
+      console.log(`dashboard send failed for chat ${chatId}: ${sent.description || 'unknown'}`);
     }
   } catch (e) {
     console.log(`updateDashboard failed: ${e}`);
@@ -868,6 +877,9 @@ async function choreListHtml(env, chatId, tz) {
 async function cmdList(env, ctx, tz) {
   const html = await choreListHtml(env, ctx.chatId, tz);
   if (!html) return sendPrivate(env, ctx, '😺 No chores on the list. Add one with /remind.');
+  // Doubles as the manual board repair: if the pin was lost — a group upgrade,
+  // someone unpinning by hand — /list puts it back.
+  await updateDashboard(env, ctx.chatId);
   await sendPrivateLong(env, ctx, html);
 }
 
@@ -1465,9 +1477,19 @@ async function applyEditorChoice(env, r, kind, value, tz) {
   return true;
 }
 
-function buttonText(r) {
-  const text = `#${r.display_num} ${r.text}`;
-  return [...text].length > 42 ? `${[...text].slice(0, 41).join('')}…` : text;
+// Every management button carries the chore's own identity — name plus when —
+// because the pinned board's text never changes while you navigate. Internal
+// numbers stay out of labels; the name is the handle everywhere else too.
+function buttonText(r, tz = 'Asia/Singapore') {
+  const when = r.paused ? 'paused'
+    : r.next_fire_at ? fmtWhen(r.next_fire_at, tz)
+    : 'nagging now';
+  return clip(`${[choreEmoji(r.text), r.text].filter(Boolean).join(' ')} · ${when}`);
+}
+
+function clip(text, max = 42) {
+  const chars = [...text];
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
 }
 
 async function dashboardCallbackAllowed(env, cb) {
@@ -1476,23 +1498,25 @@ async function dashboardCallbackAllowed(env, cb) {
   return row && row.dashboard_msg_id === cb.message.message_id;
 }
 
-async function chorePickerMarkup(env, chatId) {
+async function chorePickerMarkup(env, chatId, tz) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY display_num'
   ).bind(chatId).all();
   const rows = results.slice(0, 20).map((r) => [
-    { text: buttonText(r), callback_data: `m:item:${r.id}` },
+    { text: `✏️ ${buttonText(r, tz)}`, callback_data: `m:item:${r.id}` },
   ]);
   if (results.length > 20) rows.push([{ text: '…use /list for the rest', callback_data: 'm:close' }]);
-  rows.push([{ text: '✕ Close', callback_data: 'm:close' }]);
+  rows.push([{ text: '← Done', callback_data: 'm:close' }]);
   return { inline_keyboard: rows };
 }
 
-async function choreActionsMarkup(env, r) {
+async function choreActionsMarkup(env, r, tz) {
   const firing = await env.DB.prepare(
     "SELECT id FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
-  const rows = [];
+  // First row names what you are acting on, so the board's unchanged text is
+  // never the only thing telling you where you are. Tapping it is a no-op.
+  const rows = [[{ text: buttonText(r, tz), callback_data: `m:item:${r.id}` }]];
   if (firing) rows.push([
     { text: '✅ Done', callback_data: `m:done:${r.id}` },
     { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
@@ -1504,7 +1528,7 @@ async function choreActionsMarkup(env, r) {
   }
   rows.push([{ text: '🗑️ Delete…', callback_data: `m:delete:${r.id}` }]);
   rows.push([
-    { text: '← Chores', callback_data: 'm:list' },
+    { text: '← Back to chores', callback_data: 'm:list' },
     { text: '✕ Close', callback_data: 'm:close' },
   ]);
   return { inline_keyboard: rows };
@@ -1592,7 +1616,8 @@ async function handleCallback(env, cb) {
       if (manage[1] === 'close') {
         await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons());
       } else {
-        await renderManager(env, cb, await chorePickerMarkup(env, cb.message.chat.id));
+        const listTz = await getTz(env, cb.message.chat.id);
+        await renderManager(env, cb, await chorePickerMarkup(env, cb.message.chat.id, listTz));
       }
       return answerCallback(env, cb.id, '');
     }
@@ -1604,18 +1629,21 @@ async function handleCallback(env, cb) {
       await updateDashboard(env, cb.message.chat.id);
       return answerCallback(env, cb.id, 'That chore is already gone.');
     }
+    const tz = await getTz(env, r.chat_id);
     if (action === 'item') {
-      await renderManager(env, cb, await choreActionsMarkup(env, r));
-      return answerCallback(env, cb.id, buttonText(r));
+      await renderManager(env, cb, await choreActionsMarkup(env, r, tz));
+      return answerCallback(env, cb.id, buttonText(r, tz));
     }
     if (action === 'edit') {
       await renderManager(env, cb, await editorButtons(env, r));
-      return answerCallback(env, cb.id, `Editing #${r.display_num}`);
+      return answerCallback(env, cb.id, `Editing ${r.text}`);
     }
     if (action === 'delete') {
+      // The confirm button says exactly what it will delete — the board's text
+      // is unchanged and cannot be relied on to say which chore this is.
       await renderManager(env, cb, { inline_keyboard: [
-        [{ text: `Delete #${r.display_num}?`, callback_data: `m:confirm:${r.id}` }],
-        [{ text: '← Cancel', callback_data: `m:item:${r.id}` }],
+        [{ text: clip(`🗑 Delete · ${r.text}`), callback_data: `m:confirm:${r.id}` }],
+        [{ text: '← Back to chores', callback_data: `m:item:${r.id}` }],
       ] });
       return answerCallback(env, cb.id, 'This removes the chore for everyone.');
     }
@@ -1624,7 +1652,6 @@ async function handleCallback(env, cb) {
       return answerCallback(env, cb.id, 'Deleted — Undo is available below.');
     }
 
-    const tz = await getTz(env, r.chat_id);
     if (action === 'pause' || action === 'resume') {
       await setReminderPaused(env, r, action === 'pause', tz, senderName(cb.from));
       return answerCallback(env, cb.id, action === 'pause' ? 'Paused ⏸️' : 'Resumed ▶️');

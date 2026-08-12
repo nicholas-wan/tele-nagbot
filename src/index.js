@@ -2,7 +2,7 @@
 //  - fetch: Telegram webhook (validated with the secret token header)
 //  - scheduled: every-minute cron that fires reminders and re-nags
 
-import { handleUpdate } from './handlers.js';
+import { handleUpdate, updateDashboard } from './handlers.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
 import { tg } from './tg.js';
@@ -143,6 +143,19 @@ export default {
       // Diagnosis helper: is the bot still in the chat, did the chat migrate to
       // a supergroup (new id — ALLOWED_CHATS would then silently drop it), and
       // is privacy mode hiding group messages? Defaults to the first allowed chat.
+      // Rebuild and re-pin the dashboard for every allowed chat. Recovery path
+      // for a lost pin — a group upgrade drops it, and nothing else repins
+      // until the next chore change or the morning refresh.
+      if (url.searchParams.get('board') !== null) {
+        const out = [];
+        for (const id of String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+          await updateDashboard(env, +id);
+          const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
+            .bind(+id).first();
+          out.push(`${id}: dashboard_msg_id=${row ? row.dashboard_msg_id : 'none'}`);
+        }
+        return new Response(out.join('\n') || 'no allowed chats', { status: 200 });
+      }
       if (url.searchParams.get('diag') !== null) {
         const id = url.searchParams.get('diag')
           || String(env.ALLOWED_CHATS || '').split(',')[0].trim();

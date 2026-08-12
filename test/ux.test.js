@@ -90,9 +90,11 @@ describe('chat UX', () => {
       },
     });
     const edited = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
-    expect(edited.body.reply_markup.inline_keyboard[0][0]).toMatchObject({
-      text: '#3 Water plants', callback_data: 'm:item:10',
-    });
+    const first = edited.body.reply_markup.inline_keyboard[0][0];
+    expect(first.callback_data).toBe('m:item:10');
+    // Buttons carry the chore's own identity, never the internal number.
+    expect(first.text).toContain('Water plants');
+    expect(first.text).not.toContain('#3');
   });
 
   it('removes successful operational command messages', async () => {

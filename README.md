@@ -21,6 +21,8 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
 - Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
 - Pinned dashboard lists every chore (urgency-ordered, countdown first) with a ⚙️ Manage chores button; refreshed on every change and once each morning.
+- Manage, edit, and delete all happen **in place on the pinned message** — only its `reply_markup` changes, never its text. Because the text stays put, every management button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`, `🗑 Delete · clear poop`); internal numbers never appear in labels.
+- Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins the board, as does `POST /admin?board`.
 - Chores assigned to a member nag that member's DM once they press Start on the bot; the group keeps the dashboard, a silent done-receipt, and the tombstone.
 - Daily digest 8am, weekly wrap Sunday 8pm, both silent. Streaks 🔥 for repeat weekly winners.
 - Chore icons come from a keyword table in `handlers.js`; lead the chore text with your own emoji to override.
@@ -75,5 +77,7 @@ npx wrangler tail
 curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.lattemocha.workers.dev/setup
 ```
 
+- Other admin actions, same bearer token: `?info` (webhook + registered commands, read back from Telegram), `?diag[=<chat>]` (bot membership, admin rights, whether the chat id changed), `?board` (rebuild and re-pin the dashboard).
 - Migrations: `npx wrangler d1 execute nagbot --remote --command "ALTER …"`, one statement at a time, and mirror it into `schema.sql`.
-- Deploys take ~30s to propagate. Debug with `wrangler tail` or by querying `firings` / `reminders` / `settings` — they explain almost every "the bot didn't do X" report.
+- Deploys take ~30s to propagate — re-run before concluding a change didn't work. Debug with `wrangler tail` or by querying `firings` / `reminders` / `settings` — they explain almost every "the bot didn't do X" report.
+- A group upgraded to a supergroup gets a **new chat id** and loses its pin. Rejected group chats are logged, so `wrangler tail` shows the new id immediately; update `ALLOWED_CHATS`, migrate the D1 rows, then `?board`.

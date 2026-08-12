@@ -115,9 +115,10 @@ describe('ephemeral interactions', () => {
     });
     const edited = find('editMessageReplyMarkup');
     expect(edited.body.message_id).toBe(99);
-    expect(edited.body.reply_markup.inline_keyboard[0][0]).toMatchObject({
-      text: '#3 Water plants', callback_data: 'm:item:10',
-    });
+    const first = edited.body.reply_markup.inline_keyboard[0][0];
+    expect(first.callback_data).toBe('m:item:10');
+    expect(first.text).toContain('Water plants');
+    expect(first.text).not.toContain('#3');
     // Manage is a shared surface: nothing about it is sent privately.
     expect(calls.some((c) => c.url.endsWith('/sendMessage') && c.body.receiver_user_id)).toBe(false);
   });
