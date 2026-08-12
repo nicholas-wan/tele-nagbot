@@ -70,7 +70,7 @@ describe('chat UX', () => {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/help' },
     });
     const sent = calls.find((c) => c.url.endsWith('/sendMessage'));
-    expect(sent.body.text).toContain('/remind trash 7pm daily');
+    expect(sent.body.text).toContain('/chore trash 7pm daily');
     expect(sent.body.text).not.toContain('/tagsticker');
     expect(sent.body.reply_markup.inline_keyboard.flat().map((b) => b.text))
       .toContain('⏰ Scheduling examples');

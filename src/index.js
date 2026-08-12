@@ -60,9 +60,10 @@ export default {
         // Lean menu: daily drivers only. Every other command still works;
         // /help exposes the advanced sections without crowding autocomplete.
         body: JSON.stringify({ commands: [
-          { command: 'remind', description: 'New reminder — e.g. trash 7pm daily, dishes now' },
-          { command: 'list', description: 'Active reminders' },
-          { command: 'done', description: 'Mark a reminder done without the button' },
+          { command: 'chore', description: 'New chore — counts on the leaderboard' },
+          { command: 'remind', description: 'Plain reminder — no points' },
+          { command: 'list', description: 'Active chores and reminders' },
+          { command: 'done', description: 'Mark one done without the button' },
           { command: 'help', description: 'Quick guide and more options' },
         ] }),
       });

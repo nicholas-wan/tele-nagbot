@@ -5,7 +5,8 @@ Telegram chore bot that nags until someone marks a chore done. Runs on Cloudflar
 ## Use
 
 ```text
-/remind trash 7pm daily
+/chore trash 7pm daily     counts on the leaderboard
+/remind pay tax friday     plain reminder, no points — same syntax otherwise
 /remind @jane dishes now
 /remind plants every mon,thu 8am nag:10m
 /list · /edit · /done · /pause · /resume · /skip · /delete

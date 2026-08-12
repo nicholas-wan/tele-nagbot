@@ -362,7 +362,8 @@ export async function handleUpdate(env, update) {
     let result;
     let handled = true;
     if (cmd === 'start' || cmd === 'help') result = await cmdHelp(env, chatId, args);
-    else if (cmd === 'remind') result = await cmdRemind(env, chatId, args, msg, tz, by);
+    else if (cmd === 'chore') result = await cmdRemind(env, chatId, args, msg, tz, by, true);
+    else if (cmd === 'remind') result = await cmdRemind(env, chatId, args, msg, tz, by, false);
     else if (cmd === 'list') result = await cmdList(env, chatId, tz);
     else if (cmd === 'edit') result = await cmdEdit(env, chatId, args, tz);
     else if (cmd === 'delete') result = await cmdDelete(env, chatId, args);
@@ -410,7 +411,8 @@ function helpText(section = 'home') {
     '/usepack &lt;link&gt; · /makestickers · /tags\n' +
     '/tagsticker N latte · /autotag · /delsticker N';
   return '🐱 <b>Latte &amp; Mocha</b>\nNagging chores until someone taps Done.\n\n' +
-    '<code>/remind trash 7pm daily</code> — add a chore\n' +
+    '<code>/chore trash 7pm daily</code> — add a chore (counts on the leaderboard)\n' +
+    '<code>/remind pick up parcel 5pm</code> — plain reminder, no points\n' +
     '/list — see the board\n' +
     '/done trash — mark it done\n\n' +
     'Most actions are available from the pinned dashboard or directly under a nag.';
@@ -430,15 +432,18 @@ async function cmdHelp(env, chatId, args = '') {
   await sendMessage(env, chatId, helpText(section), helpButtons(section));
 }
 
-async function cmdRemind(env, chatId, args, msg, tz, by) {
+// /chore scores on the leaderboard; /remind is an unscored utility reminder.
+// Identical behavior otherwise.
+async function cmdRemind(env, chatId, args, msg, tz, by, scored) {
   const now = Date.now();
   let p;
   try {
     p = parseRemind(args, msg.text, msg.entities, now, tz);
   } catch (err) {
-    if (err instanceof NoTimeError) return startWizard(env, chatId, err.partial, args, tz);
+    if (err instanceof NoTimeError) return startWizard(env, chatId, err.partial, args, tz, scored);
     throw err;
   }
+  p.scored = scored;
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   await sendMessage(env, chatId, html, undoButtons(id));
   // "now" reminders fire on the spot instead of waiting for the next cron tick.
@@ -459,11 +464,12 @@ async function createReminder(env, chatId, p, by, tz) {
 
   const res = await env.DB.prepare(
     `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, next_fire_at, nag_intervals, created_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, num, p.text, p.assigneeName, p.assigneeUserId, p.kind,
-    JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now()
+    JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now(),
+    p.scored != null ? (p.scored ? 1 : 0) : 1
   ).run();
   const id = res.meta.last_row_id;
   await updateDashboard(env, chatId);
@@ -476,7 +482,7 @@ async function createReminder(env, chatId, p, by, tz) {
 // No time given: park the parsed pieces as a draft and offer tap-to-choose
 // times instead of an error. Workers AI gets one shot at guessing the intent;
 // a valid guess becomes the top button — applied only if someone taps it.
-async function startWizard(env, chatId, partial, rawArgs, tz) {
+async function startWizard(env, chatId, partial, rawArgs, tz, scored) {
   const now = Date.now();
   let ai = null;
   if (rawArgs && env.AI) {
@@ -488,12 +494,12 @@ async function startWizard(env, chatId, partial, rawArgs, tz) {
   }
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, ai_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       schedule_detail, nag_intervals, ai_json, created_at, scored)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
     JSON.stringify(partial.detail), JSON.stringify(partial.nagIntervals),
-    ai ? JSON.stringify(ai) : null, Date.now()
+    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0
   ).run();
   const id = res.meta.last_row_id;
 
@@ -606,7 +612,7 @@ async function handlePlainText(env, msg) {
   }
   const p = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
-    nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt,
+    nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt, scored: draft.scored,
   };
   // Claim the draft before creating anything. A second reply or wizard tap
   // racing this one loses the conditional delete and cannot create a duplicate.
@@ -1132,12 +1138,12 @@ function choreEmoji(text) {
 // leaderboard, /stats all, and the Sunday recap.
 export async function choreStats(env, chatId, since) {
   const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"
+    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ?"
   ).bind(chatId, since).first();
   const history = await env.DB.prepare(
     `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
      FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.done_at > ?
+     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ?
      ORDER BY f.done_at DESC`
   ).bind(chatId, since).all();
   const byPerson = new Map();
@@ -1160,7 +1166,7 @@ export async function winnerStreak(env, chatId, tz, leader) {
     const end = start;
     start -= 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
     const { results } = await env.DB.prepare(
-      "SELECT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND done_at > ? AND done_at <= ?"
+      "SELECT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
     ).bind(chatId, start, end).all();
     const counts = new Map();
     for (const r of results) {
@@ -1210,12 +1216,12 @@ async function cmdStats(env, chatId, tz, args = '') {
 async function statsAll(env, chatId, tz) {
   const since = Date.now() - 183 * 24 * 3600000; // ~6 months
   const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND fired_at > ?"
+    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ?"
   ).bind(chatId, since).first();
   const history = await env.DB.prepare(
     `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
      FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.done_at > ?
+     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ?
      ORDER BY f.done_at DESC`
   ).bind(chatId, since).all();
 
@@ -1261,7 +1267,8 @@ function editorText(r, tz) {
     `Next: ${next}\n` +
     `Assigned: ${assignee}\n` +
     `Nag pace: ${nags} min\n` +
-    `Rotation: ${d.rotate ? 'on' : 'off'}${r.paused ? '\nStatus: paused' : ''}`;
+    `Rotation: ${d.rotate ? 'on' : 'off'}\n` +
+    `Points: ${r.scored ? 'counts on the board' : 'no points'}${r.paused ? '\nStatus: paused' : ''}`;
 }
 
 async function editorButtons(env, r) {
@@ -1275,7 +1282,10 @@ async function editorButtons(env, r) {
     { text: '😾 Nag pace', callback_data: `e:nag:${r.id}` },
     { text: '👤 Assignee', callback_data: `e:assign:${r.id}` },
   ]);
-  rows.push([{ text: `🔄 Rotation: ${d.rotate ? 'on' : 'off'}`, callback_data: `e:rotate:${r.id}` }]);
+  rows.push([
+    { text: `🔄 Rotation: ${d.rotate ? 'on' : 'off'}`, callback_data: `e:rotate:${r.id}` },
+    { text: `🏆 Points: ${r.scored ? 'on' : 'off'}`, callback_data: `e:score:${r.id}` },
+  ]);
   rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `e:pause:${r.id}` }]);
   rows.push([{ text: '✕ Close', callback_data: `e:close:${r.id}` }]);
   return { inline_keyboard: rows };
@@ -1396,7 +1406,7 @@ async function showDashboardChoreActions(env, cb, r) {
 }
 
 async function handleCallback(env, cb) {
-  const editNav = (cb.data || '').match(/^e:(menu|time|schedule|nag|assign|rotate|pause|close):(\d+)$/);
+  const editNav = (cb.data || '').match(/^e:(menu|time|schedule|nag|assign|rotate|score|pause|close):(\d+)$/);
   const editSet = (cb.data || '').match(/^e:set(time|schedule|nag|assign):(\d+):([a-z0-9]+)$/);
   if ((editNav || editSet) && cb.message) {
     const reminderId = +(editNav ? editNav[2] : editSet[2]);
@@ -1428,6 +1438,9 @@ async function handleCallback(env, cb) {
         else detail.rotate = true;
         await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
           .bind(JSON.stringify(detail), r.id).run();
+      } else if (action === 'score') {
+        await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
+          .bind(r.scored ? 0 : 1, r.id).run();
       } else if (action === 'pause') {
         await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
       }
@@ -1577,7 +1590,7 @@ async function handleCallback(env, cb) {
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already scheduled.');
     const { id: newId, html } = await createReminder(env, draft.chat_id, {
       text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
-      nagIntervals: JSON.parse(draft.nag_intervals), ...sched,
+      nagIntervals: JSON.parse(draft.nag_intervals), scored: draft.scored, ...sched,
     }, senderName(cb.from), tz);
     await editMessage(env, draft.chat_id, cb.message.message_id, html, undoButtons(newId));
     return answerCallback(env, cb.id, 'Scheduled 📝');
@@ -1617,12 +1630,12 @@ async function handleCallback(env, cb) {
     if (used.has(num)) { num = 1; while (used.has(num)) num++; }
     await env.DB.prepare(
       `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
-         schedule_detail, next_fire_at, nag_intervals, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       r.chat_id, num, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
       r.schedule_detail, r.next_fire_at != null ? r.next_fire_at : Date.now(), r.nag_intervals,
-      r.created_by, r.created_at
+      r.created_by, r.created_at, r.scored != null ? r.scored : 1
     ).run();
     await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
     await updateDashboard(env, r.chat_id);

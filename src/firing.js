@@ -45,8 +45,9 @@ export async function fireReminder(env, r, now, tz) {
 
   const intervals = JSON.parse(r.nag_intervals);
   const ins = await env.DB.prepare(
-    'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz)).run();
+    'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at, scored) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz),
+    r.scored != null ? r.scored : 1).run();
   const firingId = ins.meta.last_row_id;
 
   // Assigned chores nag the assignee's DM when they've opened one; the group
@@ -100,7 +101,7 @@ async function assigneeDm(env, r) {
 // ("nick & jane" from done-together) count for each person.
 async function pickRotation(env, chatId, tz) {
   const { results } = await env.DB.prepare(
-    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
+    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_by IS NOT NULL"
   ).bind(chatId).all();
   const ws = weekStart(Date.now(), tz);
   const stats = new Map();

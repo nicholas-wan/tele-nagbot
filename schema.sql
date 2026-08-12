@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS reminders (
   nag_intervals TEXT NOT NULL,          -- JSON array of minutes, e.g. [15,30,60]
   paused INTEGER NOT NULL DEFAULT 0,
   created_by TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  scored INTEGER NOT NULL DEFAULT 1      -- /chore = 1 (leaderboard points), /remind = 0
 );
 
 CREATE TABLE IF NOT EXISTS firings (
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS firings (
   cat TEXT,                             -- which cat was on that sticker; re-nag lines match
   done_by TEXT,
   done_at INTEGER,
-  nag_chat_id INTEGER                   -- where the nag messages live (assignee DM); NULL = the group
+  nag_chat_id INTEGER,                  -- where the nag messages live (assignee DM); NULL = the group
+  scored INTEGER NOT NULL DEFAULT 1     -- snapshot of the reminder's scored flag at fire time
 );
 
 -- Pending /remind commands that lacked a time; resolved via inline buttons.
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   wizard_msg_id INTEGER,                -- the time-picker popup message
   prompt_msg_id INTEGER,                -- the "reply with a time" force-reply prompt
   created_at INTEGER NOT NULL,
-  ai_json TEXT                          -- validated Workers-AI schedule suggestion, applied only on tap
+  ai_json TEXT,                         -- validated Workers-AI schedule suggestion, applied only on tap
+  scored INTEGER NOT NULL DEFAULT 1     -- carries the /chore vs /remind choice through the wizard
 );
 
 CREATE TABLE IF NOT EXISTS settings (
