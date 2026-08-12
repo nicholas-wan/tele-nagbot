@@ -148,11 +148,44 @@ export default {
       // until the next chore change or the morning refresh.
       if (url.searchParams.get('board') !== null) {
         const out = [];
+        const me = await fetch(`https://api.telegram.org/bot${token}/getMe`).then((r) => r.json());
+        const meId = me.ok ? me.result.id : null;
         for (const id of String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
-          await updateDashboard(env, +id);
+          const chatId = +id;
+          await updateDashboard(env, chatId);
           const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
-            .bind(+id).first();
-          out.push(`${id}: dashboard_msg_id=${row ? row.dashboard_msg_id : 'none'}`);
+            .bind(chatId).first();
+          const current = row && row.dashboard_msg_id;
+          // Retire boards the bot pinned earlier and lost track of — a group
+          // upgrade orphans them and they look identical to the live one.
+          // getChat only ever reports the TOP of the pin stack, so walk down by
+          // unpinning each bot-authored pin in turn (including the live board,
+          // re-pinned at the end) and stop at the first pin a human made.
+          const call = (method, body) => fetch(`https://api.telegram.org/bot${token}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }).then((r) => r.json());
+          let removed = 0;
+          const seen = new Set();
+          for (let i = 0; i < 12; i++) {
+            const chat = await call('getChat', { chat_id: chatId });
+            const pin = chat.ok && chat.result.pinned_message;
+            if (!pin || seen.has(pin.message_id)) break;
+            if (!meId || !pin.from || pin.from.id !== meId) break; // a human pinned this — leave it
+            seen.add(pin.message_id);
+            await call('unpinChatMessage', { chat_id: chatId, message_id: pin.message_id });
+            if (pin.message_id !== current) {
+              await call('deleteMessage', { chat_id: chatId, message_id: pin.message_id });
+              removed++;
+            }
+          }
+          if (current) {
+            await call('pinChatMessage', {
+              chat_id: chatId, message_id: current, disable_notification: true,
+            });
+          }
+          out.push(`${chatId}: dashboard_msg_id=${current || 'none'}, stale boards removed=${removed}`);
         }
         return new Response(out.join('\n') || 'no allowed chats', { status: 200 });
       }
