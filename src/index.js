@@ -205,8 +205,11 @@ export default {
         const member = me.ok
           ? await call('getChatMember', { chat_id: id, user_id: me.result.id })
           : null;
+        // &user=<id> answers "why can't this person do X" — status and rights.
+        const who = url.searchParams.get('user');
+        const user = who ? await call('getChatMember', { chat_id: id, user_id: +who }) : null;
         return new Response(JSON.stringify({
-          allowed_chats: env.ALLOWED_CHATS, probed_chat: id, me, chat, member,
+          allowed_chats: env.ALLOWED_CHATS, probed_chat: id, me, chat, member, user,
         }, null, 2), { status: 200 });
       }
       const out = [];
