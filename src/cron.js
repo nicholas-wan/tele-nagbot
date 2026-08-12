@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
 
@@ -234,17 +234,18 @@ async function renagPending(env, now) {
       if (!claim.meta.changes) continue;
 
       // One live nag per chore: remove the previous nag and its sticker.
-      if (f.last_message_id) await deleteMessage(env, f.chat_id, f.last_message_id);
-      if (f.last_sticker_id) await deleteMessage(env, f.chat_id, f.last_sticker_id);
+      // Re-nags follow the first nag's home (assignee DM or the group).
+      if (f.last_message_id) await deleteMessage(env, nagChat(f), f.last_message_id);
+      if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
 
       // Loudness ladder: first re-nag is silent; later ones notify again.
-      const sent = await sendMessage(env, f.chat_id, nagHtml(r, nagCount, f.cat || 'both'),
+      const sent = await sendMessage(env, nagChat(f), nagHtml(r, nagCount, f.cat || 'both'),
         nagButtons(f.id), { silent: nagCount === 1 });
       const upd = await env.DB.prepare(
         "UPDATE firings SET last_message_id = ?, last_sticker_id = NULL WHERE id = ? AND state = 'nagging'"
       ).bind(sent.ok ? sent.result.message_id : null, f.id).run();
       // Done/expired won the race while we were sending — remove the orphan nag.
-      if (!upd.meta.changes && sent.ok) await deleteMessage(env, f.chat_id, sent.result.message_id);
+      if (!upd.meta.changes && sent.ok) await deleteMessage(env, nagChat(f), sent.result.message_id);
       // Self-heal: recreate the dashboard if it is missing (e.g. deleted by hand
       // or the nag predates the dashboard feature).
       await updateDashboard(env, f.chat_id);

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS firings (
   last_sticker_id INTEGER,              -- sticker sent with the first nag, cleaned up later
   cat TEXT,                             -- which cat was on that sticker; re-nag lines match
   done_by TEXT,
-  done_at INTEGER
+  done_at INTEGER,
+  nag_chat_id INTEGER                   -- where the nag messages live (assignee DM); NULL = the group
 );
 
 -- Pending /remind commands that lacked a time; resolved via inline buttons.
@@ -55,6 +56,18 @@ CREATE TABLE IF NOT EXISTS settings (
   last_weekly TEXT,                     -- local Y-M-D of the last Sunday recap sent
   dashboard_msg_id INTEGER,             -- pinned "outstanding chores" message
   paused_until INTEGER                  -- vacation mode: everything muted until this UTC ms
+);
+
+-- Group members seen by the bot; dm_ok means they opened a DM line (/start),
+-- letting chores assigned to them nag their private chat instead of the group.
+CREATE TABLE IF NOT EXISTS members (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  username TEXT,
+  first_name TEXT,
+  dm_ok INTEGER NOT NULL DEFAULT 0,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
 );
 
 -- Recently /delete-d reminders, kept for a day so Undo can restore them.

@@ -16,6 +16,8 @@ Missing times open a guided picker. Nags support Done, Done together, Snooze, re
 
 Nags repeat at 15/30/60 minutes, respect 11pm–8am quiet hours, and expire after 24 hours. Daily digest: 8am. Weekly wrap: Sunday 8pm. Default timezone: Singapore.
 
+Chores assigned to a member nag their DM once they press Start on the bot (until then, the group). The group always keeps the dashboard, a silent done-receipt, and the 24h tombstone. Chore icons come from a keyword table; start the chore text with your own emoji to override.
+
 Sticker tools: `/usepack`, `/makestickers`, `/tags`, `/tagsticker`, `/autotag`, `/delsticker`.
 
 ## Deploy

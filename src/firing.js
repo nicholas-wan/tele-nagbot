@@ -49,10 +49,22 @@ export async function fireReminder(env, r, now, tz) {
   ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz)).run();
   const firingId = ins.meta.last_row_id;
 
-  const s = await sendRandomSticker(env, r.chat_id, firingId);
-  const sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId));
-  await env.DB.prepare('UPDATE firings SET last_message_id = ?, last_sticker_id = ?, cat = ? WHERE id = ?')
-    .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat, firingId).run();
+  // Assigned chores nag the assignee's DM when they've opened one; the group
+  // is the fallback, and the chore's data stays keyed to the group throughout.
+  let nagChatId = r.chat_id;
+  let sent = null;
+  const dm = await assigneeDm(env, r);
+  if (dm) {
+    sent = await sendMessage(env, dm, nagHtml(r, 0, 'both'), nagButtons(firingId));
+    if (sent.ok) nagChatId = dm;
+  }
+  const s = await sendRandomSticker(env, nagChatId, firingId);
+  if (!sent || !sent.ok) {
+    sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId));
+  }
+  await env.DB.prepare('UPDATE firings SET last_message_id = ?, last_sticker_id = ?, cat = ?, nag_chat_id = ? WHERE id = ?')
+    .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat,
+      nagChatId === r.chat_id ? null : nagChatId, firingId).run();
 
   // Fire completed: a one-off releases its lease and goes dormant. If the
   // lease expired mid-fire and a retry re-fired, the stale sweep above has
@@ -64,6 +76,23 @@ export async function fireReminder(env, r, now, tz) {
   }
 
   await updateDashboard(env, r.chat_id);
+}
+
+// The assignee's private-chat id, when known and they've opened a DM line
+// with the bot (/start). Null routes the nag to the group.
+async function assigneeDm(env, r) {
+  if (!r.assignee_name && !r.assignee_user_id) return null;
+  let row = null;
+  if (r.assignee_user_id) {
+    row = await env.DB.prepare(
+      'SELECT user_id FROM members WHERE chat_id = ? AND user_id = ? AND dm_ok = 1'
+    ).bind(r.chat_id, r.assignee_user_id).first();
+  } else {
+    row = await env.DB.prepare(
+      'SELECT user_id FROM members WHERE chat_id = ? AND dm_ok = 1 AND lower(username) = ?'
+    ).bind(r.chat_id, String(r.assignee_name).replace(/^@/, '').toLowerCase()).first();
+  }
+  return row ? row.user_id : null;
 }
 
 // Household members = everyone who has ever tapped Done here. Least ✅ this
