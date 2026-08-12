@@ -74,6 +74,116 @@ export function answerCallback(env, callbackId, text) {
   return tg(env, 'answerCallbackQuery', { callback_query_id: callbackId, text });
 }
 
+// ---------------------------------------------------------------------------
+// Ephemeral messages (Bot API 10.2, July 2026)
+//
+// An ephemeral message lives in the group but is visible only to one member.
+// Telegram needs receiver_user_id to address it, and for 15 seconds after a
+// button tap the callback_query_id is what authorizes reaching a user the bot
+// has no other recent contact with. The bot must be a group administrator, and
+// even then Telegram does not promise delivery to an offline user — so every
+// private send falls back to a public one rather than dropping the reply.
+//
+// Ephemeral messages carry message_id 0 and a separate ephemeral_message_id,
+// and they need their own edit/delete methods. A "ref" here is the pair
+// { id, ephemeral } that says which id space a stored message id belongs to.
+// ---------------------------------------------------------------------------
+
+const CALLBACK_WINDOW_MS = 15000;
+
+// Per-update context describing who a private reply is for. Built once in
+// handleUpdate and threaded down; never module-level, because one Worker
+// isolate serves concurrent updates from different users.
+export function replyCtx(env, chatId, userId, opts = {}) {
+  return {
+    chatId,
+    userId: userId || null,
+    callbackQueryId: opts.callbackQueryId || null,
+    replyEphemeralId: opts.replyEphemeralId || null,
+    // EPHEMERAL=0 is the kill switch: one deploy reverts to all-public.
+    ephemeral: String(env.EPHEMERAL ?? '1') !== '0' && Boolean(userId),
+    at: Date.now(),
+  };
+}
+
+// The callback id authorizes exactly one send, and only inside the window.
+function takeCallbackId(ctx) {
+  if (!ctx.callbackQueryId || Date.now() - ctx.at > CALLBACK_WINDOW_MS) return null;
+  const id = ctx.callbackQueryId;
+  ctx.callbackQueryId = null;
+  return id;
+}
+
+// Where an outgoing message ended up, in whichever id space applies.
+export function msgRef(res) {
+  if (!res || !res.ok || !res.result) return null;
+  const r = res.result;
+  // Checked first: ephemeral results also carry message_id, always 0.
+  if (r.ephemeral_message_id) return { id: r.ephemeral_message_id, ephemeral: true };
+  return r.message_id ? { id: r.message_id, ephemeral: false } : null;
+}
+
+export async function sendPrivate(env, ctx, html, replyMarkup, opts = {}) {
+  if (!ctx.ephemeral) return sendMessage(env, ctx.chatId, html, replyMarkup, opts);
+  const body = {
+    chat_id: ctx.chatId,
+    receiver_user_id: ctx.userId,
+    text: html,
+    parse_mode: 'HTML',
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  if (opts.silent) body.disable_notification = true;
+  const cbId = takeCallbackId(ctx);
+  if (cbId) body.callback_query_id = cbId;
+  if (ctx.replyEphemeralId) body.reply_parameters = { ephemeral_message_id: ctx.replyEphemeralId };
+  const res = await tg(env, 'sendMessage', body);
+  if (res.ok) return res;
+  console.log(`ephemeral send failed, falling back to public: ${res.description || ''}`);
+  return sendMessage(env, ctx.chatId, html, replyMarkup, opts);
+}
+
+export function editEphemeral(env, ctx, ephemeralId, html, replyMarkup) {
+  const body = {
+    chat_id: ctx.chatId,
+    receiver_user_id: ctx.userId,
+    ephemeral_message_id: ephemeralId,
+    text: html,
+    parse_mode: 'HTML',
+  };
+  if (replyMarkup) body.reply_markup = replyMarkup;
+  return tg(env, 'editEphemeralMessageText', body);
+}
+
+export function deleteEphemeral(env, ctx, ephemeralId) {
+  return tg(env, 'deleteEphemeralMessage', {
+    chat_id: ctx.chatId,
+    receiver_user_id: ctx.userId,
+    ephemeral_message_id: ephemeralId,
+  });
+}
+
+// Edit/delete a stored message without the caller caring which kind it is.
+export function editRef(env, ctx, chatId, ref, html, replyMarkup) {
+  if (!ref) return Promise.resolve({ ok: false, description: 'no message ref' });
+  if (ref.ephemeral) return editEphemeral(env, ctx, ref.id, html, replyMarkup);
+  return editMessage(env, chatId, ref.id, html, replyMarkup);
+}
+
+export function deleteRef(env, ctx, chatId, ref) {
+  if (!ref) return Promise.resolve({ ok: false, description: 'no message ref' });
+  if (ref.ephemeral) return deleteEphemeral(env, ctx, ref.id);
+  return deleteMessage(env, chatId, ref.id);
+}
+
+// The id of the message a callback came from, in its own id space.
+export function callbackRef(cb) {
+  if (!cb || !cb.message) return null;
+  if (cb.message.ephemeral_message_id) {
+    return { id: cb.message.ephemeral_message_id, ephemeral: true };
+  }
+  return cb.message.message_id ? { id: cb.message.message_id, ephemeral: false } : null;
+}
+
 // Pinning needs the bot to be a group admin with "Pin messages"; both calls
 // fail quietly (logged) without it.
 export function pinMessage(env, chatId, messageId) {

@@ -26,6 +26,22 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 - Chore icons come from a keyword table in `handlers.js`; lead the chore text with your own emoji to override.
 - Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Tools: `/tags`, `/tagsticker`, `/autotag`, `/delsticker`.
 
+## Ephemeral messages (Bot API 10.2)
+
+Commands and their replies are private to the sender; the group only ever sees shared content.
+
+| Private (ephemeral) | Public |
+|---|---|
+| Command replies, help, `/list`, `/stats` | Pinned dashboard |
+| Wizard, prompts, confirmations, cancels | Nags and Done receipts |
+| Success and error messages | New-chore announcement, vacation mode, welcomes |
+
+- Commands are registered with `is_ephemeral: true` under both the default and `all_group_chats` scopes. Verify with `POST /admin?info`, which reads them back from Telegram.
+- A private send needs `receiver_user_id`; within 15s of a tap it also carries `callback_query_id`, which is what lets the bot reach a member it has no other recent contact with. The bot must be a group admin, and delivery to an offline user is not guaranteed — `sendPrivate` falls back to a public message when Telegram refuses.
+- Ephemeral messages report `message_id: 0` and a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs; `drafts` records the flag in `wizard_msg_ephemeral` / `prompt_msg_ephemeral`. Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
+- The pinned dashboard is never repurposed as a control surface. Tapping ⚙️ Manage opens a *new* private manager; its buttons edit that private message, and the pin is refreshed separately by `updateDashboard`.
+- Kill switch: set `EPHEMERAL = "0"` in `wrangler.toml` `[vars]` and deploy to make everything public again.
+
 ## Code
 
 | File | Purpose |

@@ -54,6 +54,13 @@ export default {
       });
       const data = await res.json();
       // Register the "/" autocomplete menu while we're at it.
+      // Registered under both scopes: the default one covers DMs, and the
+      // explicit group scope is the one that matters here, since an ephemeral
+      // command only means anything in a chat with other people in it.
+      // Telegram stores is_ephemeral under either, verified via getMyCommands.
+      const commandScopes = [undefined, { type: 'all_group_chats' }];
+      let cmdData = { ok: true };
+      for (const scope of commandScopes) {
       const cmdRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -61,17 +68,26 @@ export default {
         // on an existing chore — done, edit, delete, pause, resume, skip — is
         // a button on the nag or the dashboard item menu, and the sticker
         // commands are one-time setup. All stay typeable, just out of the menu.
-        body: JSON.stringify({ commands: [
-          { command: 'chore', description: 'New chore — counts on the leaderboard' },
-          { command: 'remind', description: 'Plain reminder — no points' },
-          { command: 'list', description: 'Active chores and reminders' },
-          { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
-          { command: 'help', description: 'Quick guide and more options' },
-        ] }),
+        //
+        // is_ephemeral means the command itself is invisible to the group: only
+        // the sender and the bot see it, and the reply is private too. The
+        // pinned dashboard and the nags stay public.
+        body: JSON.stringify({
+          commands: [
+            { command: 'chore', description: 'New chore — counts on the leaderboard', is_ephemeral: true },
+            { command: 'remind', description: 'Plain reminder — no points', is_ephemeral: true },
+            { command: 'list', description: 'Active chores and reminders', is_ephemeral: true },
+            { command: 'stats', description: 'Weekly leaderboard — add "all" for history', is_ephemeral: true },
+            { command: 'help', description: 'Quick guide and more options', is_ephemeral: true },
+          ],
+          ...(scope ? { scope } : {}),
+        }),
       });
-      const cmdData = await cmdRes.json();
+        const res2 = await cmdRes.json();
+        if (!res2.ok) cmdData = res2;
+      }
       return new Response(
-        data.ok ? `✅ Webhook registered. Command menu: ${cmdData.ok ? 'registered' : 'failed'}. The bot is fully live.`
+        data.ok ? `✅ Webhook registered. Command menu: ${cmdData.ok ? 'registered' : `failed ${JSON.stringify(cmdData)}`}. The bot is fully live.`
                 : `Telegram said: ${JSON.stringify(data)}`,
         { status: data.ok ? 200 : 500 }
       );
@@ -112,7 +128,17 @@ export default {
       }
       if (url.searchParams.get('info') !== null) {
         const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
-        return new Response(JSON.stringify(await res.json(), null, 2), { status: 200 });
+        const cmds = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`);
+        const groupCmds = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: { type: 'all_group_chats' } }),
+        });
+        return new Response(JSON.stringify({
+          webhook: await res.json(),
+          commands_default: await cmds.json(),
+          commands_groups: await groupCmds.json(),
+        }, null, 2), { status: 200 });
       }
       // Diagnosis helper: is the bot still in the chat, did the chat migrate to
       // a supergroup (new id — ALLOWED_CHATS would then silently drop it), and

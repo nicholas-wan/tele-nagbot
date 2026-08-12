@@ -76,7 +76,7 @@ describe('chat UX', () => {
       .toContain('⏰ Scheduling examples');
   });
 
-  it('opens the chore picker inside the pinned dashboard', async () => {
+  it('opens the chore picker as a private manager, leaving the pin untouched', async () => {
     const reminder = {
       id: 10, display_num: 3, text: 'Water plants', paused: 0,
       next_fire_at: Date.now() + 3600000, schedule_kind: 'daily',
@@ -89,10 +89,15 @@ describe('chat UX', () => {
         message: { message_id: 99, chat: { id: 1 }, text: 'dashboard' },
       },
     });
-    const edited = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
-    expect(edited.body.reply_markup.inline_keyboard[0][0]).toMatchObject({
+    const sent = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(sent.body.reply_markup.inline_keyboard[0][0]).toMatchObject({
       text: '#3 Water plants', callback_data: 'm:item:10',
     });
+    // The manager is a new private message, not the pinned one repurposed.
+    expect(sent.body.receiver_user_id).toBe(2);
+    expect(sent.body.callback_query_id).toBe('cb1');
+    expect(calls.some((c) => c.url.endsWith('/editMessageReplyMarkup'))).toBe(false);
+    expect(calls.some((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 99)).toBe(false);
   });
 
   it('removes successful operational command messages', async () => {

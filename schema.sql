@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS drafts (
   nag_intervals TEXT NOT NULL,
   wizard_msg_id INTEGER,                -- the time-picker popup message
   prompt_msg_id INTEGER,                -- the "reply with a time" force-reply prompt
+  -- Ephemeral message ids live in their own sequence and need their own
+  -- edit/delete methods, so each stored id records which kind it is.
+  wizard_msg_ephemeral INTEGER NOT NULL DEFAULT 0,
+  prompt_msg_ephemeral INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   ai_json TEXT,                         -- validated Workers-AI schedule suggestion, applied only on tap
   scored INTEGER NOT NULL DEFAULT 1     -- carries the /chore vs /remind choice through the wizard
