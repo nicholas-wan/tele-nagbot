@@ -57,28 +57,16 @@ export default {
       const cmdRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setMyCommands`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // Every dispatched command is registered so all of them autocomplete.
-        // /help stays curated — that's a separate, deliberately shorter list.
-        // Ordered daily drivers → management → stickers, which is how the
-        // "/" menu renders it.
+        // Only entry points that nothing can tap its way to. Edit, delete,
+        // pause, resume, skip and done are all buttons on the dashboard's
+        // per-item menu, and the sticker commands are one-time setup — they
+        // stay typeable, just out of the menu. Every command still executes.
         body: JSON.stringify({ commands: [
           { command: 'chore', description: 'New chore — counts on the leaderboard' },
           { command: 'remind', description: 'Plain reminder — no points' },
           { command: 'list', description: 'Active chores and reminders' },
           { command: 'done', description: 'Mark one done without the button' },
           { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
-          { command: 'edit', description: 'Change a chore\'s time or wording' },
-          { command: 'delete', description: 'Remove a chore or reminder' },
-          { command: 'pause', description: 'Pause one — or "all 14" for vacation' },
-          { command: 'resume', description: 'Resume a paused chore, or "all"' },
-          { command: 'skip', description: 'Skip just the next occurrence' },
-          { command: 'poke', description: 'Re-send everything outstanding' },
-          { command: 'tags', description: 'Show the active sticker pack and tags' },
-          { command: 'usepack', description: 'Use a sticker pack from its link' },
-          { command: 'makestickers', description: 'Generate a new sticker pack' },
-          { command: 'tagsticker', description: 'Tag a sticker — e.g. "3 latte"' },
-          { command: 'autotag', description: 'Auto-tag the active pack' },
-          { command: 'delsticker', description: 'Delete sticker N from the pack' },
           { command: 'help', description: 'Quick guide and more options' },
         ] }),
       });
