@@ -200,7 +200,18 @@ describe('chat UX', () => {
     expect(log.body.receiver_user_id).toBeUndefined();
     expect(log.body.text).toContain('@nicholaswan');
     expect(log.body.text).toContain('clear poop');
-    expect(log.body.reply_markup.inline_keyboard[0][0].text).toBe('↩️ Undo');
+    expect(log.body.reply_markup.inline_keyboard[0].map((b) => b.text)).toEqual(['↩️ Undo', '✅ OK']);
+  });
+
+  it('dismisses a log line when OK is tapped', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForNag(NAGGING) };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb4', data: 'ok', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 88, chat: { id: 1 }, text: 'deleted' },
+      },
+    });
+    expect(calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === 88)).toBe(true);
   });
 
   it('opens a button-driven chore editor without adding it to the main menu', async () => {

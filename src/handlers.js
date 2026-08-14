@@ -990,7 +990,11 @@ async function deleteReminder(env, r, ctx = null, by = null) {
   const stash = await env.DB.prepare(
     'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
   ).bind(chatId, JSON.stringify(r), Date.now()).run();
-  const undo = { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` }]] };
+  // OK dismisses the log once everyone has seen it; Undo restores the chore.
+  const undo = { inline_keyboard: [[
+    { text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` },
+    { text: '✅ OK', callback_data: 'ok' },
+  ]] };
   const html = by
     ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
@@ -1838,6 +1842,13 @@ async function handleCallback(env, cb) {
     await updateDashboard(env, r.chat_id);
     await editRef(env, ctx, r.chat_id, ref, `↩️ Restored <b>${esc(r.text)}</b>`);
     return answerCallback(env, cb.id, 'Restored 😺');
+  }
+
+  // Dismiss a log line. Works on either kind of message, since deleteRef picks
+  // the method from the ref rather than assuming a public message id.
+  if (cb.data === 'ok' && cb.message) {
+    await deleteRef(env, ctx, cb.message.chat.id, ref);
+    return answerCallback(env, cb.id, '');
   }
 
   // 🗑 on a nag removes the chore outright. One tap, because the log line it
