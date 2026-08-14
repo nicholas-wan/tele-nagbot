@@ -126,6 +126,83 @@ describe('chat UX', () => {
     expect(labels.some((label) => /7:00 PM/.test(label))).toBe(true);
   });
 
+  // Postponing has to outlive the 24h expiry window, unlike the hour presets.
+  function dbForNag(firing) {
+    const reminder = {
+      id: 10, chat_id: 1, text: 'clear poop', paused: 0, next_fire_at: Date.now() + 3600000,
+      schedule_kind: 'interval', nag_intervals: '[15,30,60]',
+      schedule_detail: JSON.stringify({ h: 21, mi: 0, days: 8 }), assignee_name: null,
+    };
+    return {
+      prepare(sql) {
+        return {
+          bind() {
+            return {
+              async first() {
+                if (sql.includes('FROM firings')) return firing;
+                if (sql.includes('FROM reminders')) return reminder;
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() { return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const NAGGING = {
+    id: 5, reminder_id: 10, chat_id: 1, state: 'nagging', nag_count: 0, snoozes_used: 0,
+    fired_at: Date.now() - 3600000, last_message_id: 42, last_message_ephemeral: 0,
+    nag_user_id: null, cat: 'both',
+  };
+
+  it('offers Tomorrow among the snooze options', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForNag(NAGGING) };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb1', data: 's:5', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 42, chat: { id: 1 }, text: 'nag' },
+      },
+    });
+    const edited = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
+    expect(edited.body.reply_markup.inline_keyboard.flat().map((b) => b.text))
+      .toContain('📅 Tomorrow');
+  });
+
+  it('postpones a day by carrying the expiry window forward', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForNag(NAGGING) };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb2', data: 'z:5:day', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 42, chat: { id: 1 }, text: 'nag' },
+      },
+    });
+    const answer = calls.find((c) => c.url.endsWith('/answerCallbackQuery'));
+    // An hour preset would have been clamped to just before expiry instead.
+    expect(answer.body.text).toMatch(/Postponed/);
+    expect(answer.body.text).not.toMatch(/24h limit/);
+  });
+
+  it('deletes a chore from its nag and logs it publicly for both', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForNag(NAGGING) };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb3', data: 'x:5', from: { id: 2, first_name: 'Nick', username: 'nicholaswan' },
+        message: { message_id: 42, chat: { id: 1 }, text: 'nag' },
+      },
+    });
+    const log = calls.find((c) => c.url.endsWith('/sendMessage') && /deleted/i.test(c.body.text || ''));
+    expect(log).toBeTruthy();
+    // Public and attributed, even if the nag itself was private.
+    expect(log.body.receiver_user_id).toBeUndefined();
+    expect(log.body.text).toContain('@nicholaswan');
+    expect(log.body.text).toContain('clear poop');
+    expect(log.body.reply_markup.inline_keyboard[0][0].text).toBe('↩️ Undo');
+  });
+
   it('opens a button-driven chore editor without adding it to the main menu', async () => {
     const reminder = {
       id: 10, display_num: 3, text: 'Water plants', paused: 0,

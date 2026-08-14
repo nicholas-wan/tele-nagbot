@@ -3,7 +3,7 @@
 import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage,
          replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart } from './time.js';
+import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart, deferQuietHours } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
@@ -27,22 +27,28 @@ function senderName(from) {
 
 export function nagButtons(firingId) {
   return {
-    inline_keyboard: [[
-      { text: '✅ Done', callback_data: `d:${firingId}` },
-      { text: '🤝 Done together', callback_data: `b:${firingId}` },
-      { text: '😴 Snooze…', callback_data: `s:${firingId}` },
-    ]],
+    inline_keyboard: [
+      [
+        { text: '✅ Done', callback_data: `d:${firingId}` },
+        { text: '🤝 Done together', callback_data: `b:${firingId}` },
+        { text: '😴 Snooze…', callback_data: `s:${firingId}` },
+      ],
+      [{ text: '🗑 Delete chore', callback_data: `x:${firingId}` }],
+    ],
   };
 }
 
 const emptyKeyboard = () => ({ inline_keyboard: [] });
 
 function snoozedButtons(firingId) {
-  return { inline_keyboard: [[
-    { text: '✅ Done', callback_data: `d:${firingId}` },
-    { text: '🤝 Done together', callback_data: `b:${firingId}` },
-    { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
-  ]] };
+  return { inline_keyboard: [
+    [
+      { text: '✅ Done', callback_data: `d:${firingId}` },
+      { text: '🤝 Done together', callback_data: `b:${firingId}` },
+      { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
+    ],
+    [{ text: '🗑 Delete chore', callback_data: `x:${firingId}` }],
+  ] };
 }
 
 // Everyone the cats have seen tap Done in this chat (combined credits split).
@@ -78,7 +84,8 @@ function snoozeButtons(firingId, tz) {
   return {
     inline_keyboard: [
       [z('30m', '30'), z('1h', '60'), z('2h', '120')],
-      [z(fmtShort(nine, tz), 't'), z('↩️ Back', 'b')],
+      [z(fmtShort(nine, tz), 't'), z('📅 Tomorrow', 'day')],
+      [z('↩️ Back', 'b')],
     ],
   };
 }
@@ -963,7 +970,10 @@ async function cmdDelete(env, ctx, args) {
   await deleteReminder(env, r, ctx);
 }
 
-async function deleteReminder(env, r, ctx = null) {
+// `by` names the person in the log line. A deletion removes the chore for
+// everyone, so when it is triggered from a nag the log goes to the group even
+// though the nag itself may have been private — both of you need to see it.
+async function deleteReminder(env, r, ctx = null, by = null) {
   const chatId = r.chat_id;
   // Like Undo: remove live nag messages and hard-delete the nagging firings,
   // so an intentional delete never counts as "expired unclaimed" in stats.
@@ -981,7 +991,9 @@ async function deleteReminder(env, r, ctx = null) {
     'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
   ).bind(chatId, JSON.stringify(r), Date.now()).run();
   const undo = { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` }]] };
-  const html = `🗑️ Deleted <s>${esc(r.text)}</s>`;
+  const html = by
+    ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
+    : `🗑️ Deleted <s>${esc(r.text)}</s>`;
   if (ctx) await sendPrivate(env, ctx, html, undo);
   else await sendMessage(env, chatId, html, undo);
   await updateDashboard(env, chatId);
@@ -1828,6 +1840,20 @@ async function handleCallback(env, cb) {
     return answerCallback(env, cb.id, 'Restored 😺');
   }
 
+  // 🗑 on a nag removes the chore outright. One tap, because the log line it
+  // leaves carries Undo — a mis-tap is recoverable for a day.
+  const xm = (cb.data || '').match(/^x:(\d+)$/);
+  if (xm && cb.message) {
+    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+xm[1]).first();
+    if (!firing) return answerCallback(env, cb.id, 'Already gone.');
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
+      .bind(firing.reminder_id, firing.chat_id).first();
+    if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
+    // No ctx: the log is public on purpose, whoever the nag belonged to.
+    await deleteReminder(env, r, null, senderName(cb.from));
+    return answerCallback(env, cb.id, 'Deleted — Undo is in the group.');
+  }
+
   // Snooze preset picked (or Back to the main buttons).
   const zm = (cb.data || '').match(/^z:(\d+):(\w+)$/);
   if (zm && cb.message) {
@@ -1856,21 +1882,34 @@ async function handleCallback(env, cb) {
       return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
     }
     const tz = await getTz(env, firing.chat_id);
-    // Same 24h-expiry cap as reply-snooze.
+    // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
+    // to the 24h expiry, which would collapse a full day down to "just before
+    // this expires". Carrying fired_at forward moves the expiry window with the
+    // nag, so the chore survives the night and still gets its own 24h once it
+    // comes back. Asia/Singapore has no DST, so +24h is the same clock time.
+    const postpone = zm[2] === 'day';
     const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
-    let until = zm[2] === 't'
-      ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
+    let until = postpone ? deferQuietHours(Date.now() + 86400000, tz)
+      : zm[2] === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
-    const capped = until >= expiresAt;
+    const capped = !postpone && until >= expiresAt;
     if (capped) until = expiresAt - 60000;
-    const res = await env.DB.prepare(
-      "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND snoozes_used < ?"
-    ).bind(until, firing.id, MAX_SNOOZES).run();
+    const res = postpone
+      ? await env.DB.prepare(
+        `UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ?, fired_at = ?
+         WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
+      ).bind(until, until, firing.id, MAX_SNOOZES).run()
+      : await env.DB.prepare(
+        "UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND snoozes_used < ?"
+      ).bind(until, firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
       await editNag(env, firing,
         snoozedHtml(reminder, until, senderName(cb.from), tz), snoozedButtons(firing.id));
+    }
+    if (postpone) {
+      return answerCallback(env, cb.id, `Postponed to ${fmtShort(until, tz)} 📅`);
     }
     return answerCallback(env, cb.id,
       `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);

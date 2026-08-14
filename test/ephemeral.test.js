@@ -58,7 +58,10 @@ describe('ephemeral interactions', () => {
 
   const find = (method) => calls.find((c) => c.url.endsWith(`/${method}`));
 
-  it('registers every command as ephemeral', async () => {
+  // Commands must NOT be ephemeral: Telegram never delivers an ephemeral
+  // command to a bot with Group Privacy on, so registering one silently breaks
+  // every command. Reply privacy comes from receiver_user_id instead.
+  it('registers commands as ordinary, not ephemeral', async () => {
     const res = await worker.fetch(
       new Request('https://bot.example/setup', {
         method: 'POST', headers: { Authorization: 'Bearer admin' },
@@ -69,7 +72,7 @@ describe('ephemeral interactions', () => {
     expect(res.status).toBe(200);
     const cmds = find('setMyCommands').body.commands;
     expect(cmds.length).toBeGreaterThan(0);
-    for (const c of cmds) expect(c.is_ephemeral).toBe(true);
+    for (const c of cmds) expect(c.is_ephemeral).toBeUndefined();
   });
 
   it('addresses command replies to the requester', async () => {

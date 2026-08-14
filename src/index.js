@@ -69,16 +69,19 @@ export default {
         // a button on the nag or the dashboard item menu, and the sticker
         // commands are one-time setup. All stay typeable, just out of the menu.
         //
-        // is_ephemeral means the command itself is invisible to the group: only
-        // the sender and the bot see it, and the reply is private too. The
-        // pinned dashboard and the nags stay public.
+        // Deliberately NOT is_ephemeral. An ephemeral command is never
+        // delivered to a bot running with Group Privacy on, which is how this
+        // bot is configured — commands simply vanished. Privacy is worth more
+        // than hiding the command text, and the bot deletes the command message
+        // straight after handling it anyway. Reply privacy is unaffected: it
+        // comes from receiver_user_id on the send, not from this flag.
         body: JSON.stringify({
           commands: [
-            { command: 'chore', description: 'New chore — counts on the leaderboard', is_ephemeral: true },
-            { command: 'remind', description: 'Plain reminder — no points', is_ephemeral: true },
-            { command: 'list', description: 'Active chores and reminders', is_ephemeral: true },
-            { command: 'stats', description: 'Weekly leaderboard — add "all" for history', is_ephemeral: true },
-            { command: 'help', description: 'Quick guide and more options', is_ephemeral: true },
+            { command: 'chore', description: 'New chore — counts on the leaderboard' },
+            { command: 'remind', description: 'Plain reminder — no points' },
+            { command: 'list', description: 'Active chores and reminders' },
+            { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
+            { command: 'help', description: 'Quick guide and more options' },
           ],
           ...(scope ? { scope } : {}),
         }),

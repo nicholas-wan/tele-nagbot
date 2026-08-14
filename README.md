@@ -19,6 +19,7 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 ## Behavior
 
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
+- 😴 Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow**, which is a postponement rather than a snooze: it carries `fired_at` forward so the expiry window moves with the nag and the chore gets a fresh 24h when it returns. Both count against the 3-snooze cap.
 - Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
 - Pinned dashboard lists every chore (urgency-ordered, countdown first) with a ⚙️ Manage chores button; refreshed on every change and once each morning.
 - Manage, edit, and delete all happen **in place on the pinned message** — only its `reply_markup` changes, never its text. Because the text stays put, every management button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`, `🗑 Delete · clear poop`); internal numbers never appear in labels.
