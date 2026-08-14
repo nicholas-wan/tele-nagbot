@@ -49,9 +49,17 @@ export async function sendLong(env, chatId, html, opts = {}) {
   return last;
 }
 
+// Anything the bot says that carries no controls of its own gets a single OK,
+// so the group can be cleared without hunting for a delete option. Messages
+// with their own keyboard — the pinned board, nags, the wizard — keep theirs.
+// opts.noOk opts out for the rare message that must not be dismissable.
+const OK_ROW = { inline_keyboard: [[{ text: '✅ OK', callback_data: 'ok' }]] };
+const withOk = (replyMarkup, opts) => replyMarkup || (opts.noOk ? null : OK_ROW);
+
 export function sendMessage(env, chatId, html, replyMarkup, opts = {}) {
   const body = { chat_id: chatId, text: html, parse_mode: 'HTML' };
-  if (replyMarkup) body.reply_markup = replyMarkup;
+  const markup = withOk(replyMarkup, opts);
+  if (markup) body.reply_markup = markup;
   if (opts.silent) body.disable_notification = true;
   return tg(env, 'sendMessage', body);
 }
@@ -131,7 +139,8 @@ export async function sendPrivate(env, ctx, html, replyMarkup, opts = {}) {
     text: html,
     parse_mode: 'HTML',
   };
-  if (replyMarkup) body.reply_markup = replyMarkup;
+  const markup = withOk(replyMarkup, opts);
+  if (markup) body.reply_markup = markup;
   if (opts.silent) body.disable_notification = true;
   const cbId = takeCallbackId(ctx);
   if (cbId) body.callback_query_id = cbId;

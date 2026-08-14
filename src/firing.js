@@ -43,12 +43,26 @@ export async function fireReminder(env, r, now, tz) {
   ).bind(r.id).all();
   for (const f of stale.results) await expireFiring(env, f, r, { silent: true });
 
-  const intervals = JSON.parse(r.nag_intervals);
-  const ins = await env.DB.prepare(
-    'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at, scored) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz),
-    r.scored != null ? r.scored : 1).run();
-  const firingId = ins.meta.last_row_id;
+  // Everything from the claim to the firing row existing is the danger zone: a
+  // throw in here advances the schedule with no nag to show for it, and the
+  // occurrence is silently gone until the next slot — "cut nails" lost its
+  // 14 Aug 17:00 this way, leaving no firing row and no trace of the cause.
+  // Releasing the claim on failure lets the next cron tick simply try again.
+  let firingId;
+  try {
+    const intervals = JSON.parse(r.nag_intervals);
+    const ins = await env.DB.prepare(
+      'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at, scored) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz),
+      r.scored != null ? r.scored : 1).run();
+    firingId = ins.meta.last_row_id;
+  } catch (e) {
+    console.log(`fire for reminder ${r.id} failed before the nag existed, releasing claim: ${e.stack || e}`);
+    await env.DB.prepare(
+      'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
+    ).bind(r.next_fire_at, r.id, claimTo).run();
+    throw e;
+  }
 
   // An assigned chore nags only the person it is for: the message lives in the
   // group but Telegram shows it to that member alone. Unassigned chores are

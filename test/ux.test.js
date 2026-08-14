@@ -203,6 +203,28 @@ describe('chat UX', () => {
     expect(log.body.reply_markup.inline_keyboard[0].map((b) => b.text)).toEqual(['↩️ Undo', '✅ OK']);
   });
 
+  it('puts an OK on bot messages that have no controls of their own', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/list' },
+    });
+    const sent = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(sent.body.reply_markup.inline_keyboard[0][0]).toMatchObject({ text: '✅ OK', callback_data: 'ok' });
+  });
+
+  it('leaves messages that already have controls alone', async () => {
+    const reminder = {
+      id: 10, display_num: 3, text: 'Water plants', paused: 0,
+      next_fire_at: Date.now() + 3600000, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null,
+    };
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard([reminder]) };
+    await updateDashboard(env, 1);
+    const board = calls.find((c) => c.url.endsWith('/sendMessage'));
+    // The pinned board keeps Manage chores; an OK there would delete the board.
+    expect(board.body.reply_markup.inline_keyboard[0][0].text).toBe('⚙️ Manage chores');
+  });
+
   it('dismisses a log line when OK is tapped', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForNag(NAGGING) };
     await handleUpdate(env, {
