@@ -542,13 +542,15 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   }
 }
 
-// The creator's own confirmation is ephemeral, so without this the household
-// would never learn a chore had been added. Deliberately public and terse —
-// the pinned dashboard carries the detail.
+// An unassigned chore is the household's problem, so its arrival is announced:
+// the creator's own confirmation is private and nobody else would see it
+// otherwise. An assigned one is not — it will nag its person privately, so
+// announcing it here would hand the group the very thing that nag hides. The
+// pinned dashboard still lists both.
 async function announceNewChore(env, chatId, by, p, tz) {
-  const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
+  if (p.assigneeName || p.assigneeUserId) return;
   await sendMessage(env, chatId,
-    `📝 ${esc(by)} added <b>${esc(p.text)}</b>${forWho} — ${fmtLocal(p.firstFireAt, tz)}`);
+    `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`);
 }
 
 async function createReminder(env, chatId, p, by, tz) {

@@ -145,7 +145,7 @@ describe('ephemeral interactions', () => {
     expect(calls.some((c) => c.url.endsWith('/deleteMessage'))).toBe(false);
   });
 
-  it('announces a new chore publicly even though the confirmation is private', async () => {
+  it('announces an unassigned chore publicly even though the confirmation is private', async () => {
     await handleUpdate(env(), {
       message: {
         message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' },
@@ -158,6 +158,20 @@ describe('ephemeral interactions', () => {
     expect(confirmation).toBeTruthy();
     expect(announcement).toBeTruthy();
     expect(announcement.body.text).toContain('water plants');
+  });
+
+  // An assigned chore nags privately, so announcing it would leak exactly what
+  // that nag is meant to keep between the bot and one person.
+  it('stays quiet in the group when the chore is assigned to someone', async () => {
+    await handleUpdate(env(), {
+      message: {
+        message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' },
+        text: '/remind @nicholaswan testing 7pm', entities: [],
+      },
+    });
+    const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
+    expect(sends.some((c) => !c.body.receiver_user_id && /added/.test(c.body.text || ''))).toBe(false);
+    expect(sends.some((c) => c.body.receiver_user_id)).toBe(true);
   });
 
   it('falls back to a public reply when ephemeral delivery is refused', async () => {

@@ -37,7 +37,8 @@ Commands and their replies are private to the sender; the group only ever sees s
 |---|---|
 | Command replies, help, `/list`, `/stats` | Pinned dashboard and its ⚙️ Manage flow |
 | Wizard, prompts, confirmations, cancels | Unassigned nags |
-| Success and error messages | Done receipts, tombstones, new-chore line, vacation mode |
+| Success and error messages | Done receipts, tombstones, vacation mode |
+| New-chore line for an **assigned** chore (suppressed) | New-chore line for an **unassigned** chore |
 | **Nags for an assigned chore** | Welcomes |
 
 Manage is deliberately a **shared** surface: tapping ⚙️ swaps the pinned message's buttons in place, so anyone in the household can pick up where another left off. Only replies to a command someone typed are private. Chores assigned to a member still nag that member's DM — that routing is separate from ephemeral messages and unchanged.
