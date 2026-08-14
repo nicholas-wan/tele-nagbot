@@ -145,9 +145,40 @@ function snoozedHtml(reminder, until, by, tz) {
   return `😴 <b>${esc(reminder.text)}</b>\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${who}`;
 }
 
-// Where a firing's nag messages live: the assignee's DM when routed there,
-// else the group. Data (stats, dashboard, expiry) always stays on chat_id.
+// Every nag now lives in the group; only its visibility differs. Kept as a
+// function because nag_chat_id still exists for pre-ephemeral rows, all NULL.
 export const nagChat = (firing) => firing.nag_chat_id || firing.chat_id;
+
+// A nag is public or ephemeral, and the two use different id spaces and
+// different edit/delete methods. These three keep that distinction in one
+// place so the lifecycle below never has to care which kind it is holding.
+const nagRef = (firing) => (firing.last_message_id
+  ? { id: firing.last_message_id, ephemeral: Boolean(firing.last_message_ephemeral) }
+  : null);
+const nagCtx = (env, firing) => replyCtx(env, nagChat(firing), firing.nag_user_id);
+const isEphemeralNag = (firing) => Boolean(firing.last_message_ephemeral);
+
+function editNag(env, firing, html, markup) {
+  return editRef(env, nagCtx(env, firing), nagChat(firing), nagRef(firing), html, markup);
+}
+
+export function deleteNag(env, firing) {
+  return deleteRef(env, nagCtx(env, firing), nagChat(firing), nagRef(firing));
+}
+
+// Re-send a firing's nag with the same visibility as the original, so a re-nag
+// or a /poke never quietly promotes a private chore into public view.
+export async function sendNag(env, firing, html, markup, opts = {}) {
+  if (firing.nag_user_id) {
+    return msgRef(await sendPrivate(env, nagCtx(env, firing), html, markup, opts));
+  }
+  return msgRef(await sendMessage(env, nagChat(firing), html, markup, opts));
+}
+
+// Remove a nag message that lost its compare-and-swap after being sent.
+export function deleteNagRef(env, firing, ref) {
+  return deleteRef(env, nagCtx(env, firing), nagChat(firing), ref);
+}
 
 async function showPausedCard(env, firing, reminder, by, tz, until = null) {
   if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
@@ -156,13 +187,12 @@ async function showPausedCard(env, firing, reminder, by, tz, until = null) {
   const state = until
     ? `Household paused until ${fmtLocal(until, tz)}.`
     : `Paused by ${esc(by)}.`;
-  await editMessage(env, nagChat(firing), firing.last_message_id,
-    `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, emptyKeyboard());
+  await editNag(env, firing, `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, emptyKeyboard());
 }
 
 async function silenceOldNag(env, firing, text, note) {
   if (!firing.last_message_id) return;
-  await editMessage(env, nagChat(firing), firing.last_message_id, `${note} <s>${esc(text)}</s>`, emptyKeyboard());
+  await editNag(env, firing, `${note} <s>${esc(text)}</s>`, emptyKeyboard());
 }
 
 export async function completeFiring(env, firing, reminder, byName, tz) {
@@ -176,19 +206,22 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.
   firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
   if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
-  const celebration = await sendCelebrationSticker(env, nagChat(firing), firing.id);
+  // An ephemeral nag had no sticker to begin with — one now would be visible to
+  // the whole group and give away a chore only one person could see.
+  const celebration = isEphemeralNag(firing)
+    ? { cat: 'both' }
+    : await sendCelebrationSticker(env, nagChat(firing), firing.id);
   const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
     : 'The cats purr approvingly.';
   if (firing.last_message_id) {
-    await editMessage(
-      env, nagChat(firing), firing.last_message_id,
+    await editNag(env, firing,
       `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. ${purr}`,
-      emptyKeyboard()
-    );
+      emptyKeyboard());
   }
-  // DM-routed chores leave a quiet receipt in the group so completions stay visible.
-  if (nagChat(firing) !== firing.chat_id) {
+  // A privately-nagged chore leaves a quiet public receipt: the household still
+  // gets to see the chore was done, just not that it was pending.
+  if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id) {
     await sendMessage(env, firing.chat_id,
       `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, null, { silent: true });
   }
@@ -612,15 +645,15 @@ async function handlePlainText(env, msg) {
     replyEphemeralId: msg.ephemeral_message_id || null,
   });
   const replyRef = msg.reply_to_message ? callbackRef({ message: msg.reply_to_message }) : null;
-  // Nags are always public, so only a public reply target can match a firing.
-  const replyId = replyRef && !replyRef.ephemeral ? replyRef.id : null;
 
-  // Replying "done" / "snooze 2h" to a nag message acts on that nag —
-  // whether the nag lives in the group or in an assignee's DM.
-  if (replyId) {
+  // Replying "done" / "snooze 2h" to a nag acts on that nag. An assigned chore
+  // nags ephemerally, so the reply target may be in either id space — the flag
+  // has to be part of the match, since the two sequences can collide.
+  if (replyRef) {
     const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?) AND last_message_id = ? AND state = 'nagging'"
-    ).bind(chatId, chatId, replyId).first();
+      `SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?)
+         AND last_message_id = ? AND last_message_ephemeral = ? AND state = 'nagging'`
+    ).bind(chatId, chatId, replyRef.id, replyRef.ephemeral ? 1 : 0).first();
     if (firing) return handleNagReply(env, msg, firing);
   }
   // Bare "done" works when exactly one chore is nagging; with several, the
@@ -772,7 +805,7 @@ async function handleNagReply(env, msg, firing, ctx) {
     if (!res.meta.changes) return sendPrivate(env, ctx, '😼 That one was already handled.');
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
-      await editMessage(env, nagChat(firing), firing.last_message_id,
+      await editNag(env, firing,
         snoozedHtml(reminder, until, senderName(msg.from), tz), snoozedButtons(firing.id));
       if (isPublicMessage(msg)) await deleteMessage(env, msg.chat.id, msg.message_id);
       return;
@@ -938,7 +971,7 @@ async function deleteReminder(env, r, ctx = null) {
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
   ).bind(r.id).all();
   for (const f of firings.results) {
-    if (f.last_message_id) await deleteMessage(env, nagChat(f), f.last_message_id);
+    if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
   }
   await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
@@ -997,7 +1030,7 @@ export async function wakeChat(env, chatId, tz) {
     "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
   ).bind(chatId).all();
   for (const f of firings.results) {
-    if (f.last_message_id) await deleteMessage(env, nagChat(f), f.last_message_id);
+    if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
     await env.DB.prepare('DELETE FROM firings WHERE id = ?').bind(f.id).run();
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
@@ -1044,7 +1077,7 @@ async function setReminderPaused(env, r, pause, tz, by) {
     if (pause) {
       await showPausedCard(env, firing, r, by, tz);
     } else if (firing.last_message_id) {
-      await editMessage(env, nagChat(firing), firing.last_message_id,
+      await editNag(env, firing,
         nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id));
     }
   }
@@ -1099,13 +1132,14 @@ async function cmdPoke(env, ctx) {
   for (const f of results) {
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
     if (!r) continue;
-    if (f.last_message_id) await deleteMessage(env, nagChat(f), f.last_message_id);
+    if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-    const sent = await sendMessage(env, nagChat(f), nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id));
+    const ref = await sendNag(env, f, nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id));
     const upd = await env.DB.prepare(
-      "UPDATE firings SET last_message_id = ?, last_sticker_id = NULL WHERE id = ? AND state = 'nagging'"
-    ).bind(sent.ok ? sent.result.message_id : null, f.id).run();
-    if (!upd.meta.changes && sent.ok) await deleteMessage(env, nagChat(f), sent.result.message_id);
+      `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
+       WHERE id = ? AND state = 'nagging'`
+    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id).run();
+    if (!upd.meta.changes && ref) await deleteNagRef(env, f, ref);
   }
 }
 
@@ -1757,7 +1791,7 @@ async function handleCallback(env, cb) {
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
     ).bind(r.id).all();
     for (const f of firings.results) {
-      if (f.last_message_id) await deleteMessage(env, nagChat(f), f.last_message_id);
+      if (f.last_message_id) await deleteNag(env, f);
       if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
     }
     await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
@@ -1800,9 +1834,22 @@ async function handleCallback(env, cb) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+zm[1]).first();
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
     if (zm[2] === 'b') {
-      const buttons = String(cb.message.text || '').startsWith('😴')
-        ? snoozedButtons(firing.id) : nagButtons(firing.id);
-      await editReplyMarkup(env, nagChat(firing), cb.message.message_id, buttons);
+      const wasSnoozed = String(cb.message.text || '').startsWith('😴');
+      const buttons = wasSnoozed ? snoozedButtons(firing.id) : nagButtons(firing.id);
+      // An ephemeral message has no reply-markup-only edit, so its text has to
+      // be re-rendered alongside the keyboard.
+      if (isEphemeralNag(firing)) {
+        const rem = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?')
+          .bind(firing.reminder_id).first();
+        if (rem) {
+          const ztz = await getTz(env, firing.chat_id);
+          await editNag(env, firing, wasSnoozed
+            ? snoozedHtml(rem, firing.next_nag_at, senderName(cb.from), ztz)
+            : nagHtml(rem, firing.nag_count, firing.cat || 'both'), buttons);
+        }
+      } else {
+        await editReplyMarkup(env, nagChat(firing), cb.message.message_id, buttons);
+      }
       return answerCallback(env, cb.id, '');
     }
     if (firing.snoozes_used >= MAX_SNOOZES) {
@@ -1822,7 +1869,7 @@ async function handleCallback(env, cb) {
     if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
-      await editMessage(env, nagChat(firing), firing.last_message_id,
+      await editNag(env, firing,
         snoozedHtml(reminder, until, senderName(cb.from), tz), snoozedButtons(firing.id));
     }
     return answerCallback(env, cb.id,
@@ -1857,6 +1904,11 @@ async function handleCallback(env, cb) {
   if (firing.snoozes_used >= MAX_SNOOZES) {
     return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
   }
-  await editReplyMarkup(env, nagChat(firing), cb.message.message_id, snoozeButtons(firing.id, tz));
+  if (isEphemeralNag(firing)) {
+    await editNag(env, firing, nagHtml(reminder, firing.nag_count, firing.cat || 'both'),
+      snoozeButtons(firing.id, tz));
+  } else {
+    await editReplyMarkup(env, nagChat(firing), cb.message.message_id, snoozeButtons(firing.id, tz));
+  }
   return answerCallback(env, cb.id, '');
 }

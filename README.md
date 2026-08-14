@@ -23,7 +23,7 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 - Pinned dashboard lists every chore (urgency-ordered, countdown first) with a ⚙️ Manage chores button; refreshed on every change and once each morning.
 - Manage, edit, and delete all happen **in place on the pinned message** — only its `reply_markup` changes, never its text. Because the text stays put, every management button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`, `🗑 Delete · clear poop`); internal numbers never appear in labels.
 - Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins the board, as does `POST /admin?board`.
-- Chores assigned to a member nag that member's DM once they press Start on the bot; the group keeps the dashboard, a silent done-receipt, and the tombstone.
+- Chores assigned to a member nag **only that member, in the group** — the nag is an ephemeral message, so it sits in the group chat but nobody else can see it. No DM and no Start required. Unassigned chores stay public: they're everyone's problem. The group still gets a silent done-receipt and the tombstone, so completions and misses stay visible.
 - Daily digest 8am, weekly wrap Sunday 8pm, both silent. Streaks 🔥 for repeat weekly winners.
 - Chore icons come from a keyword table in `handlers.js`; lead the chore text with your own emoji to override.
 - Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Tools: `/tags`, `/tagsticker`, `/autotag`, `/delsticker`.
@@ -35,14 +35,17 @@ Commands and their replies are private to the sender; the group only ever sees s
 | Private (ephemeral) | Public |
 |---|---|
 | Command replies, help, `/list`, `/stats` | Pinned dashboard and its ⚙️ Manage flow |
-| Wizard, prompts, confirmations, cancels | Nags and Done receipts |
-| Success and error messages | New-chore announcement, vacation mode, welcomes |
+| Wizard, prompts, confirmations, cancels | Unassigned nags |
+| Success and error messages | Done receipts, tombstones, new-chore line, vacation mode |
+| **Nags for an assigned chore** | Welcomes |
 
 Manage is deliberately a **shared** surface: tapping ⚙️ swaps the pinned message's buttons in place, so anyone in the household can pick up where another left off. Only replies to a command someone typed are private. Chores assigned to a member still nag that member's DM — that routing is separate from ephemeral messages and unchanged.
 
 - Commands are registered with `is_ephemeral: true` under both the default and `all_group_chats` scopes. Verify with `POST /admin?info`, which reads them back from Telegram.
 - A private send needs `receiver_user_id`; within 15s of a tap it also carries `callback_query_id`, which is what lets the bot reach a member it has no other recent contact with. The bot must be a group admin, and delivery to an offline user is not guaranteed — `sendPrivate` falls back to a public message when Telegram refuses.
-- Ephemeral messages report `message_id: 0` and a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs; `drafts` records the flag in `wizard_msg_ephemeral` / `prompt_msg_ephemeral`. Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
+- Ephemeral messages report `message_id: 0` and a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs; `drafts` records the flag in `wizard_msg_ephemeral` / `prompt_msg_ephemeral`, `firings` in `last_message_ephemeral` + `nag_user_id`. Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
+- The nag lifecycle goes through `sendNag` / `editNag` / `deleteNag` in `handlers.js`; never touch `last_message_id` with the public helpers directly, or a private nag becomes unreachable. There is no reply-markup-only edit for ephemeral messages, so those paths re-render the text too.
+- DM nag routing is **gone**. `nag_chat_id` survives only for pre-ephemeral rows and is always NULL; `members.dm_ok` is now vestigial.
 - The pinned dashboard is never sent privately. Manage edits its reply markup in place and leaves its text alone; `updateDashboard` owns the text.
 - Kill switch: set `EPHEMERAL = "0"` in `wrangler.toml` `[vars]` and deploy to make everything public again.
 

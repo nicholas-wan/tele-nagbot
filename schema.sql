@@ -30,8 +30,13 @@ CREATE TABLE IF NOT EXISTS firings (
   cat TEXT,                             -- which cat was on that sticker; re-nag lines match
   done_by TEXT,
   done_at INTEGER,
-  nag_chat_id INTEGER,                  -- where the nag messages live (assignee DM); NULL = the group
-  scored INTEGER NOT NULL DEFAULT 1     -- snapshot of the reminder's scored flag at fire time
+  nag_chat_id INTEGER,                  -- legacy DM routing; always NULL since nags moved in-group
+  scored INTEGER NOT NULL DEFAULT 1,    -- snapshot of the reminder's scored flag at fire time
+  -- An assigned chore nags ephemerally: the message sits in the group but only
+  -- this user can see it. Both are needed for every later edit/delete, because
+  -- editEphemeralMessageText requires the receiver alongside the message id.
+  nag_user_id INTEGER,                  -- ephemeral recipient; NULL = a public nag
+  last_message_ephemeral INTEGER NOT NULL DEFAULT 0
 );
 
 -- Pending /remind commands that lacked a time; resolved via inline buttons.

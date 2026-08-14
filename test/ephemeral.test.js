@@ -1,6 +1,7 @@
 // Ephemeral interactions (Bot API 10.2): private replies in a public group.
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
+import { fireReminder } from '../src/firing.js';
 import worker from '../src/index.js';
 
 const REMINDER = {
@@ -175,6 +176,55 @@ describe('ephemeral interactions', () => {
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
     expect(sends.some((c) => c.body.receiver_user_id)).toBe(true);
     expect(sends.some((c) => !c.body.receiver_user_id)).toBe(true);
+  });
+
+  // An assigned chore nags only its assignee; an unassigned one is everyone's.
+  function fireEnv(reminder, member) {
+    return {
+      BOT_TOKEN: 'token', ALLOWED_CHATS: '1',
+      DB: {
+        prepare(sql) {
+          return {
+            bind() {
+              return {
+                async first() {
+                  if (sql.includes('FROM members')) return member;
+                  if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                  if (sql.includes('dashboard_msg_id')) return { dashboard_msg_id: 99 };
+                  return null;
+                },
+                async all() { return { results: [] }; },
+                async run() { return { meta: { changes: 1, last_row_id: 77 } }; },
+              };
+            },
+          };
+        },
+      },
+    };
+  }
+
+  const CHORE = {
+    id: 10, chat_id: 1, text: 'clear poop', schedule_kind: 'interval',
+    schedule_detail: JSON.stringify({ h: 21, mi: 0, days: 8 }),
+    nag_intervals: '[15,30,60]', next_fire_at: 1_600_000_000_000, scored: 1,
+  };
+
+  it('nags only the assignee when a chore is assigned', async () => {
+    const env = fireEnv(null, { user_id: 246334575 });
+    await fireReminder(env, { ...CHORE, assignee_name: '@nicholaswan', assignee_user_id: null },
+      1_600_000_000_000, 'Asia/Singapore');
+    const nag = calls.find((c) => c.url.endsWith('/sendMessage') && /clear poop/.test(c.body.text || ''));
+    expect(nag.body.receiver_user_id).toBe(246334575);
+    // A visible sticker beside an invisible nag would give the chore away.
+    expect(calls.some((c) => c.url.endsWith('/sendSticker'))).toBe(false);
+  });
+
+  it('keeps an unassigned chore public', async () => {
+    const env = fireEnv(null, null);
+    await fireReminder(env, { ...CHORE, assignee_name: null, assignee_user_id: null },
+      1_600_000_000_000, 'Asia/Singapore');
+    const nag = calls.find((c) => c.url.endsWith('/sendMessage') && /clear poop/.test(c.body.text || ''));
+    expect(nag.body.receiver_user_id).toBeUndefined();
   });
 
   it('EPHEMERAL=0 turns everything back to public', async () => {

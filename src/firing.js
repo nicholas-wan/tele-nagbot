@@ -1,7 +1,7 @@
 // Fires one reminder: expires any stale nag, sends sticker + nag message,
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
-import { sendMessage } from './tg.js';
+import { sendMessage, sendPrivate, replyCtx, msgRef } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
 import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
@@ -50,22 +50,30 @@ export async function fireReminder(env, r, now, tz) {
     r.scored != null ? r.scored : 1).run();
   const firingId = ins.meta.last_row_id;
 
-  // Assigned chores nag the assignee's DM when they've opened one; the group
-  // is the fallback, and the chore's data stays keyed to the group throughout.
-  let nagChatId = r.chat_id;
+  // An assigned chore nags only the person it is for: the message lives in the
+  // group but Telegram shows it to that member alone. Unassigned chores are
+  // everyone's problem and stay public.
+  const who = await assigneeUserId(env, r);
   let sent = null;
-  const dm = await assigneeDm(env, r);
-  if (dm) {
-    sent = await sendMessage(env, dm, nagHtml(r, 0, 'both'), nagButtons(firingId));
-    if (sent.ok) nagChatId = dm;
+  let ref = null;
+  let s = { messageId: null, cat: 'both' };
+  if (who) {
+    const ctx = replyCtx(env, r.chat_id, who);
+    // A sticker cannot be sent ephemerally, and a visible sticker beside an
+    // invisible nag would announce the chore it is trying to keep private.
+    sent = await sendPrivate(env, ctx, nagHtml(r, 0, 'both'), nagButtons(firingId));
+    ref = msgRef(sent);
   }
-  const s = await sendRandomSticker(env, nagChatId, firingId);
-  if (!sent || !sent.ok) {
+  if (!ref) {
+    s = await sendRandomSticker(env, r.chat_id, firingId);
     sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId));
+    ref = msgRef(sent);
   }
-  await env.DB.prepare('UPDATE firings SET last_message_id = ?, last_sticker_id = ?, cat = ?, nag_chat_id = ? WHERE id = ?')
-    .bind(sent.ok ? sent.result.message_id : null, s.messageId, s.cat,
-      nagChatId === r.chat_id ? null : nagChatId, firingId).run();
+  await env.DB.prepare(
+    `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
+       cat = ?, nag_user_id = ? WHERE id = ?`
+  ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
+    ref && ref.ephemeral ? who : null, firingId).run();
 
   // Fire completed: a one-off releases its lease and goes dormant. If the
   // lease expired mid-fire and a retry re-fired, the stale sweep above has
@@ -80,19 +88,16 @@ export async function fireReminder(env, r, now, tz) {
 }
 
 // The assignee's private-chat id, when known and they've opened a DM line
-// with the bot (/start). Null routes the nag to the group.
-async function assigneeDm(env, r) {
+// The assignee's numeric id, which is what an ephemeral send addresses.
+// Assignment stores a display name (the editor deliberately nulls the id), so
+// the name is resolved back through members. No dm_ok gate any more: the nag
+// stays in the group, so the member never has to open a private chat first.
+async function assigneeUserId(env, r) {
   if (!r.assignee_name && !r.assignee_user_id) return null;
-  let row = null;
-  if (r.assignee_user_id) {
-    row = await env.DB.prepare(
-      'SELECT user_id FROM members WHERE chat_id = ? AND user_id = ? AND dm_ok = 1'
-    ).bind(r.chat_id, r.assignee_user_id).first();
-  } else {
-    row = await env.DB.prepare(
-      'SELECT user_id FROM members WHERE chat_id = ? AND dm_ok = 1 AND lower(username) = ?'
-    ).bind(r.chat_id, String(r.assignee_name).replace(/^@/, '').toLowerCase()).first();
-  }
+  if (r.assignee_user_id) return r.assignee_user_id;
+  const row = await env.DB.prepare(
+    'SELECT user_id FROM members WHERE chat_id = ? AND lower(username) = ?'
+  ).bind(r.chat_id, String(r.assignee_name).replace(/^@/, '').toLowerCase()).first();
   return row ? row.user_id : null;
 }
 
