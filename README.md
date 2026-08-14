@@ -31,7 +31,7 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 
 ## Ephemeral messages (Bot API 10.2)
 
-Commands and their replies are private to the sender; the group only ever sees shared content.
+Replies are private to the sender; the command that asked for them is deleted the moment it is handled. The group only ever sees shared content.
 
 | Private (ephemeral) | Public |
 |---|---|
@@ -41,9 +41,9 @@ Commands and their replies are private to the sender; the group only ever sees s
 | New-chore line for an **assigned** chore (suppressed) | New-chore line for an **unassigned** chore |
 | **Nags for an assigned chore** | Welcomes |
 
-Manage is deliberately a **shared** surface: tapping ⚙️ swaps the pinned message's buttons in place, so anyone in the household can pick up where another left off. Only replies to a command someone typed are private. Chores assigned to a member still nag that member's DM — that routing is separate from ephemeral messages and unchanged.
+Manage is deliberately a **shared** surface: tapping ⚙️ swaps the pinned message's buttons in place, so anyone in the household can pick up where another left off. Only replies to a command someone typed are private. A chore assigned to a member nags that member in the group, as an ephemeral message only they can see — no DM, and nothing for them to open first.
 
-- Commands are registered with `is_ephemeral: true` under both the default and `all_group_chats` scopes. Verify with `POST /admin?info`, which reads them back from Telegram.
+- Commands are registered **without** `is_ephemeral`, under both the default and `all_group_chats` scopes. An ephemeral command is never delivered to a bot running with Group Privacy on, which is how this bot is configured — commands simply vanished. So a command arrives as an ordinary group message, visible for the moment before `deleteMessage` clears it, guarded by `isPublicMessage()`. Reply privacy is unaffected: it comes from `receiver_user_id` on the send, not from this flag. Verify with `POST /admin?info`, which reads the registered commands back from Telegram.
 - A private send needs `receiver_user_id`; within 15s of a tap it also carries `callback_query_id`, which is what lets the bot reach a member it has no other recent contact with. The bot must be a group admin, and delivery to an offline user is not guaranteed — `sendPrivate` falls back to a public message when Telegram refuses.
 - Ephemeral messages report `message_id: 0` and a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs; `drafts` records the flag in `wizard_msg_ephemeral` / `prompt_msg_ephemeral`, `firings` in `last_message_ephemeral` + `nag_user_id`. Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
 - The nag lifecycle goes through `sendNag` / `editNag` / `deleteNag` in `handlers.js`; never touch `last_message_id` with the public helpers directly, or a private nag becomes unreachable. There is no reply-markup-only edit for ephemeral messages, so those paths re-render the text too.
@@ -58,7 +58,7 @@ Manage is deliberately a **shared** surface: tapping ⚙️ swaps the pinned mes
 | `src/index.js` | webhook + `/setup` + `/admin` routes, cron entry |
 | `src/handlers.js` | commands, wizard, callbacks, editor, dashboard, stats, nag copy |
 | `src/cron.js` | fire/re-nag/expire, digest, weekly wrap, retention, vacation wake |
-| `src/firing.js` | fire-one-reminder, DM routing, rotation |
+| `src/firing.js` | fire-one-reminder, assignee routing, rotation |
 | `src/parse.js` | `/remind` and `/chore` parser (200-char text cap) |
 | `src/time.js` | timezone, next-occurrence, interval anchoring, quiet hours |
 | `src/stickers.js` · `src/ai.js` · `src/tg.js` | packs/tagging · schedule suggestion · API client |
