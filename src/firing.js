@@ -3,7 +3,7 @@
 
 import { sendMessage, sendPrivate, replyCtx, msgRef } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
-import { nagButtons, nagHtml, expireFiring, updateDashboard } from './handlers.js';
+import { nagButtons, nagHtml, expireFiring, updateDashboard, isScored } from './handlers.js';
 import { sendRandomSticker } from './stickers.js';
 
 // How long a one-off's fire claim holds before an unfinished fire retries.
@@ -61,12 +61,12 @@ export async function fireReminder(env, r, now, tz) {
     const ctx = replyCtx(env, r.chat_id, who);
     // A sticker cannot be sent ephemerally, and a visible sticker beside an
     // invisible nag would announce the chore it is trying to keep private.
-    sent = await sendPrivate(env, ctx, nagHtml(r, 0, 'both'), nagButtons(firingId));
+    sent = await sendPrivate(env, ctx, nagHtml(r, 0, 'both'), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);
   }
   if (!ref) {
     s = await sendRandomSticker(env, r.chat_id, firingId);
-    sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId));
+    sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);
   }
   await env.DB.prepare(

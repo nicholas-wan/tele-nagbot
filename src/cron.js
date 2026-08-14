@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml } from './tg.js';
-import { getTz, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, isScored, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
 
@@ -241,7 +241,7 @@ async function renagPending(env, now) {
       // Loudness ladder: first re-nag is silent; later ones notify again.
       // sendNag keeps an assigned chore's re-nag as private as its first nag.
       const ref = await sendNag(env, f, nagHtml(r, nagCount, f.cat || 'both'),
-        nagButtons(f.id), { silent: nagCount === 1 });
+        nagButtons(f.id, isScored(f)), { silent: nagCount === 1 });
       const upd = await env.DB.prepare(
         `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
          WHERE id = ? AND state = 'nagging'`

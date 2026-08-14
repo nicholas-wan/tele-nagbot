@@ -25,29 +25,32 @@ function senderName(from) {
   return from.username ? `@${from.username}` : from.first_name || 'someone';
 }
 
-export function nagButtons(firingId) {
+// /chore and /remind are different things and their nags say so. A reminder is
+// unscored, so "Done together" — which exists only to split leaderboard credit
+// — has nothing to split and is left off.
+export const isScored = (row) => (row && row.scored != null ? Boolean(row.scored) : true);
+
+export function nagButtons(firingId, scored = true) {
+  const first = [{ text: '✅ Done', callback_data: `d:${firingId}` }];
+  if (scored) first.push({ text: '🤝 Done together', callback_data: `b:${firingId}` });
+  first.push({ text: '😴 Snooze…', callback_data: `s:${firingId}` });
   return {
     inline_keyboard: [
-      [
-        { text: '✅ Done', callback_data: `d:${firingId}` },
-        { text: '🤝 Done together', callback_data: `b:${firingId}` },
-        { text: '😴 Snooze…', callback_data: `s:${firingId}` },
-      ],
-      [{ text: '🗑 Delete chore', callback_data: `x:${firingId}` }],
+      first,
+      [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
     ],
   };
 }
 
 const emptyKeyboard = () => ({ inline_keyboard: [] });
 
-function snoozedButtons(firingId) {
+function snoozedButtons(firingId, scored = true) {
+  const first = [{ text: '✅ Done', callback_data: `d:${firingId}` }];
+  if (scored) first.push({ text: '🤝 Done together', callback_data: `b:${firingId}` });
+  first.push({ text: '🕐 Change snooze', callback_data: `s:${firingId}` });
   return { inline_keyboard: [
-    [
-      { text: '✅ Done', callback_data: `d:${firingId}` },
-      { text: '🤝 Done together', callback_data: `b:${firingId}` },
-      { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
-    ],
-    [{ text: '🗑 Delete chore', callback_data: `x:${firingId}` }],
+    first,
+    [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
   ] };
 }
 
@@ -815,7 +818,7 @@ async function handleNagReply(env, msg, firing, ctx) {
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
       await editNag(env, firing,
-        snoozedHtml(reminder, until, senderName(msg.from), tz), snoozedButtons(firing.id));
+        snoozedHtml(reminder, until, senderName(msg.from), tz), snoozedButtons(firing.id, isScored(firing)));
       if (isPublicMessage(msg)) await deleteMessage(env, msg.chat.id, msg.message_id);
       return;
     }
@@ -1096,7 +1099,7 @@ async function setReminderPaused(env, r, pause, tz, by) {
       await showPausedCard(env, firing, r, by, tz);
     } else if (firing.last_message_id) {
       await editNag(env, firing,
-        nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id));
+        nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
     }
   }
   await updateDashboard(env, r.chat_id);
@@ -1152,7 +1155,7 @@ async function cmdPoke(env, ctx) {
     if (!r) continue;
     if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-    const ref = await sendNag(env, f, nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id));
+    const ref = await sendNag(env, f, nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id, isScored(f)));
     const upd = await env.DB.prepare(
       `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
        WHERE id = ? AND state = 'nagging'`
@@ -1874,7 +1877,7 @@ async function handleCallback(env, cb) {
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
     if (zm[2] === 'b') {
       const wasSnoozed = String(cb.message.text || '').startsWith('😴');
-      const buttons = wasSnoozed ? snoozedButtons(firing.id) : nagButtons(firing.id);
+      const buttons = wasSnoozed ? snoozedButtons(firing.id, isScored(firing)) : nagButtons(firing.id, isScored(firing));
       // An ephemeral message has no reply-markup-only edit, so its text has to
       // be re-rendered alongside the keyboard.
       if (isEphemeralNag(firing)) {
@@ -1919,7 +1922,7 @@ async function handleCallback(env, cb) {
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
       await editNag(env, firing,
-        snoozedHtml(reminder, until, senderName(cb.from), tz), snoozedButtons(firing.id));
+        snoozedHtml(reminder, until, senderName(cb.from), tz), snoozedButtons(firing.id, isScored(firing)));
     }
     if (postpone) {
       return answerCallback(env, cb.id, `Postponed to ${fmtShort(until, tz)} 📅`);
