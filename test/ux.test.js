@@ -310,3 +310,37 @@ describe('daily sweep of bot messages', () => {
     expect(inserted.length).toBe(0);
   });
 });
+
+describe('phone-sized board', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('renders when and what on their own short lines, and drops "once"', async () => {
+    const chores = [
+      { id: 1, display_num: 1, text: 'clear poop', paused: 0, next_fire_at: Date.now() + 3600000,
+        schedule_kind: 'interval', schedule_detail: JSON.stringify({ days: 8, h: 21, mi: 0 }), assignee_name: null },
+      { id: 2, display_num: 2, text: 'starhub booth', paused: 0, next_fire_at: Date.now() + 7200000,
+        schedule_kind: 'once', schedule_detail: JSON.stringify({ h: 14, mi: 0 }), assignee_name: null },
+    ];
+    const env = { BOT_TOKEN: 'token', DB: dbForDashboard(chores) };
+    await updateDashboard(env, 1);
+    const text = calls.find((c) => c.url.endsWith('/sendMessage')).body.text;
+    const lines = text.split('\n');
+    // The chore name starts its line — the timing lives on the line above it.
+    const nameLine = lines.find((l) => l.includes('clear poop'));
+    expect(nameLine.startsWith('💩')).toBe(true);
+    expect(nameLine).toContain('every 8 days');
+    // One-offs carry no cadence; "once" is the absence of one.
+    expect(text).not.toContain('once');
+    expect(lines.find((l) => l.includes('starhub booth'))).not.toContain('·  ');
+  });
+});

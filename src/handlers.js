@@ -506,8 +506,10 @@ function helpButtons(section = 'home', pinUrl = null) {
     [{ text: '🧰 More controls', callback_data: 'h:more' }, { text: '🐾 Stickers', callback_data: 'h:stickers' }],
   ] : [[{ text: '← Help', callback_data: 'h:home' }]];
   // Help is ephemeral, so the pinned dashboard is no longer one scroll away —
-  // jump to it directly.
+  // jump to it directly. OK dismisses help like any other note; its own
+  // buttons don't cover that.
   if (pinUrl) rows.push([{ text: '📌 View pinned dashboard', url: pinUrl }]);
+  rows.push([{ text: '✅ OK', callback_data: 'ok' }]);
   return { inline_keyboard: rows };
 }
 
@@ -907,15 +909,19 @@ async function choreListHtml(env, chatId, tz) {
   results.sort((a, b) => rank(a) - rank(b)
     || (a.next_fire_at || 0) - (b.next_fire_at || 0)
     || a.display_num - b.display_num);
+  // Two short lines per chore — when, then what — so nothing wraps on a phone
+  // (squashbot's board layout). "once" says nothing a missing cadence doesn't.
   for (const r of results) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const lead = r.paused ? '⏸️ paused'
       : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
       : fmtWhen(r.next_fire_at, tz);
+    const each = cadence(r);
     lines.push('');
-    lines.push(`${lead} · ${[choreEmoji(r.text), `<b>${esc(r.text)}</b>`].filter(Boolean).join(' ')}${rot}${who}`);
-    lines.push(`      <i>${cadence(r)}</i>`);
+    lines.push(lead);
+    lines.push(`${[choreEmoji(r.text), `<b>${esc(r.text)}</b>`].filter(Boolean).join(' ')}${rot}${who}` +
+      (each === 'once' ? '' : ` · <i>${each}</i>`));
   }
   return lines.join('\n');
 }
