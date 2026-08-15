@@ -161,3 +161,39 @@ describe('other forms', () => {
     expect(() => parse('x today 9am')).toThrow(ParseError); // it is 12:00
   });
 });
+
+describe('fortnightly weekdays and calendar start dates', () => {
+  const now = Date.UTC(2026, 7, 14, 4, 0); // Fri 14 Aug 2026, noon SGT
+  const p = (s) => parseRemind(s, `/chore ${s}`, [], now, 'Asia/Singapore');
+  const sgt = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(0, 16);
+
+  it('reads "every other <weekday>" as fortnightly on that day', () => {
+    const r = p('bedsheets every other saturday 10am');
+    expect(r.text).toBe('bedsheets');
+    expect(r.kind).toBe('interval');
+    expect(r.detail.days).toBe(14);
+    // Anchors to the coming Saturday, then every 14 days from there.
+    expect(sgt(r.firstFireAt)).toBe('2026-08-15T10:00');
+  });
+
+  it('honours a stated start date over the next matching slot', () => {
+    const r = p('bedsheets every other saturday starting from 29 aug 10am');
+    expect(r.text).toBe('bedsheets');
+    expect(r.detail.days).toBe(14);
+    expect(sgt(r.firstFireAt)).toBe('2026-08-29T10:00');
+  });
+
+  it('accepts either date order and rolls a past date to next year', () => {
+    expect(sgt(p('x every 2 weeks starting aug 29 7pm').firstFireAt)).toBe('2026-08-29T19:00');
+    expect(sgt(p('passport from 3 jan 9am').firstFireAt)).toBe('2027-01-03T09:00');
+  });
+
+  it('keeps "every other day" at two days, not a fortnight', () => {
+    expect(p('bins every other day 10am').detail.days).toBe(2);
+  });
+
+  it('does not mistake prose for a start date', () => {
+    expect(p('buy sun hat 5pm').text).toBe('buy sun hat');
+    expect(p('call mom on the 3rd 9am').kind).toBe('monthly');
+  });
+});

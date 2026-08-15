@@ -71,7 +71,38 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     args = args.replace(fromM[0], ' ');
   }
 
-  const otherM = args.match(/\bevery\s+other\s+(day|week)\b/i);
+  // "starting [from] 29 aug" / "from aug 29" / "from 29/8": a calendar anchor
+  // for the first occurrence, so a fortnightly chore can begin on a stated
+  // date rather than the next matching slot.
+  let fromDate = null;
+  const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const MON_WORD = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+  const startPrefix = '(?:start(?:ing)?\\s+(?:from\\s+|on\\s+)?|from\\s+|on\\s+)';
+  const dateM =
+    args.match(new RegExp(`\\b${startPrefix}(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MON_WORD})[a-z]*\\b`, 'i'))
+    || args.match(new RegExp(`\\b${startPrefix}(${MON_WORD})[a-z]*\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'))
+    || args.match(new RegExp(`\\b${startPrefix}(\\d{1,2})/(\\d{1,2})\\b`, 'i'));
+  if (dateM) {
+    const a = dateM[1].toLowerCase();
+    const b = dateM[2].toLowerCase();
+    // Either order: "29 aug" or "aug 29"; and numeric "29/8" is day/month.
+    const dom = MONTHS[a.slice(0, 3)] !== undefined ? +b : +a;
+    const mon = MONTHS[a.slice(0, 3)] !== undefined ? MONTHS[a.slice(0, 3)]
+      : MONTHS[b.slice(0, 3)] !== undefined ? MONTHS[b.slice(0, 3)]
+      : +b - 1;
+    if (dom >= 1 && dom <= 31 && mon >= 0 && mon <= 11) {
+      fromDate = { dom, mon };
+      args = args.replace(dateM[0], ' ');
+    }
+  }
+
+  // "every other saturday" is a fortnightly chore anchored to that weekday —
+  // the bare "every other day|week" forms have no anchor to hang it on.
+  const otherDayM = args.match(new RegExp(`\\bevery\\s+other\\s+(${DAY_WORD})\\b`, 'i'));
+  if (otherDayM && fromDay == null) {
+    fromDay = DAY_INDEX[otherDayM[1].slice(0, 3).toLowerCase()];
+  }
+  const otherM = otherDayM || args.match(/\bevery\s+other\s+(day|week)\b/i);
   const monthsM = args.match(/\bevery\s+(\d+)\s+months?\b/i);
   const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
   const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
@@ -85,6 +116,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
 
   if (otherM) {
     kind = 'interval';
+    // Any weekday form means fortnightly; only "every other day" is 2 days.
     detail.days = otherM[1].toLowerCase() === 'day' ? 2 : 14;
     args = args.replace(otherM[0], ' ');
   } else if (monthsM) {
@@ -208,7 +240,16 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   if (rotate) detail.rotate = true;
 
   let firstFireAt;
-  if (fromDay != null) {
+  if (fromDate) {
+    // A stated calendar date wins over a weekday anchor: "every other saturday
+    // starting 29 aug" begins on the 29th and repeats fortnightly from there.
+    const p = localParts(nowMs, tz);
+    firstFireAt = zonedEpoch(p.y, fromDate.mon + 1, fromDate.dom, h, mi, tz);
+    // A date already gone this year means they mean next year's.
+    if (firstFireAt <= nowMs) {
+      firstFireAt = zonedEpoch(p.y + 1, fromDate.mon + 1, fromDate.dom, h, mi, tz);
+    }
+  } else if (fromDay != null) {
     // Anchored start: first occurrence on the coming <weekday> at h:mi; the
     // recurring cadence (if any) continues from there.
     firstFireAt = nextOccurrence('weekly', { days: [fromDay], h, mi }, nowMs, tz);
