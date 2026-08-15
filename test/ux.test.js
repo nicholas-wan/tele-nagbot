@@ -344,3 +344,31 @@ describe('phone-sized board', () => {
     expect(lines.find((l) => l.includes('starhub booth'))).not.toContain('·  ');
   });
 });
+
+describe('chore confirmation buttons', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('offers both Undo and OK on the creation confirmation', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      message: {
+        message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' },
+        text: '/chore water plants 7pm daily', entities: [],
+      },
+    });
+    const confirmation = calls.find((c) => c.url.endsWith('/sendMessage')
+      && c.body.reply_markup && JSON.stringify(c.body.reply_markup).includes('u:'));
+    expect(confirmation.body.reply_markup.inline_keyboard[0].map((b) => b.text))
+      .toEqual(['↩️ Undo', '✅ OK']);
+  });
+});

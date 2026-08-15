@@ -93,8 +93,12 @@ function snoozeButtons(firingId, tz) {
   };
 }
 
+// Undo removes the chore that was just made; OK just clears the confirmation.
 function undoButtons(reminderId) {
-  return { inline_keyboard: [[{ text: '↩️ Undo', callback_data: `u:${reminderId}` }]] };
+  return { inline_keyboard: [[
+    { text: '↩️ Undo', callback_data: `u:${reminderId}` },
+    { text: '✅ OK', callback_data: 'ok' },
+  ]] };
 }
 
 function dashboardButtons() {
