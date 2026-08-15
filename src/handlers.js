@@ -1,7 +1,8 @@
 // Webhook update handling: commands and inline-button callbacks.
 
 import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage,
-         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef, recordSentMessage } from './tg.js';
+         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef,
+         recordSentMessage, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart, deferQuietHours } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -232,12 +233,15 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
     await editNag(env, firing,
       `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. ${purr}`,
       emptyKeyboard());
+    // The nag earned a day; its receipt only needs to be glanced at.
+    await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
   }
   // A privately-nagged chore leaves a quiet public receipt: the household still
   // gets to see the chore was done, just not that it was pending.
   if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id) {
     await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, null, { silent: true });
+      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, null,
+      { silent: true, ttl: RECEIPT_TTL_MS });
   }
   if (reminder.schedule_kind === 'once') {
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();

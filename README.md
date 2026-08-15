@@ -20,13 +20,13 @@ Nags carry Done / Done together / Snooze buttons; replying `done`, `done togethe
 
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
 - 😴 Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow**, which is a postponement rather than a snooze: it carries `fired_at` forward so the expiry window moves with the nag and the chore gets a fresh 24h when it returns. Both count against the 3-snooze cap.
-- Every message the bot sends is recorded in `sent_messages` and deleted by a cron sweep a day later — the pinned dashboard (`keep: true` on its send) is the sole exception. ✅ OK just gets there sooner. Stickers are recorded too; a message already dismissed simply makes Telegram refuse the delete and the row is dropped anyway.
+- Every message the bot sends is recorded in `sent_messages` and deleted by a cron sweep — a day for most, ~2h for done-receipts and celebration stickers (`RECEIPT_TTL_MS`) — the pinned dashboard (`keep: true` on its send) is the sole exception. ✅ OK just gets there sooner. Stickers are recorded too; a message already dismissed simply makes Telegram refuse the delete and the row is dropped anyway.
 - Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
 - Pinned dashboard lists every chore (urgency-ordered, countdown first) with a ⚙️ Manage chores button; refreshed on every change and once each morning.
 - Manage, edit, and delete all happen **in place on the pinned message** — only its `reply_markup` changes, never its text. Because the text stays put, every management button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`, `🗑 Delete · clear poop`); internal numbers never appear in labels.
 - Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins the board, as does `POST /admin?board`.
 - Chores assigned to a member nag **only that member, in the group** — the nag is an ephemeral message, so it sits in the group chat but nobody else can see it. No DM and no Start required. Unassigned chores stay public: they're everyone's problem. The group still gets a silent done-receipt and the tombstone, so completions and misses stay visible.
-- Daily digest 8am, weekly wrap Sunday 8pm, both silent. Streaks 🔥 for repeat weekly winners.
+- The 8am digest speaks only when something was left nagging overnight — the refreshed pinned board already carries the day's agenda. Weekly wrap Sunday 8pm. Both silent. Streaks 🔥 for repeat weekly winners.
 - Chore icons come from a keyword table in `handlers.js`; lead the chore text with your own emoji to override.
 - Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Tools: `/tags`, `/tagsticker`, `/autotag`, `/delsticker`.
 

@@ -4,7 +4,7 @@
 import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
 import { getTz, isScored, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
-import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
+import { localParts, weekStart, deferQuietHours } from './time.js';
 
 export async function runCron(env) {
   const now = Date.now();
@@ -168,22 +168,17 @@ async function sendDigests(env, now) {
       // when no chore event has touched it.
       await updateDashboard(env, chat_id);
 
-      const endOfDay = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
-      const due = await env.DB.prepare(
-        'SELECT * FROM reminders WHERE chat_id = ? AND paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ? ORDER BY next_fire_at'
-      ).bind(chat_id, endOfDay).all();
+      // The pinned board is refreshed this same minute and already carries
+      // today's agenda, so a routine bulletin would only repeat it. The digest
+      // speaks only when something was left hanging overnight.
       const nagging = await env.DB.prepare(
         "SELECT r.text, r.assignee_name, r.assignee_user_id FROM firings f JOIN reminders r ON r.id = f.reminder_id WHERE f.chat_id = ? AND f.state = 'nagging'"
       ).bind(chat_id).all();
-      if (!due.results.length && !nagging.results.length) continue;
+      if (!nagging.results.length) continue;
 
       const who = (r) => r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
-      const lines = ['☀️ Mrow. Today\'s agenda from Latte &amp; Mocha:'];
-      for (const r of due.results) lines.push(`• ${fmtClock(r.next_fire_at, tz)} — <b>${esc(r.text)}</b>${who(r)}`);
-      if (nagging.results.length) {
-        lines.push('Still hanging over you:');
-        for (const r of nagging.results) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
-      }
+      const lines = ['☀️ Mrow. Still hanging over you from yesterday:'];
+      for (const r of nagging.results) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
       await sendLong(env, chat_id, lines.join('\n'), { silent: true });
     } catch (e) {
       console.log(`digest for chat ${chat_id} failed: ${e.stack || e}`);

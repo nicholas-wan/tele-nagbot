@@ -1,7 +1,7 @@
 // Latte & Mocha sticker set: created once via /makestickers, then a random
 // sticker accompanies nags. file_ids are cached per isolate.
 
-import { tg, recordSentMessage } from './tg.js';
+import { tg, recordSentMessage, RECEIPT_TTL_MS } from './tg.js';
 import { STICKERS } from './stickers-data.js';
 
 let cachedUsername = null;
@@ -99,8 +99,9 @@ export async function sendCelebrationSticker(env, chatId, seed) {
     const fav = stickers.filter((s) => CELEBRATION_UIDS.has(s.uid));
     const pool = fav.length ? fav : stickers;
     const pick = pool[Math.abs(seed) % pool.length];
-    // Celebration stickers are pure décor; the daily sweep clears them too.
-    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id }));
+    // Celebration stickers are pure décor — a couple of hours is plenty.
+    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id }),
+      { ttlMs: RECEIPT_TTL_MS });
     const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
       .bind(pick.uid).first();
     return { cat: (tag && tag.cat) || 'both' };
