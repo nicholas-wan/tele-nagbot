@@ -1,7 +1,7 @@
 // Latte & Mocha sticker set: created once via /makestickers, then a random
 // sticker accompanies nags. file_ids are cached per isolate.
 
-import { tg } from './tg.js';
+import { tg, recordSentMessage } from './tg.js';
 import { STICKERS } from './stickers-data.js';
 
 let cachedUsername = null;
@@ -99,7 +99,8 @@ export async function sendCelebrationSticker(env, chatId, seed) {
     const fav = stickers.filter((s) => CELEBRATION_UIDS.has(s.uid));
     const pool = fav.length ? fav : stickers;
     const pick = pool[Math.abs(seed) % pool.length];
-    await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
+    // Celebration stickers are pure décor; the daily sweep clears them too.
+    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id }));
     const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
       .bind(pick.uid).first();
     return { cat: (tag && tag.cat) || 'both' };
@@ -244,6 +245,9 @@ export async function sendRandomSticker(env, chatId, seed) {
     if (!stickers) return { cat: 'both', messageId: null };
     const pick = stickers[Math.abs(seed) % stickers.length];
     const sent = await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
+    // The nag lifecycle usually deletes this itself; the sweep is the backstop
+    // for any path that loses track of it. Deleting twice is harmless.
+    await recordSentMessage(env, chatId, sent);
     const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
       .bind(pick.uid).first();
     return { cat: (tag && tag.cat) || 'both', messageId: sent.ok ? sent.result.message_id : null };

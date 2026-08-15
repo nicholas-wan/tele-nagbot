@@ -56,12 +56,38 @@ export async function sendLong(env, chatId, html, opts = {}) {
 const OK_ROW = { inline_keyboard: [[{ text: '✅ OK', callback_data: 'ok' }]] };
 const withOk = (replyMarkup, opts) => replyMarkup || (opts.noOk ? null : OK_ROW);
 
-export function sendMessage(env, chatId, html, replyMarkup, opts = {}) {
+// Everything the bot sends is tidied away after a day; only the pinned
+// dashboard is kept (opts.keep). Telegram cannot list a bot's own messages,
+// so each one is recorded at send time and a cron sweep deletes what is due.
+// OK just gets there sooner; the sweep is the backstop nobody has to tap.
+const SENT_TTL_MS = 86400000;
+export async function recordSentMessage(env, chatId, res, { receiverUserId = null } = {}) {
+  if (!env.DB || !res || !res.ok || !res.result) return res;
+  const r = res.result;
+  const ephemeral = Boolean(r.ephemeral_message_id);
+  const id = ephemeral ? r.ephemeral_message_id : r.message_id;
+  if (!id) return res;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO sent_messages (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(chatId, ephemeral ? receiverUserId : null, id, ephemeral ? 1 : 0,
+      Date.now() + SENT_TTL_MS, Date.now()).run();
+  } catch (e) {
+    // A message that outlives its day is a nuisance, not a failure.
+    console.log(`recordSentMessage failed: ${e}`);
+  }
+  return res;
+}
+
+export async function sendMessage(env, chatId, html, replyMarkup, opts = {}) {
   const body = { chat_id: chatId, text: html, parse_mode: 'HTML' };
   const markup = withOk(replyMarkup, opts);
   if (markup) body.reply_markup = markup;
   if (opts.silent) body.disable_notification = true;
-  return tg(env, 'sendMessage', body);
+  const res = await tg(env, 'sendMessage', body);
+  if (!opts.keep) await recordSentMessage(env, chatId, res);
+  return res;
 }
 
 export function deleteMessage(env, chatId, messageId) {
@@ -146,7 +172,7 @@ export async function sendPrivate(env, ctx, html, replyMarkup, opts = {}) {
   if (cbId) body.callback_query_id = cbId;
   if (ctx.replyEphemeralId) body.reply_parameters = { ephemeral_message_id: ctx.replyEphemeralId };
   const res = await tg(env, 'sendMessage', body);
-  if (res.ok) return res;
+  if (res.ok) return recordSentMessage(env, ctx.chatId, res, { receiverUserId: ctx.userId });
   console.log(`ephemeral send failed, falling back to public: ${res.description || ''}`);
   return sendMessage(env, ctx.chatId, html, replyMarkup, opts);
 }

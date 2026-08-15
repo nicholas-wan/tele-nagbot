@@ -90,6 +90,21 @@ CREATE TABLE IF NOT EXISTS trash (
   created_at INTEGER NOT NULL
 );
 
+-- Everything the bot sends is tidied away after a day (the pinned dashboard is
+-- the one exception). Telegram cannot list a bot's own messages, so each one
+-- is recorded at send time; the cron sweep deletes what is due and drops the
+-- row whether Telegram still had the message or not.
+CREATE TABLE IF NOT EXISTS sent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER NOT NULL,
+  receiver_user_id INTEGER,             -- ephemeral deletes need the receiver too
+  message_id INTEGER NOT NULL,          -- ephemeral_message_id when is_ephemeral
+  is_ephemeral INTEGER NOT NULL DEFAULT 0,
+  delete_after INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sent_messages_due ON sent_messages (delete_after);
+
 -- Which cat appears in a given sticker (keyed by Telegram's stable file id).
 CREATE TABLE IF NOT EXISTS sticker_tags (
   file_uid TEXT PRIMARY KEY,

@@ -1,7 +1,7 @@
 // Runs every minute: fire due reminders, re-send unacknowledged nags,
 // expire firings older than 24h.
 
-import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml } from './tg.js';
+import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
 import { getTz, isScored, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './handlers.js';
 import { fireReminder } from './firing.js';
 import { localParts, zonedEpoch, fmtClock, weekStart, deferQuietHours } from './time.js';
@@ -17,6 +17,8 @@ export async function runCron(env) {
     renag: () => renagPending(env, now),
     // Abandoned time-choice prompts and /delete undo stashes expire after a day.
     drafts: () => pruneDraftsAndTrash(env, now),
+    // Everything the bot said a day ago is tidied away; the pin stays.
+    sweep: () => sweepSentMessages(env, now),
     retention: () => pruneOldFirings(env, now),
   };
   for (const [name, step] of Object.entries(steps)) {
@@ -24,6 +26,28 @@ export async function runCron(env) {
       await step();
     } catch (e) {
       console.log(`cron step ${name} failed: ${e.stack || e}`);
+    }
+  }
+}
+
+// Deletes every recorded bot message whose day is up, each through the method
+// its kind requires. A message someone already dismissed with OK just makes
+// Telegram refuse the delete — same outcome, so the row goes either way.
+async function sweepSentMessages(env, now) {
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM sent_messages WHERE delete_after <= ? ORDER BY delete_after LIMIT 100'
+  ).bind(now).all();
+  for (const row of results) {
+    try {
+      if (row.is_ephemeral) {
+        // deleteEphemeral only reads chatId/userId off the ctx.
+        await deleteEphemeral(env, { chatId: row.chat_id, userId: row.receiver_user_id }, row.message_id);
+      } else {
+        await deleteMessage(env, row.chat_id, row.message_id);
+      }
+      await env.DB.prepare('DELETE FROM sent_messages WHERE id = ?').bind(row.id).run();
+    } catch (e) {
+      console.log(`sweep of sent message ${row.id} failed: ${e.stack || e}`);
     }
   }
 }

@@ -254,3 +254,59 @@ describe('chat UX', () => {
     expect(labels).toContain('👤 Assignee');
   });
 });
+
+describe('daily sweep of bot messages', () => {
+  const calls = [];
+  let inserted;
+
+  beforeEach(() => {
+    calls.length = 0;
+    inserted = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function db() {
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('dashboard_msg_id')) return null;
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() {
+                if (sql.includes('INSERT INTO sent_messages')) inserted.push(args);
+                return { meta: { changes: 1, last_row_id: 1 } };
+              },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  it('records ordinary sends for the sweep', async () => {
+    const { sendMessage } = await import('../src/tg.js');
+    await sendMessage({ BOT_TOKEN: 't', DB: db() }, 1, 'hello');
+    expect(inserted.length).toBe(1);
+    const [, , messageId, ephemeral, deleteAfter] = inserted[0];
+    expect(messageId).toBe(99);
+    expect(ephemeral).toBe(0);
+    expect(deleteAfter).toBeGreaterThan(Date.now());
+    expect(deleteAfter).toBeLessThanOrEqual(Date.now() + 86400000);
+  });
+
+  it('spares the pinned dashboard via keep', async () => {
+    const { sendMessage } = await import('../src/tg.js');
+    await sendMessage({ BOT_TOKEN: 't', DB: db() }, 1, 'board', null, { keep: true });
+    expect(inserted.length).toBe(0);
+  });
+});

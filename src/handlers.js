@@ -1,7 +1,7 @@
 // Webhook update handling: commands and inline-button callbacks.
 
 import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage,
-         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef } from './tg.js';
+         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef, recordSentMessage } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart, deferQuietHours } from './time.js';
 import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
@@ -292,7 +292,8 @@ export async function updateDashboard(env, chatId) {
       if (res.ok || String(res.description || '').includes('not modified')) return;
       // Message was deleted by hand — fall through and recreate it.
     }
-    const sent = await sendMessage(env, chatId, html, dashboardButtons(), { silent: true });
+    // keep: the pinned dashboard is the one message the daily sweep spares.
+    const sent = await sendMessage(env, chatId, html, dashboardButtons(), { silent: true, keep: true });
     if (sent.ok) {
       // A board that exists but isn't pinned is worse than a missing one: it
       // scrolls away and nobody notices it stopped being the board. Say so
@@ -1232,7 +1233,7 @@ async function cmdTags(env, ctx, args) {
     if (!e) throw new ParseError(`The pack has ${res.entries.length} stickers — pick 1 to ${res.entries.length}.`);
     // A sticker cannot be sent ephemerally with a caption attached, so the
     // preview itself is public; the label that follows is not.
-    await tg(env, 'sendSticker', { chat_id: chatId, sticker: e.fileId });
+    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: e.fileId }));
     return sendPrivate(env, ctx,
       `☝️ Sticker ${n}: ${e.cat ? CAT_LABEL[e.cat] : 'untagged'} — change with /tagsticker ${n} latte|mocha|both`);
   }
