@@ -9,6 +9,7 @@ import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, l
 import { tg } from './tg.js';
 import { fireReminder } from './firing.js';
 import { suggestSchedule } from './ai.js';
+import { cmdInvite } from './invite.js';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MAX_SNOOZES = 3;
@@ -446,6 +447,7 @@ export async function handleUpdate(env, update) {
     else if (cmd === 'done') result = await cmdDone(env, ctx, args, by, tz);
     else if (cmd === 'poke' || cmd === 'nagall') result = await cmdPoke(env, ctx);
     else if (cmd === 'stats') result = await cmdStats(env, ctx, tz, args);
+    else if (cmd === 'invite') result = await cmdInvite(env, ctx, args, tz);
     else if (cmd === 'makestickers') result = await cmdMakeStickers(env, ctx, msg);
     else if (cmd === 'delsticker') result = await cmdDelSticker(env, ctx, args);
     else if (cmd === 'usepack') result = await cmdUsePack(env, ctx, args);
@@ -487,7 +489,8 @@ function helpText(section = 'home') {
     '/edit · /delete · /pause · /resume · /skip — use a chore name or number\n' +
     '/poke — re-send everything outstanding\n' +
     '/pause all 14 · /resume all — vacation mode\n' +
-    '/stats · /stats all — weekly board and history\n\n' +
+    '/stats · /stats all — weekly board and history\n' +
+    '/invite dentist tomorrow 3pm at Mount E — get a calendar file to add\n\n' +
     'Reply <code>done</code>, <code>done together</code>, or <code>snooze 2h</code> directly to a nag.';
   if (section === 'stickers') return '🐾 <b>Sticker tools</b>\n\n' +
     '/usepack &lt;link&gt; · /makestickers · /tags\n' +

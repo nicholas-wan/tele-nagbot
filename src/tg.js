@@ -209,6 +209,41 @@ export function editEphemeral(env, ctx, ephemeralId, html, replyMarkup) {
   return tg(env, 'editEphemeralMessageText', body);
 }
 
+// Send a file. Follows sendPrivate's contract: ephemeral to the requester when
+// the ctx allows it, falling back to a public send if Telegram refuses.
+export async function sendDocument(env, ctx, filename, content, caption, opts = {}) {
+  const upload = async (ephemeral) => {
+    const form = new FormData();
+    form.append('chat_id', String(ctx.chatId));
+    if (ephemeral) form.append('receiver_user_id', String(ctx.userId));
+    form.append('document', new Blob([content], { type: 'text/calendar' }), filename);
+    if (caption) {
+      form.append('caption', caption);
+      form.append('parse_mode', 'HTML');
+    }
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/sendDocument`, {
+        method: 'POST',
+        body: form,
+      });
+      return await res.json();
+    } catch (e) {
+      console.log(`telegram sendDocument failed: ${e}`);
+      return { ok: false, description: String(e) };
+    }
+  };
+  let res = await upload(ctx.ephemeral);
+  if (!res.ok && ctx.ephemeral) {
+    console.log(`ephemeral document failed, falling back to public: ${res.description || ''}`);
+    res = await upload(false);
+  }
+  if (res.ok) {
+    await recordSentMessage(env, ctx.chatId, res,
+      { receiverUserId: ctx.userId, ttlMs: opts.ttl || SENT_TTL_MS });
+  }
+  return res;
+}
+
 export function deleteEphemeral(env, ctx, ephemeralId) {
   return tg(env, 'deleteEphemeralMessage', {
     chat_id: ctx.chatId,

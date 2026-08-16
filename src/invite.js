@@ -1,0 +1,109 @@
+// /invite: reply with a tap-to-add calendar file for a meeting.
+// No email, no external service — Telegram itself delivers the .ics; opening
+// it on a phone offers "Add to Calendar" (Outlook, Google Calendar, or the
+// system calendar, whichever the user picks).
+
+import { esc, sendPrivate, sendDocument } from './tg.js';
+import { parseRemind, NoTimeError } from './parse.js';
+import { fmtLocal } from './time.js';
+
+const DEFAULT_DURATION_MS = 3600000;
+
+// "for 30m" / "for 2h" anywhere in the text sets the meeting length. Pulled
+// out before schedule parsing, which would otherwise read it as title text.
+export function extractDuration(args) {
+  const m = args.match(/\bfor\s+(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours)\b/i);
+  if (!m) return { args, durationMs: DEFAULT_DURATION_MS };
+  const n = +m[1];
+  const ms = /^h/i.test(m[2]) ? n * 3600000 : n * 60000;
+  return { args: args.replace(m[0], ' '), durationMs: ms };
+}
+
+// Splits "meet alice at work" after schedule words are gone. Greedy prefix →
+// the LAST " at " is the divider.
+export function splitLocation(title) {
+  const m = title.match(/^(.*\S)\s+at\s+(.+)$/i);
+  if (!m) return { summary: title, location: null };
+  return { summary: m[1], location: m[2] };
+}
+
+// Everything the command needs, or a NoTimeError/ParseError for the caller.
+//
+// Location and time fight over the word "at", and a place name can even look
+// like a date — "Lau Pa Sat" ends in a weekday. So: peel the trailing " at X"
+// off FIRST and try to parse the rest. If the rest still has a valid time, X
+// was a place and the parser never gets to misread it. If the rest has no
+// time, X was the time clause after all — reparse the full text and pull the
+// location out of whatever title the parser leaves behind.
+export function parseInvite(args, now, tz) {
+  const { args: rest, durationMs } = extractDuration(String(args).trim());
+  const trailing = rest.match(/^(.*\S)\s+at\s+(\S.*)$/i);
+  if (trailing) {
+    try {
+      const p = parseRemind(trailing[1], `/invite ${trailing[1]}`, [], now, tz);
+      return { summary: p.text, location: trailing[2], startMs: p.firstFireAt, durationMs };
+    } catch (err) {
+      if (!(err instanceof NoTimeError)) throw err;
+    }
+  }
+  const p = parseRemind(rest, `/invite ${rest}`, [], now, tz);
+  const { summary, location } = splitLocation(p.text);
+  return { summary, location, startMs: p.firstFireAt, durationMs };
+}
+
+const pad = (n) => String(n).padStart(2, '0');
+function icsUtc(ms) {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`;
+}
+
+// RFC 5545: CRLF line endings, escaped text values.
+const icsEscape = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,');
+
+// METHOD:PUBLISH, no attendees: this is a "save this event" file, not a
+// request awaiting a response — phones offer Add to Calendar directly.
+export function buildIcs({ summary, location, startMs, durationMs, now = Date.now() }) {
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//nag-bot//invite//EN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:invite-${startMs}-${durationMs}@nag-bot`,
+    `DTSTAMP:${icsUtc(now)}`,
+    `DTSTART:${icsUtc(startMs)}`,
+    `DTEND:${icsUtc(startMs + durationMs)}`,
+    `SUMMARY:${icsEscape(summary)}`,
+  ];
+  if (location) lines.push(`LOCATION:${icsEscape(location)}`);
+  lines.push('STATUS:CONFIRMED', 'END:VEVENT', 'END:VCALENDAR');
+  return lines.join('\r\n');
+}
+
+const fileSlug = (s) => (String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  || 'invite').slice(0, 40);
+
+export async function cmdInvite(env, ctx, args, tz) {
+  if (!String(args).trim()) {
+    return sendPrivate(env, ctx,
+      '📅 Usage: /invite dentist tomorrow 3pm at Mount E for 30m\n' +
+      'Time and date are required; <code>at &lt;place&gt;</code> and <code>for 30m</code>/<code>for 2h</code> are optional (default 1h).');
+  }
+  let inv;
+  try {
+    inv = parseInvite(args, Date.now(), tz);
+  } catch (err) {
+    if (err instanceof NoTimeError) {
+      return sendPrivate(env, ctx,
+        '⏰ When is it? Give a time — e.g. /invite dentist tomorrow 3pm, /invite standup mon 9am.');
+    }
+    throw err; // ParseError → the dispatcher's private error reply
+  }
+  const ics = buildIcs(inv);
+  const caption = `📅 <b>${esc(inv.summary)}</b>\n` +
+    `${fmtLocal(inv.startMs, tz)} · ${Math.round(inv.durationMs / 60000)} min` +
+    (inv.location ? ` · ${esc(inv.location)}` : '') +
+    '\nTap the file → Add to Calendar.';
+  return sendDocument(env, ctx, `${fileSlug(inv.summary)}.ics`, ics, caption);
+}

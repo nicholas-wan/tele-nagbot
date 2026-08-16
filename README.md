@@ -10,6 +10,7 @@ Telegram chore bot that nags until someone marks a chore done. Cloudflare Worker
 /chore @jane dishes now       assignee · rotate = fair-share it
 /list · /edit · /done · /pause · /resume · /skip · /delete    (by chore name)
 /poke · /stats · /stats all · /pause all 14 · /resume all
+/invite dentist tomorrow 3pm at Mount E for 30m    calendar file, tap to add
 ```
 
 Schedules: `7pm daily`, `every mon,thu 8am`, `every 8 days`, `every 2 weeks`, `every 3 months`, `on the 1st`, `weekdays`, `every other day`, `every morning`, `tomorrow 9:30am`, `from friday`, `in 20m`, `now`, `noon`, `nag:10m`. Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped).
