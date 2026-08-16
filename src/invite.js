@@ -101,9 +101,18 @@ export async function cmdInvite(env, ctx, args, tz) {
     throw err; // ParseError → the dispatcher's private error reply
   }
   const ics = buildIcs(inv);
+  // The caption doubles as the confirmation: it reads back exactly what was
+  // parsed, so a misread time or a swallowed location shows up right here.
   const caption = `📅 <b>${esc(inv.summary)}</b>\n` +
     `${fmtLocal(inv.startMs, tz)} · ${Math.round(inv.durationMs / 60000)} min` +
     (inv.location ? ` · ${esc(inv.location)}` : '') +
     '\nTap the file → Add to Calendar.';
-  return sendDocument(env, ctx, `${fileSlug(inv.summary)}.ics`, ics, caption);
+  const sent = await sendDocument(env, ctx, `${fileSlug(inv.summary)}.ics`, ics, caption);
+  // The command message is already gone by now — a failed upload must say so,
+  // or the whole exchange vanishes without a trace.
+  if (!sent.ok) {
+    return sendPrivate(env, ctx,
+      '🙀 The calendar file didn\'t go through — try /invite again in a moment.');
+  }
+  return sent;
 }

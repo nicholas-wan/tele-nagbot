@@ -118,4 +118,20 @@ describe('cmdInvite', () => {
     expect(calls.some((c) => c.url.endsWith('/sendDocument'))).toBe(false);
     expect(calls.some((c) => c.url.endsWith('/sendMessage'))).toBe(true);
   });
+
+  it('says so when the upload fails, instead of vanishing silently', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body });
+      const failing = String(url).endsWith('/sendDocument');
+      return new Response(JSON.stringify(failing
+        ? { ok: false, description: 'boom' }
+        : { ok: true, result: { message_id: 9 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+    await cmdInvite(env(), { ...ctx }, 'dentist tomorrow 3pm', TZ);
+    const note = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(note).toBeTruthy();
+    expect(JSON.parse(note.body).text).toContain('didn');
+  });
 });
