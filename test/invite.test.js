@@ -135,3 +135,36 @@ describe('cmdInvite', () => {
     expect(JSON.parse(note.body).text).toContain('didn');
   });
 });
+
+describe('real-world parsing (the ahma-bday-lunch report)', () => {
+  it('reads a bare date, keeps it out of the title, and lands the right day', () => {
+    const inv = parseInvite(
+      '13 sep Ahma Bday Lunch at Fu Yuan Restaurant 80 Middle Rd, Level 2 Frasers House, Singapore 188966 12pm',
+      NOW, TZ);
+    expect(inv.summary).toBe('Ahma Bday Lunch');
+    expect(inv.location).toContain('Fu Yuan Restaurant');
+    expect(inv.location).toContain('188966');
+    expect(sgt(inv.startMs)).toBe('2026-09-13T12:00');
+  });
+
+  it('reads "at N" bare hours with the spoken-hour heuristic', () => {
+    expect(sgt(parseInvite('project sync at 3', NOW, TZ).startMs)).toContain('T15:00');
+    const inv = parseInvite('mtg tomorrow at 9 at office', NOW, TZ);
+    expect(sgt(inv.startMs)).toBe('2026-08-15T09:00');
+    expect(inv.location).toBe('office');
+  });
+
+  it('reads parts of the day as times', () => {
+    expect(sgt(parseInvite('gym session tomorrow morning', NOW, TZ).startMs)).toBe('2026-08-15T09:00');
+    expect(sgt(parseInvite('dinner tonight at home', NOW, TZ).startMs)).toBe('2026-08-14T21:00');
+  });
+
+  it('keeps a mention in the title instead of stripping it as an assignee', () => {
+    expect(parseInvite('call with @nicholaswan tomorrow 4pm', NOW, TZ).summary)
+      .toBe('call with @nicholaswan');
+  });
+
+  it('leaves plain numbers alone', () => {
+    expect(parseInvite('buy 3 apples 5pm', NOW, TZ).summary).toBe('buy 3 apples');
+  });
+});

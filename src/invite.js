@@ -35,19 +35,23 @@ export function splitLocation(title) {
 // was a place and the parser never gets to misread it. If the rest has no
 // time, X was the time clause after all — reparse the full text and pull the
 // location out of whatever title the parser leaves behind.
+// Invites have no assignee concept — a chore parser strips "@name" as one, so
+// hand the mention back to the title ("call with @boss" stays whole).
+const withMention = (p) => (p.assigneeName ? `${p.text} ${p.assigneeName}` : p.text);
+
 export function parseInvite(args, now, tz) {
   const { args: rest, durationMs } = extractDuration(String(args).trim());
   const trailing = rest.match(/^(.*\S)\s+at\s+(\S.*)$/i);
   if (trailing) {
     try {
       const p = parseRemind(trailing[1], `/invite ${trailing[1]}`, [], now, tz);
-      return { summary: p.text, location: trailing[2], startMs: p.firstFireAt, durationMs };
+      return { summary: withMention(p), location: trailing[2], startMs: p.firstFireAt, durationMs };
     } catch (err) {
       if (!(err instanceof NoTimeError)) throw err;
     }
   }
   const p = parseRemind(rest, `/invite ${rest}`, [], now, tz);
-  const { summary, location } = splitLocation(p.text);
+  const { summary, location } = splitLocation(withMention(p));
   return { summary, location, startMs: p.firstFireAt, durationMs };
 }
 
@@ -87,8 +91,9 @@ const fileSlug = (s) => (String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').rep
 export async function cmdInvite(env, ctx, args, tz) {
   if (!String(args).trim()) {
     return sendPrivate(env, ctx,
-      '📅 Usage: /invite dentist tomorrow 3pm at Mount E for 30m\n' +
-      'Time and date are required; <code>at &lt;place&gt;</code> and <code>for 30m</code>/<code>for 2h</code> are optional (default 1h).');
+      '📅 Usage: /invite bday lunch 13 sep 12pm at Fu Yuan Restaurant, 80 Middle Rd\n' +
+      'Needs a time; dates like <code>13 sep</code>, <code>tomorrow</code>, <code>mon</code> work. ' +
+      'Put the place after <code>at</code>, and <code>for 30m</code>/<code>for 2h</code> sets the length (default 1h).');
   }
   let inv;
   try {

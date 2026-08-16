@@ -78,9 +78,13 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
   const MON_WORD = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
   const startPrefix = '(?:start(?:ing)?\\s+(?:from\\s+|on\\s+)?|from\\s+|on\\s+)';
+  // The word-month forms don't need the prefix — a bare "13 sep" in a chore or
+  // invite is almost certainly a date, and leaving it as title text once put
+  // an event on the wrong day entirely. The numeric form keeps the prefix, so
+  // prose like "split 3/4 of the boxes" stays prose.
   const dateM =
-    args.match(new RegExp(`\\b${startPrefix}(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MON_WORD})[a-z]*\\b`, 'i'))
-    || args.match(new RegExp(`\\b${startPrefix}(${MON_WORD})[a-z]*\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'))
+    args.match(new RegExp(`\\b${startPrefix}?(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MON_WORD})[a-z]*\\b`, 'i'))
+    || args.match(new RegExp(`\\b${startPrefix}?(${MON_WORD})[a-z]*\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'))
     || args.match(new RegExp(`\\b${startPrefix}(\\d{1,2})/(\\d{1,2})\\b`, 'i'));
   if (dateM) {
     const a = dateM[1].toLowerCase();
@@ -215,6 +219,25 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     if (wordT) {
       h = /midnight/i.test(wordT[1]) ? 0 : 12;
       args = args.replace(wordT[0], ' ');
+    }
+  }
+  // "tomorrow morning", "sat afternoon": a part of day is a usable time.
+  if (h === null) {
+    const dayPart = args.match(/\b(morning|afternoon|evening|tonight|night)\b/i);
+    if (dayPart) {
+      h = { morning: 9, afternoon: 15, evening: 19, tonight: 21, night: 21 }[dayPart[1].toLowerCase()];
+      args = args.replace(dayPart[0], ' ');
+    }
+  }
+  // Bare "at 3": no am/pm, so lean on how people speak — 1–7 means afternoon
+  // or evening, 8–11 means morning. Only the "at N" form; a bare number
+  // without "at" stays ordinary text ("buy 3 apples").
+  if (h === null) {
+    const bare = args.match(/\bat\s+(\d{1,2})\b(?!\s*(?:am|pm|[:./]|\d))/i);
+    if (bare && +bare[1] >= 1 && +bare[1] <= 23) {
+      const n = +bare[1];
+      h = n <= 7 ? n + 12 : n;
+      args = args.replace(bare[0], ' ');
     }
   }
   if (h === null && defaultH != null) h = defaultH;
