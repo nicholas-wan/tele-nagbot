@@ -3,9 +3,10 @@
 // it on a phone offers "Add to Calendar" (Outlook, Google Calendar, or the
 // system calendar, whichever the user picks).
 
+import * as chrono from 'chrono-node';
 import { esc, sendPrivate, sendDocument } from './tg.js';
-import { parseRemind, NoTimeError } from './parse.js';
-import { fmtLocal } from './time.js';
+import { NoTimeError } from './parse.js';
+import { fmtLocal, zonedEpoch, localParts } from './time.js';
 
 const DEFAULT_DURATION_MS = 3600000;
 
@@ -89,9 +90,6 @@ export function detectLocation(title) {
 // was a place and the parser never gets to misread it. If the rest has no
 // time, X was the time clause after all — reparse the full text and pull the
 // location out of whatever title the parser leaves behind.
-// Invites have no assignee concept — a chore parser strips "@name" as one, so
-// hand the mention back to the title ("call with @boss" stays whole).
-const withMention = (p) => (p.assigneeName ? `${p.text} ${p.assigneeName}` : p.text);
 
 // An explicit "at" wins; otherwise an address in the text is found on its own.
 const placeOf = (title) => {
@@ -99,35 +97,72 @@ const placeOf = (title) => {
   return viaAt.location ? viaAt : detectLocation(title);
 };
 
+// Rebuilds an epoch from chrono's calendar components using the chat's
+// timezone. chrono resolves against the system clock, which is UTC in a
+// Worker, so trusting its Date directly would put a 3pm meeting at 11pm.
+function epochFrom(comp, tz) {
+  return zonedEpoch(comp.get('year'), comp.get('month'), comp.get('day'),
+    comp.get('hour') || 0, comp.get('minute') || 0, tz);
+}
+
+// Dates and times come from chrono-node — a maintained NL date parser that
+// already knows "sat 2pm", "13 sep", "next tue", and ranges like "12pm to
+// 2pm". The chore parser stays where it is: it owns recurrence, which chrono
+// does not do, and an invite is always a one-off.
+// chrono implies an hour even for a bare date, so "is this timed?" has to look
+// at what was actually written. A part of the day counts as a time.
+const DAY_PART = /\b(morning|afternoon|evening|tonight|night|noon|midnight)\b/i;
+const PART_HOUR = { morning: 9, afternoon: 15, evening: 19, tonight: 21, night: 21, noon: 12, midnight: 0 };
+
 export function parseInvite(args, now, tz) {
-  const { args: rest, durationMs } = extractDuration(String(args).trim());
-  const trailing = rest.match(/^(.*\S)\s+at\s+(\S.*)$/i);
-  if (trailing) {
-    try {
-      const p = parseRemind(trailing[1], `/invite ${trailing[1]}`, [], now, tz);
-      return { summary: withMention(p), location: trailing[2], startMs: p.firstFireAt, durationMs };
-    } catch (err) {
-      if (!(err instanceof NoTimeError)) throw err;
-    }
+  const { args: rest, durationMs: statedDuration } = extractDuration(String(args).trim());
+  // chrono reasons in the system timezone, which is UTC in a Worker and
+  // something else on a laptop. Hand it a reference whose *local* components
+  // are the chat's wall clock, and convert the answer back with zonedEpoch —
+  // then neither "tomorrow" nor 3pm depends on where this runs.
+  const p = localParts(now, tz);
+  const ref = new Date(p.y, p.mo - 1, p.d, p.h, p.mi, p.s);
+  const results = chrono.parse(rest, ref, { forwardDate: true });
+  if (!results.length) throw new NoTimeError('missing time');
+
+  // A date and a time can land in separate matches when something sits between
+  // them ("13 sep <address> 12pm"). Take the date from the first and the clock
+  // from whichever match actually states one, and cut both out of the text.
+  const dateR = results[0];
+  const timeR = results.find((x) => x.start.isCertain('hour') || DAY_PART.test(x.text)) || null;
+  const spans = [dateR, ...(timeR && timeR !== dateR ? [timeR] : [])];
+
+  const part = timeR && (timeR.text.match(DAY_PART) || [])[1];
+  const timed = Boolean(timeR);
+  let hour = 0;
+  let minute = 0;
+  if (timed) {
+    hour = part ? PART_HOUR[part.toLowerCase()] : timeR.start.get('hour');
+    minute = part ? 0 : (timeR.start.get('minute') || 0);
+    // "at 3" means the afternoon: chrono reads a bare hour literally.
+    if (!part && !timeR.start.isCertain('meridiem') && hour >= 1 && hour <= 7) hour += 12;
   }
-  try {
-    const p = parseRemind(rest, `/invite ${rest}`, [], now, tz);
-    const { summary, location } = placeOf(withMention(p));
-    return { summary, location, startMs: p.firstFireAt, durationMs };
-  } catch (err) {
-    // A date with no clock time is an all-day event, not a failure: "13 sep
-    // Ahma Bday Lunch" belongs on the 13th whether or not an hour was given.
-    if (!(err instanceof NoTimeError) || !err.partial || !err.partial.date) throw err;
-    const { dom, mon } = err.partial.date;
-    const year = new Date(now).getUTCFullYear();
-    const { summary, location } = placeOf(err.partial.text);
-    const startMs = Date.UTC(year, mon, dom);
-    return {
-      summary, location, durationMs,
-      startMs: startMs < now - 86400000 ? Date.UTC(year + 1, mon, dom) : startMs,
-      allDay: true,
-    };
+  const startMs = zonedEpoch(dateR.start.get('year'), dateR.start.get('month'),
+    dateR.start.get('day'), hour, minute, tz);
+
+  // "12pm to 2pm" carries its own end; otherwise "for 30m", else an hour.
+  const durationMs = timeR && timeR.end && timed
+    ? Math.max(epochFrom(timeR.end, tz) - epochFrom(timeR.start, tz), 60000)
+    : statedDuration;
+
+  let leftover = rest;
+  for (const s of spans.sort((a, b) => b.index - a.index)) {
+    leftover = `${leftover.slice(0, s.index)} ${leftover.slice(s.index + s.text.length)}`;
   }
+  leftover = leftover.replace(/\s+/g, ' ').replace(/\s+,/g, ',').replace(/^[,\s]+|[,\s]+$/g, '').trim();
+  const { summary, location } = placeOf(leftover);
+  return {
+    summary: summary || 'Event',
+    location,
+    startMs,
+    durationMs,
+    ...(timed ? {} : { allDay: true }),
+  };
 }
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -142,12 +177,15 @@ const icsEscape = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').r
 
 // METHOD:PUBLISH, no attendees: this is a "save this event" file, not a
 // request awaiting a response — phones offer Add to Calendar directly.
-const icsDate = (ms) => {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+// An all-day VALUE=DATE is a calendar date, not an instant: midnight in
+// Singapore is 4pm UTC the day before, so this must read the local day.
+const icsDate = (ms, tz) => {
+  const p = localParts(ms, tz);
+  return `${p.y}${pad(p.mo)}${pad(p.d)}`;
 };
 
-export function buildIcs({ summary, location, startMs, durationMs, allDay = false, now = Date.now() }) {
+export function buildIcs({ summary, location, startMs, durationMs, allDay = false,
+  tz = 'Asia/Singapore', now = Date.now() }) {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -158,7 +196,7 @@ export function buildIcs({ summary, location, startMs, durationMs, allDay = fals
     `DTSTAMP:${icsUtc(now)}`,
     // An all-day event is a DATE value, and DTEND is the morning after.
     ...(allDay
-      ? [`DTSTART;VALUE=DATE:${icsDate(startMs)}`, `DTEND;VALUE=DATE:${icsDate(startMs + 86400000)}`]
+      ? [`DTSTART;VALUE=DATE:${icsDate(startMs, tz)}`, `DTEND;VALUE=DATE:${icsDate(startMs + 86400000, tz)}`]
       : [`DTSTART:${icsUtc(startMs)}`, `DTEND:${icsUtc(startMs + durationMs)}`]),
     `SUMMARY:${icsEscape(summary)}`,
   ];
@@ -187,7 +225,7 @@ export async function cmdInvite(env, ctx, args, tz) {
     }
     throw err; // ParseError → the dispatcher's private error reply
   }
-  const ics = buildIcs(inv);
+  const ics = buildIcs({ ...inv, tz });
   // The caption doubles as the confirmation: it reads back exactly what was
   // parsed, so a misread time or a swallowed location shows up right here.
   const when = inv.allDay

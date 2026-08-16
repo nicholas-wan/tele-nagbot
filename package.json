@@ -12,5 +12,8 @@
   "devDependencies": {
     "vitest": "^4.1.10",
     "wrangler": "^4.121.0"
+  },
+  "dependencies": {
+    "chrono-node": "^2.10.1"
   }
 }
