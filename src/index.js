@@ -81,6 +81,7 @@ export default {
             { command: 'remind', description: 'Plain reminder — no points' },
             { command: 'list', description: 'Active chores and reminders' },
             { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
+            { command: 'invite', description: 'Calendar file for a meeting — tap to add' },
             { command: 'help', description: 'Quick guide and more options' },
           ],
           ...(scope ? { scope } : {}),
