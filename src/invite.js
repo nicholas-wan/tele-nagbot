@@ -27,6 +27,60 @@ export function splitLocation(title) {
   return { summary: m[1], location: m[2] };
 }
 
+const STREET = new Set(['rd', 'road', 'st', 'street', 'ave', 'avenue', 'blvd', 'boulevard',
+  'ln', 'lane', 'dr', 'drive', 'way', 'cres', 'crescent', 'link', 'walk', 'close', 'terrace',
+  'ter', 'place', 'pl', 'quay', 'hill', 'park', 'gardens', 'garden', 'loop', 'rise', 'view',
+  'green', 'circle', 'square', 'sq', 'highway', 'expressway', 'junction', 'central']);
+
+// Words that end a title rather than begin a venue — the thing being attended.
+const EVENT_WORD = new Set(['lunch', 'dinner', 'breakfast', 'brunch', 'supper', 'party',
+  'bday', 'birthday', 'meeting', 'mtg', 'catchup', 'drinks', 'coffee', 'tea', 'session',
+  'appointment', 'appt', 'visit', 'celebration', 'gathering', 'reunion', 'wedding', 'class',
+  'training', 'interview', 'call', 'sync', 'standup', 'demo', 'review', 'checkup', 'date',
+  'anniversary', 'farewell', 'steamboat', 'bbq', 'buffet', 'makan']);
+
+const bare = (t) => t.replace(/[.,;]+$/, '').toLowerCase();
+
+// Where a postal address begins: "80 Middle Rd", "Blk 123", "#02-15", "188966".
+// The street suffix can sit a few words after the number ("80 Middle Rd", "1
+// Fusionopolis View"), so scan ahead over capitalised words to find it.
+function addressStart(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = bare(tokens[i]);
+    if (/^#\d+[-–]\d+/.test(t)) return i;
+    if (/^(blk|block)$/.test(t) && /^\d/.test(bare(tokens[i + 1] || ''))) return i;
+    if (/^\d{6}$/.test(t)) return i;
+    if (/^\d{1,4}[a-z]?$/.test(t)) {
+      for (let j = i + 1; j < Math.min(i + 5, tokens.length); j++) {
+        if (STREET.has(bare(tokens[j]))) return i;
+        if (!/^[A-Z]/.test(tokens[j])) break;
+      }
+    }
+  }
+  return -1;
+}
+
+// An address in the text means everything from the venue name onward is the
+// place, with no "at" needed. The venue name is found by walking back from the
+// street number over capitalised words — "Fu Yuan Restaurant" — and stopping
+// at the event itself, so "Ahma Bday Lunch" is never swallowed.
+export function detectLocation(title) {
+  const tokens = title.split(/\s+/).filter(Boolean);
+  const addr = addressStart(tokens);
+  if (addr < 1) return { summary: title, location: null };
+  let start = addr;
+  while (start > 1) {
+    const prev = tokens[start - 1];
+    if (EVENT_WORD.has(bare(prev))) break;
+    // Venue names are capitalised; a lowercase word is prose ("with", "for").
+    if (!/^[A-Z#]/.test(prev)) break;
+    start--;
+  }
+  const summary = tokens.slice(0, start).join(' ').replace(/[,\s]+$/, '');
+  if (!summary) return { summary: title, location: null };
+  return { summary, location: tokens.slice(start).join(' ') };
+}
+
 // Everything the command needs, or a NoTimeError/ParseError for the caller.
 //
 // Location and time fight over the word "at", and a place name can even look
@@ -39,6 +93,12 @@ export function splitLocation(title) {
 // hand the mention back to the title ("call with @boss" stays whole).
 const withMention = (p) => (p.assigneeName ? `${p.text} ${p.assigneeName}` : p.text);
 
+// An explicit "at" wins; otherwise an address in the text is found on its own.
+const placeOf = (title) => {
+  const viaAt = splitLocation(title);
+  return viaAt.location ? viaAt : detectLocation(title);
+};
+
 export function parseInvite(args, now, tz) {
   const { args: rest, durationMs } = extractDuration(String(args).trim());
   const trailing = rest.match(/^(.*\S)\s+at\s+(\S.*)$/i);
@@ -50,9 +110,24 @@ export function parseInvite(args, now, tz) {
       if (!(err instanceof NoTimeError)) throw err;
     }
   }
-  const p = parseRemind(rest, `/invite ${rest}`, [], now, tz);
-  const { summary, location } = splitLocation(withMention(p));
-  return { summary, location, startMs: p.firstFireAt, durationMs };
+  try {
+    const p = parseRemind(rest, `/invite ${rest}`, [], now, tz);
+    const { summary, location } = placeOf(withMention(p));
+    return { summary, location, startMs: p.firstFireAt, durationMs };
+  } catch (err) {
+    // A date with no clock time is an all-day event, not a failure: "13 sep
+    // Ahma Bday Lunch" belongs on the 13th whether or not an hour was given.
+    if (!(err instanceof NoTimeError) || !err.partial || !err.partial.date) throw err;
+    const { dom, mon } = err.partial.date;
+    const year = new Date(now).getUTCFullYear();
+    const { summary, location } = placeOf(err.partial.text);
+    const startMs = Date.UTC(year, mon, dom);
+    return {
+      summary, location, durationMs,
+      startMs: startMs < now - 86400000 ? Date.UTC(year + 1, mon, dom) : startMs,
+      allDay: true,
+    };
+  }
 }
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -67,7 +142,12 @@ const icsEscape = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').r
 
 // METHOD:PUBLISH, no attendees: this is a "save this event" file, not a
 // request awaiting a response — phones offer Add to Calendar directly.
-export function buildIcs({ summary, location, startMs, durationMs, now = Date.now() }) {
+const icsDate = (ms) => {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
+};
+
+export function buildIcs({ summary, location, startMs, durationMs, allDay = false, now = Date.now() }) {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -76,8 +156,10 @@ export function buildIcs({ summary, location, startMs, durationMs, now = Date.no
     'BEGIN:VEVENT',
     `UID:invite-${startMs}-${durationMs}@nag-bot`,
     `DTSTAMP:${icsUtc(now)}`,
-    `DTSTART:${icsUtc(startMs)}`,
-    `DTEND:${icsUtc(startMs + durationMs)}`,
+    // An all-day event is a DATE value, and DTEND is the morning after.
+    ...(allDay
+      ? [`DTSTART;VALUE=DATE:${icsDate(startMs)}`, `DTEND;VALUE=DATE:${icsDate(startMs + 86400000)}`]
+      : [`DTSTART:${icsUtc(startMs)}`, `DTEND:${icsUtc(startMs + durationMs)}`]),
     `SUMMARY:${icsEscape(summary)}`,
   ];
   if (location) lines.push(`LOCATION:${icsEscape(location)}`);
@@ -108,10 +190,13 @@ export async function cmdInvite(env, ctx, args, tz) {
   const ics = buildIcs(inv);
   // The caption doubles as the confirmation: it reads back exactly what was
   // parsed, so a misread time or a swallowed location shows up right here.
-  const caption = `📅 <b>${esc(inv.summary)}</b>\n` +
-    `${fmtLocal(inv.startMs, tz)} · ${Math.round(inv.durationMs / 60000)} min` +
-    (inv.location ? ` · ${esc(inv.location)}` : '') +
-    '\nTap the file → Add to Calendar.';
+  const when = inv.allDay
+    ? `${fmtLocal(inv.startMs, tz).replace(/,?\s*\d{1,2}:\d{2}\s*[AP]M$/i, '')} · all day`
+    : `${fmtLocal(inv.startMs, tz)} · ${Math.round(inv.durationMs / 60000)} min`;
+  const caption = `📅 <b>${esc(inv.summary)}</b>\n${when}` +
+    (inv.location ? `\n📍 ${esc(inv.location)}` : '') +
+    '\nTap the file → Add to Calendar.' +
+    (inv.allDay ? '\n<i>Add a time to make it a timed event.</i>' : '');
   // The file goes to the whole group on purpose: a calendar entry is usually
   // for both of you, and either phone can tap it. Usage hints and errors stay
   // private — only the sender can act on those.

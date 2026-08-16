@@ -76,15 +76,18 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   // date rather than the next matching slot.
   let fromDate = null;
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
-  const MON_WORD = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+  // Whole month words only. Matching "mar" as a prefix turned "15 Marina Bay"
+  // into 15 March — the abbreviations are the start of too many real words.
+  const MON_WORD = 'january|february|march|april|august|september|october|november|december|' +
+    'june|july|jan|feb|mar|apr|may|jun|jul|aug|sept|sep|oct|nov|dec';
   const startPrefix = '(?:start(?:ing)?\\s+(?:from\\s+|on\\s+)?|from\\s+|on\\s+)';
   // The word-month forms don't need the prefix — a bare "13 sep" in a chore or
   // invite is almost certainly a date, and leaving it as title text once put
   // an event on the wrong day entirely. The numeric form keeps the prefix, so
   // prose like "split 3/4 of the boxes" stays prose.
   const dateM =
-    args.match(new RegExp(`\\b${startPrefix}?(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MON_WORD})[a-z]*\\b`, 'i'))
-    || args.match(new RegExp(`\\b${startPrefix}?(${MON_WORD})[a-z]*\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'))
+    args.match(new RegExp(`\\b${startPrefix}?(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MON_WORD})\\b\\.?`, 'i'))
+    || args.match(new RegExp(`\\b${startPrefix}?(${MON_WORD})\\b\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'))
     || args.match(new RegExp(`\\b${startPrefix}(\\d{1,2})/(\\d{1,2})\\b`, 'i'));
   if (dateM) {
     const a = dateM[1].toLowerCase();
@@ -247,6 +250,9 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
       validateText(text);
       const err = new NoTimeError('missing time');
       err.partial = { text, assigneeName, assigneeUserId, nagIntervals, kind, detail };
+      // A stated date survives a missing time: "13 sep lunch" knows the day,
+      // which is enough for an all-day event even though it can't nag.
+      if (fromDate) err.partial.date = fromDate;
       throw err;
     }
     throw new ParseError(

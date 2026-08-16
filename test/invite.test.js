@@ -168,3 +168,39 @@ describe('real-world parsing (the ahma-bday-lunch report)', () => {
     expect(parseInvite('buy 3 apples 5pm', NOW, TZ).summary).toBe('buy 3 apples');
   });
 });
+
+describe('addresses without an "at", and dates without a time', () => {
+  it('splits the reported message into title, place and an all-day date', () => {
+    const inv = parseInvite(
+      '13 sep Ahma Bday Lunch Fu Yuan Restaurant 80 Middle Rd, Level 2 Frasers House, Singapore 188966',
+      NOW, TZ);
+    expect(inv.summary).toBe('Ahma Bday Lunch');
+    expect(inv.location).toBe('Fu Yuan Restaurant 80 Middle Rd, Level 2 Frasers House, Singapore 188966');
+    expect(inv.allDay).toBe(true);
+    const ics = buildIcs(inv);
+    expect(ics).toContain('DTSTART;VALUE=DATE:20260913');
+    expect(ics).toContain('DTEND;VALUE=DATE:20260914');
+    expect(ics).toContain('SUMMARY:Ahma Bday Lunch');
+    expect(ics).toContain('LOCATION:Fu Yuan Restaurant');
+  });
+
+  it('finds blk and unit-number addresses', () => {
+    expect(parseInvite('dinner tomorrow 7pm Blk 123 Bedok North', NOW, TZ).location)
+      .toBe('Blk 123 Bedok North');
+    expect(parseInvite('viewing tomorrow 2pm #02-15 Marina Bay Sands', NOW, TZ).location)
+      .toBe('#02-15 Marina Bay Sands');
+  });
+
+  // "mar" as a prefix once turned "15 Marina Bay" into 15 March.
+  it('does not read a month out of a place name', () => {
+    const inv = parseInvite('meet at Marina Bay tomorrow 6pm', NOW, TZ);
+    expect(inv.location).toBe('Marina Bay');
+    expect(sgt(inv.startMs)).toBe('2026-08-15T18:00');
+  });
+
+  it('leaves a plain title alone when there is no address', () => {
+    const inv = parseInvite('lunch with jane tomorrow 1pm', NOW, TZ);
+    expect(inv.summary).toBe('lunch with jane');
+    expect(inv.location).toBeNull();
+  });
+});
