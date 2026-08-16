@@ -112,7 +112,11 @@ export async function cmdInvite(env, ctx, args, tz) {
     `${fmtLocal(inv.startMs, tz)} · ${Math.round(inv.durationMs / 60000)} min` +
     (inv.location ? ` · ${esc(inv.location)}` : '') +
     '\nTap the file → Add to Calendar.';
-  const sent = await sendDocument(env, ctx, `${fileSlug(inv.summary)}.ics`, ics, caption);
+  // The file goes to the whole group on purpose: a calendar entry is usually
+  // for both of you, and either phone can tap it. Usage hints and errors stay
+  // private — only the sender can act on those.
+  const sent = await sendDocument(env, { ...ctx, ephemeral: false },
+    `${fileSlug(inv.summary)}.ics`, ics, caption);
   // The command message is already gone by now — a failed upload must say so,
   // or the whole exchange vanishes without a trace.
   if (!sent.ok) {

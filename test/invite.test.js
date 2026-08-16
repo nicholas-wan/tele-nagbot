@@ -101,12 +101,12 @@ describe('cmdInvite', () => {
   });
   const ctx = { chatId: 1, userId: 2, ephemeral: true, callbackQueryId: null, replyEphemeralId: null, at: Date.now() };
 
-  it('sends the ics as a document addressed to the requester', async () => {
+  it('sends the ics publicly so either phone can tap it', async () => {
     await cmdInvite(env(), { ...ctx }, 'dentist tomorrow 3pm at Mount E', TZ);
     const sent = calls.find((c) => c.url.endsWith('/sendDocument'));
     expect(sent).toBeTruthy();
     expect(sent.body).toBeInstanceOf(FormData);
-    expect(sent.body.get('receiver_user_id')).toBe('2');
+    expect(sent.body.get('receiver_user_id')).toBeNull();
     const file = sent.body.get('document');
     expect(file.name).toBe('dentist.ics');
     expect(await file.text()).toContain('SUMMARY:dentist');
