@@ -27,18 +27,19 @@ function senderName(from) {
   return from.username ? `@${from.username}` : from.first_name || 'someone';
 }
 
-// /chore and /remind are different things and their nags say so. A reminder is
-// unscored, so "Done together" — which exists only to split leaderboard credit
-// — has nothing to split and is left off.
+// /chore and /remind differ only in whether they score. Done together stays on
+// both: it records who actually did the thing, which matters even when no
+// points ride on it — dropping it once cost a reminder its shared credit.
 export const isScored = (row) => (row && row.scored != null ? Boolean(row.scored) : true);
 
 export function nagButtons(firingId, scored = true) {
-  const first = [{ text: '✅ Done', callback_data: `d:${firingId}` }];
-  if (scored) first.push({ text: '🤝 Done together', callback_data: `b:${firingId}` });
-  first.push({ text: '😴 Snooze…', callback_data: `s:${firingId}` });
   return {
     inline_keyboard: [
-      first,
+      [
+        { text: '✅ Done', callback_data: `d:${firingId}` },
+        { text: '🤝 Done together', callback_data: `b:${firingId}` },
+        { text: '😴 Snooze…', callback_data: `s:${firingId}` },
+      ],
       [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
     ],
   };
@@ -47,11 +48,12 @@ export function nagButtons(firingId, scored = true) {
 const emptyKeyboard = () => ({ inline_keyboard: [] });
 
 function snoozedButtons(firingId, scored = true) {
-  const first = [{ text: '✅ Done', callback_data: `d:${firingId}` }];
-  if (scored) first.push({ text: '🤝 Done together', callback_data: `b:${firingId}` });
-  first.push({ text: '🕐 Change snooze', callback_data: `s:${firingId}` });
   return { inline_keyboard: [
-    first,
+    [
+      { text: '✅ Done', callback_data: `d:${firingId}` },
+      { text: '🤝 Done together', callback_data: `b:${firingId}` },
+      { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
+    ],
     [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
   ] };
 }
@@ -145,7 +147,9 @@ const NAG_LINES = {
 };
 
 export function nagHtml(reminder, nagCount, cat = 'both') {
-  const head = `🐱 <b>${esc(reminder.text)}</b>${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
+  // Whether this counts is decided here, at the moment someone taps Done.
+  const kind = isScored(reminder) ? '' : ' <i>(reminder — no points)</i>';
+  const head = `🐱 <b>${esc(reminder.text)}</b>${kind}${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
   const lines = NAG_LINES[cat] || NAG_LINES.both;
   const line = lines[Math.min(nagCount, lines.length - 1)];
   const who = reminder.assignee_name
@@ -931,8 +935,11 @@ async function choreListHtml(env, chatId, tz) {
     const each = cadence(r);
     lines.push('');
     lines.push(lead);
+    // Chores are the default here; a reminder is the thing worth flagging,
+    // since it looks identical but never reaches the leaderboard.
+    const kind = isScored(r) ? '' : ' · <i>reminder</i>';
     lines.push(`${[choreEmoji(r.text), `<b>${esc(r.text)}</b>`].filter(Boolean).join(' ')}${rot}${who}` +
-      (each === 'once' ? '' : ` · <i>${each}</i>`));
+      (each === 'once' ? '' : ` · <i>${each}</i>`) + kind);
   }
   return lines.join('\n');
 }

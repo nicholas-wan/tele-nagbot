@@ -408,3 +408,56 @@ describe('receipt lifetimes', () => {
     expect(deleteAfter).toBeGreaterThan(Date.now() + 7000000);
   });
 });
+
+describe('Done together availability', () => {
+  // Removing this from unscored reminders once cost a real reminder its shared
+  // credit: the button simply was not there, so Done was tapped instead.
+  it('offers Done together on reminders as well as chores', () => {
+    for (const scored of [true, false]) {
+      expect(nagButtons(7, scored).inline_keyboard[0].map((b) => b.text))
+        .toEqual(['✅ Done', '🤝 Done together', '😴 Snooze…']);
+    }
+  });
+
+  it('still names the delete button after the kind', () => {
+    expect(nagButtons(7, true).inline_keyboard[1][0].text).toBe('🗑 Delete chore');
+    expect(nagButtons(7, false).inline_keyboard[1][0].text).toBe('🗑 Delete reminder');
+  });
+});
+
+describe('telling chores and reminders apart', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('flags a reminder on its nag, and leaves a chore unmarked', async () => {
+    const { nagHtml } = await import('../src/handlers.js');
+    expect(nagHtml({ text: 'brush cattos teeth', scored: 0 }, 0)).toContain('reminder');
+    expect(nagHtml({ text: 'clear poop', scored: 1 }, 0)).not.toContain('reminder');
+  });
+
+  it('flags a reminder on the pinned board', async () => {
+    const base = {
+      display_num: 1, paused: 0, next_fire_at: Date.now() + 3600000, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null,
+    };
+    const env = {
+      BOT_TOKEN: 'token',
+      DB: dbForDashboard([{ ...base, id: 1, text: 'clear poop', scored: 1 },
+        { ...base, id: 2, text: 'brush cattos teeth', scored: 0 }]),
+    };
+    await updateDashboard(env, 1);
+    const text = calls.find((c) => c.url.endsWith('/sendMessage')).body.text;
+    const lines = text.split('\n');
+    expect(lines.find((l) => l.includes('brush cattos teeth'))).toContain('<i>reminder</i>');
+    expect(lines.find((l) => l.includes('clear poop'))).not.toContain('<i>reminder</i>');
+  });
+});

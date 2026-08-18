@@ -5,7 +5,13 @@
 import { handleUpdate, updateDashboard } from './handlers.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
-import { tg } from './tg.js';
+import { answerCallback, armWebhookAnswer, tg } from './tg.js';
+
+// How long the webhook response may wait for the first toast. Every callback
+// path answers, so this only matters when Telegram itself is slow — past the
+// bound, a plain ok goes back and the answer falls back to HTTPS, so Telegram
+// is never left holding the webhook long enough to redeliver the update.
+const WEBHOOK_ANSWER_WAIT_MS = 2000;
 
 function adminAuthorized(request, env) {
   if (!env.ADMIN_SECRET) return false;
@@ -26,7 +32,43 @@ export default {
         return new Response('bad request', { status: 400 });
       }
       // Always 200 so Telegram doesn't retry a poison update forever.
-      ctx.waitUntil(handleUpdate(env, update).catch((e) => console.log(`update failed: ${e.stack || e}`)));
+      const handling = handleUpdate(env, update).catch(async (e) => {
+        console.log(`update failed: ${e.stack || e}`);
+        // A tap must never die silently: an unanswered callback leaves the
+        // button spinning, which reads as a dead bot. Answering twice is
+        // harmless — Telegram ignores the second answer.
+        if (update.callback_query && update.callback_query.id) {
+          await answerCallback(env, update.callback_query.id, '⚠️ Something went wrong. Please try again.');
+        }
+      });
+      const callback = update && update.callback_query;
+      if (callback && callback.id) {
+        const started = Date.now();
+        // The first toast rides back on this very response when it is ready in
+        // time, sparing the tapper a separate answerCallbackQuery round trip.
+        const reply = armWebhookAnswer(callback.id);
+        ctx.waitUntil(handling.finally(() => reply.disarm()));
+        const answer = await Promise.race([
+          reply.promise,
+          new Promise((resolve) => setTimeout(() => resolve(null), WEBHOOK_ANSWER_WAIT_MS)),
+        ]);
+        if (!answer) reply.disarm();
+        // One line per tap for `wrangler tail`: the colo names which side of
+        // the world this ran on — next to Telegram (EU colos) or not — and the
+        // duration is what the tapper waited for their toast. Slowness blames
+        // whichever backend is far away.
+        console.log(
+          `Webhook callback handled at ${(request.cf && request.cf.colo) || 'unknown colo'}: `
+          + `${answer ? 'toast rode the response' : 'no toast in time'} `
+          + `after ${Date.now() - started}ms`
+        );
+        return answer
+          ? new Response(JSON.stringify(answer), {
+            headers: { 'Content-Type': 'application/json' },
+          })
+          : new Response('ok');
+      }
+      ctx.waitUntil(handling);
       return new Response('ok');
     }
     // One-time helper: POST /setup with ADMIN_SECRET as a bearer token makes

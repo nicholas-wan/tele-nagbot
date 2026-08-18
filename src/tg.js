@@ -121,7 +121,45 @@ export function editMessage(env, chatId, messageId, html, replyMarkup) {
   return tg(env, 'editMessageText', body);
 }
 
+// The first answer to a tap can ride back on the webhook's own HTTP response
+// instead of costing a separate round trip to api.telegram.org (Bot API,
+// "Making requests when getting updates"). That round trip is most of the
+// toast latency: the API is served from Amsterdam, which is also where
+// Telegram's webhooks land and therefore where this Worker runs. The webhook
+// route arms a capture before handling starts; the first answerCallback for
+// that id resolves it, and every later answer — or any answer with no arm, as
+// in tests and cron — travels over HTTPS as before. Keyed by callback id,
+// which Telegram makes unique per tap, so concurrent updates in one isolate
+// cannot take each other's answers.
+const webhookAnswers = new Map();
+
+export function armWebhookAnswer(callbackId) {
+  let capture;
+  const promise = new Promise((resolve) => { capture = resolve; });
+  webhookAnswers.set(callbackId, capture);
+  return {
+    promise,
+    // Always undone: an armed id whose answer never comes would leak, and once
+    // the webhook has been answered without the toast, the eventual answer has
+    // to fall back to HTTPS rather than resolve a response nobody is waiting
+    // on. Resolving twice is a no-op, so disarming after a capture is harmless.
+    disarm() {
+      webhookAnswers.delete(callbackId);
+      capture(null);
+    },
+  };
+}
+
 export function answerCallback(env, callbackId, text) {
+  const capture = webhookAnswers.get(callbackId);
+  if (capture) {
+    webhookAnswers.delete(callbackId);
+    capture({ method: 'answerCallbackQuery', callback_query_id: callbackId, text });
+    // Telegram never reports the outcome of a method returned on the webhook,
+    // so success is asserted rather than known — the same blindness every
+    // fired-and-forgotten HTTPS answer already has in practice.
+    return Promise.resolve({ ok: true, result: true });
+  }
   return tg(env, 'answerCallbackQuery', { callback_query_id: callbackId, text });
 }
 
