@@ -86,6 +86,6 @@ curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.latte
 
 - Other admin actions, same bearer token: `?info` (webhook + registered commands, read back from Telegram), `?diag[=<chat>]` (bot membership, admin rights, whether the chat id changed), `?board` (rebuild and re-pin the dashboard, retiring stale boards the bot pinned earlier).
 - `?board` walks the pin stack because `getChat` only reports the topmost pin, and it stops at the first pin a human made. Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin the stale board by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
-- Migrations: `npx wrangler d1 execute nagbot --remote --command "ALTER …"`, one statement at a time, and mirror it into `schema.sql`.
+- Migrations: `npx wrangler d1 execute nagbot-eu --remote --command "ALTER …"`, one statement at a time, and mirror it into `schema.sql`. The database lives in WEUR beside the Worker (Telegram webhooks land in Amsterdam); the retired APAC original (`nagbot`) is the pre-migration backup.
 - Deploys take ~30s to propagate — re-run before concluding a change didn't work. Debug with `wrangler tail` or by querying `firings` / `reminders` / `settings` — they explain almost every "the bot didn't do X" report.
 - A group upgraded to a supergroup gets a **new chat id** and loses its pin. Rejected group chats are logged, so `wrangler tail` shows the new id immediately; update `ALLOWED_CHATS`, migrate the D1 rows, then `?board`.

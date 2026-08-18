@@ -17,10 +17,15 @@ ALLOWED_CHATS = "-1004418632524"
 [triggers]
 crons = ["* * * * *"]
 
+# The Worker executes where Telegram's webhooks land — Amsterdam — so the
+# database lives in WEUR to sit beside it (measured on squashbot: APAC D1 cost
+# ~200ms per query from AMS). The original APAC database (nagbot,
+# d5ffcebe-7dff-4ada-8ae4-925b0175c3a8) is kept as a backup of the
+# pre-migration state; backup-20260817.sql is the export that seeded this.
 [[d1_databases]]
 binding = "DB"
-database_name = "nagbot"
-database_id = "d5ffcebe-7dff-4ada-8ae4-925b0175c3a8"
+database_name = "nagbot-eu"
+database_id = "24e45c9c-75bf-4b7e-b38e-f92598c370fe"
 
 # Vision model for /autotag (classifying which cat is on each sticker).
 [ai]

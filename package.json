@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute nagbot --remote --file=schema.sql",
+    "db:init": "wrangler d1 execute nagbot-eu --remote --file=schema.sql",
     "logs": "wrangler tail",
     "test": "vitest run"
   },
