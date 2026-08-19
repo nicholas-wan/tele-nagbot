@@ -554,8 +554,7 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   }
   p.scored = scored;
   const { id, html } = await createReminder(env, chatId, p, by, tz);
-  await sendPrivate(env, ctx, html, undoButtons(id));
-  await announceNewChore(env, chatId, by, p, tz);
+  await confirmNewChore(env, ctx, by, p, tz, id, html);
   // "now" reminders fire on the spot instead of waiting for the next cron tick.
   if (p.firstFireAt <= Date.now() + 500) {
     const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
@@ -563,15 +562,18 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   }
 }
 
-// An unassigned chore is the household's problem, so its arrival is announced:
-// the creator's own confirmation is private and nobody else would see it
-// otherwise. An assigned one is not — it will nag its person privately, so
-// announcing it here would hand the group the very thing that nag hides. The
-// pinned dashboard still lists both.
-async function announceNewChore(env, chatId, by, p, tz) {
-  if (p.assigneeName || p.assigneeUserId) return;
-  await sendMessage(env, chatId,
-    `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`);
+// Exactly one confirmation per new chore, never two saying the same thing.
+//
+// An unassigned chore is the household's problem, so the public line is the
+// confirmation and carries the Undo. An assigned one is deliberately not
+// announced — that would hand the group what its private nag hides — so the
+// creator's own private copy is the only one. Either way the pinned dashboard
+// lists it, so nothing is lost by keeping this to a single message.
+async function confirmNewChore(env, ctx, by, p, tz, id, html) {
+  const buttons = undoButtons(id);
+  if (p.assigneeName || p.assigneeUserId) return sendPrivate(env, ctx, html, buttons);
+  return sendMessage(env, ctx.chatId,
+    `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`, buttons);
 }
 
 async function createReminder(env, chatId, p, by, tz) {
@@ -761,12 +763,18 @@ async function handlePlainText(env, msg) {
   const by = senderName(msg.from);
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   const wizardRef = draftRef(draft, 'wizard');
-  if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id));
-  else await sendPrivate(env, ctx, html, undoButtons(id));
   const promptRef = draftRef(draft, 'prompt');
   if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
   if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
-  await announceNewChore(env, chatId, by, p, tz);
+  // The wizard message becomes the confirmation for an assigned chore; an
+  // unassigned one is announced instead, so the wizard is cleared away.
+  if (p.assigneeName || p.assigneeUserId) {
+    if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id));
+    else await sendPrivate(env, ctx, html, undoButtons(id));
+  } else {
+    if (wizardRef) await deleteRef(env, ctx, chatId, wizardRef);
+    await confirmNewChore(env, ctx, by, p, tz, id, html);
+  }
   if (p.firstFireAt <= Date.now() + 500) {
     const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
     if (row) await fireReminder(env, row, Date.now(), tz);
@@ -1822,8 +1830,12 @@ async function handleCallback(env, cb) {
       nagIntervals: JSON.parse(draft.nag_intervals), scored: draft.scored, ...sched,
     };
     const { id: newId, html } = await createReminder(env, draft.chat_id, wizP, wizBy, tz);
-    await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId));
-    await announceNewChore(env, draft.chat_id, wizBy, wizP, tz);
+    if (wizP.assigneeName || wizP.assigneeUserId) {
+      await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId));
+    } else {
+      await deleteRef(env, ctx, draft.chat_id, ref);
+      await confirmNewChore(env, ctx, wizBy, wizP, tz, newId, html);
+    }
     return answerCallback(env, cb.id, 'Scheduled 📝');
   }
 

@@ -145,7 +145,9 @@ describe('ephemeral interactions', () => {
     expect(calls.some((c) => c.url.endsWith('/deleteMessage'))).toBe(false);
   });
 
-  it('announces an unassigned chore publicly even though the confirmation is private', async () => {
+  // One confirmation, never two saying the same thing: an unassigned chore is
+  // announced publicly and that public line IS the confirmation.
+  it('confirms an unassigned chore once, publicly', async () => {
     await handleUpdate(env(), {
       message: {
         message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' },
@@ -153,11 +155,12 @@ describe('ephemeral interactions', () => {
       },
     });
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
-    const confirmation = sends.find((c) => c.body.receiver_user_id);
     const announcement = sends.find((c) => !c.body.receiver_user_id && /added/.test(c.body.text || ''));
-    expect(confirmation).toBeTruthy();
     expect(announcement).toBeTruthy();
     expect(announcement.body.text).toContain('water plants');
+    // The Undo rides on the public line rather than a second private copy.
+    expect(JSON.stringify(announcement.body.reply_markup)).toContain('u:');
+    expect(sends.some((c) => c.body.receiver_user_id)).toBe(false);
   });
 
   // An assigned chore nags privately, so announcing it would leak exactly what
