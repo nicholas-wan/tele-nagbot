@@ -5,11 +5,78 @@
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
          answerCallback, isPublicMessage } from './tg.js';
 import { nextOccurrence, localParts, zonedEpoch, fmtShort, DAY_NAMES } from './time.js';
-import { parseRemind, ParseError } from './parse.js';
+import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName } from './household.js';
 import { emptyKeyboard } from './nag.js';
 import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
+
+// Bare /chore or /remind — the "/" autocomplete menu sends the command with
+// no text. Ask what to nag about instead of erroring; the reply is parsed as
+// the full command, and the time wizard follows if the reply has no time.
+// An empty text marks the draft as awaiting the whole command.
+export async function startTextPrompt(env, ctx, from, scored) {
+  const res = await env.DB.prepare(
+    `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
+       schedule_detail, nag_intervals, created_at, scored)
+     VALUES (?, '', NULL, NULL, 'once', '{}', ?, ?, ?)`
+  ).bind(ctx.chatId, JSON.stringify(DEFAULT_NAGS), Date.now(), scored ? 1 : 0).run();
+  const id = res.meta.last_row_id;
+  // selective force_reply only auto-opens the reply box for a mentioned user.
+  const mention = from.username
+    ? `@${from.username}`
+    : mentionHtml(from.first_name || 'you', from.id);
+  const prompt = await sendPrivate(env, ctx,
+    `🐾 ${mention} — what should Latte &amp; Mocha nag about? Reply with the chore, ` +
+    'e.g. <code>trash 7pm daily</code>, <code>dishes now</code>, or <code>@jane plants mon 8am</code>.',
+    { force_reply: true, selective: true });
+  const pRef = msgRef(prompt);
+  if (pRef) {
+    await env.DB.prepare('UPDATE drafts SET prompt_msg_id = ?, prompt_msg_ephemeral = ? WHERE id = ?')
+      .bind(pRef.id, pRef.ephemeral ? 1 : 0, id).run();
+  }
+}
+
+// A reply to the "what should the cats nag about?" prompt carries the whole
+// command. A time-less reply hands over to the time wizard rather than
+// bouncing the person back to square one.
+async function resolveTextPrompt(env, msg, ctx, draft) {
+  const chatId = msg.chat.id;
+  const now = Date.now();
+  const tz = await getTz(env, chatId);
+  const scored = Boolean(draft.scored);
+  let p;
+  try {
+    p = parseRemind(msg.text, msg.text, msg.entities || [], now, tz);
+  } catch (err) {
+    if (err instanceof NoTimeError) {
+      // Claim the prompt draft before opening the wizard, so a second reply
+      // racing this one cannot spawn two wizards for the same ask.
+      const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
+        .bind(draft.id, chatId).run();
+      if (!claim.meta.changes) return;
+      const promptRef = draftRef(draft, 'prompt');
+      if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
+      if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
+      return startWizard(env, ctx, err.partial, msg.text, tz, scored);
+    }
+    // An unusable reply keeps the draft alive — replying to the prompt again
+    // gets another try.
+    if (err instanceof ParseError) return sendPrivate(env, ctx, esc(err.message));
+    throw err;
+  }
+  p.scored = scored;
+  const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
+    .bind(draft.id, chatId).run();
+  if (!claim.meta.changes) return;
+  const promptRef = draftRef(draft, 'prompt');
+  if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
+  if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
+  const by = senderName(msg.from);
+  const { id, html } = await createReminder(env, chatId, p, by, tz);
+  await confirmNewChore(env, ctx, by, p, tz, id, html);
+  await fireIfDue(env, id, tz);
+}
 
 // No time given: park the parsed pieces as a draft and offer tap-to-choose
 // times instead of an error. Workers AI gets one shot at guessing the intent;
@@ -115,10 +182,17 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
          AND ((prompt_msg_id = ? AND prompt_msg_ephemeral = ?)
            OR (wizard_msg_id = ? AND wizard_msg_ephemeral = ?))`
     ).bind(chatId, replyRef.id, eph, replyRef.id, eph).first();
+    // An empty text marks a "what should the cats nag about?" prompt: the
+    // reply is the whole command, not just a time.
+    if (draft && !draft.text) return resolveTextPrompt(env, msg, ctx, draft);
   }
   if (!draft) {
+    // Awaiting-text drafts are excluded here on purpose: only a direct reply
+    // may resolve them, or any group chat with a time in it would become a
+    // chore with no name.
     draft = await env.DB.prepare(
-      'SELECT * FROM drafts WHERE chat_id = ? AND prompt_msg_id IS NOT NULL AND created_at > ? ORDER BY id DESC LIMIT 1'
+      `SELECT * FROM drafts WHERE chat_id = ? AND prompt_msg_id IS NOT NULL AND text <> ''
+         AND created_at > ? ORDER BY id DESC LIMIT 1`
     ).bind(chatId, now - 15 * 60000).first();
     bareTime = true;
   }

@@ -17,7 +17,7 @@ import { updateDashboard, choreListHtml } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, setReminderPaused, completeEarly, wakeChat } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
-import { startWizard, tryDraftTime, handleWizardCallback } from './wizard.js';
+import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
@@ -226,6 +226,9 @@ async function cmdHelp(env, ctx, args = '') {
 async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   const chatId = ctx.chatId;
   const now = Date.now();
+  // The "/" autocomplete menu sends the bare command — ask what to nag about
+  // instead of erroring, and treat the reply as the rest of the command.
+  if (!String(args).trim()) return startTextPrompt(env, ctx, msg.from, scored);
   let p;
   try {
     p = parseRemind(args, msg.text, msg.entities, now, tz);

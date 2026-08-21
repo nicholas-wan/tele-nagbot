@@ -15,7 +15,7 @@ Telegram chore bot that nags until someone marks a chore done. Cloudflare Worker
 /invite bday lunch 13 sep 12pm at Fu Yuan, 80 Middle Rd    calendar file, tap to add
 ```
 
-Schedules: `7pm daily`, `every mon,thu 8am`, `every 8 days`, `every 2 weeks`, `every other saturday`, `every 3 months`, `on the 1st`, `weekdays`, `starting 29 aug`, `tomorrow 9:30am`, `in 20m`, `now`, `noon`, `nag:10m`. Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped).
+Schedules: `7pm daily`, `every mon,thu 8am`, `every 8 days`, `every 2 weeks`, `every other saturday`, `every 3 months`, `on the 1st`, `weekdays`, `starting 29 aug`, `tomorrow 9:30am`, `in 20m`, `now`, `noon`, `nag:10m`. Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped). A bare `/chore` or `/remind` — a menu tap — asks what to nag about; the reply is the rest of the command.
 
 Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane`, or `snooze 2h` works, as does a 👍/✅ reaction. Max 3 snoozes.
 

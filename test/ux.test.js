@@ -258,6 +258,68 @@ describe('chat UX', () => {
     expect(receipt.body.text).toContain('Next:');
   });
 
+  // The "/" autocomplete menu sends the bare command; that must ask for the
+  // chore, not error, and the reply is treated as the rest of the command.
+  it('asks what to nag about on a bare /remind', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/remind' },
+    });
+    const prompt = calls.find((c) => c.url.endsWith('/sendMessage')
+      && c.body.reply_markup && c.body.reply_markup.force_reply);
+    expect(prompt.body.text).toContain('nag about');
+    expect(calls.some((c) => /could not find a time/.test((c.body && c.body.text) || ''))).toBe(false);
+  });
+
+  function textPromptDb(runs) {
+    const draft = {
+      id: 12, chat_id: 1, text: '', scored: 1, schedule_kind: 'once', schedule_detail: '{}',
+      nag_intervals: '[15,30,60]', prompt_msg_id: 77, prompt_msg_ephemeral: 0, created_at: Date.now(),
+    };
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM drafts') && sql.includes('prompt_msg_id = ?')) return draft;
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 30 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const promptReply = (text) => ({
+    message: {
+      message_id: 6, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text,
+      reply_to_message: { message_id: 77, chat: { id: 1 } },
+    },
+  });
+
+  it('treats the reply to the prompt as the full command', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: textPromptDb(runs) },
+      promptReply('water plants 7pm daily'));
+    const insert = runs.find((u) => u.sql.includes('INSERT INTO reminders'));
+    expect(insert.args).toContain('water plants');
+    expect(insert.args).toContain('daily');
+  });
+
+  it('hands a time-less prompt reply to the time wizard', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: textPromptDb(runs) },
+      promptReply('water plants'));
+    expect(runs.some((u) => u.sql.includes('INSERT INTO reminders'))).toBe(false);
+    const wizard = calls.find((c) => /When should Latte/.test((c.body && c.body.text) || ''));
+    expect(wizard.body.text).toContain('water plants');
+  });
+
   it('tidies away a typo’d command like any other', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {
