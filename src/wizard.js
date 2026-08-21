@@ -87,16 +87,6 @@ function scheduleFromCode(code, draft, now, tz) {
   if (code === 'r15' || code === 'r60') {
     return { kind: 'once', detail: {}, firstFireAt: now + (code === 'r15' ? 15 : 60) * 60000 };
   }
-  if (code === 't19') {
-    const d = { h: 19, mi: 0 };
-    return { kind: 'once', detail: d, firstFireAt: nextOccurrence('daily', d, now, tz) };
-  }
-  if (code === 'm9') {
-    const d = { h: 9, mi: 0 };
-    const p = localParts(now, tz);
-    const endOfToday = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
-    return { kind: 'once', detail: d, firstFireAt: nextOccurrence('daily', d, endOfToday, tz) };
-  }
   if (code === 'd19') {
     const d = { h: 19, mi: 0 };
     return { kind: 'daily', detail: d, firstFireAt: nextOccurrence('daily', d, now, tz) };

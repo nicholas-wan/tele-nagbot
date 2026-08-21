@@ -22,30 +22,40 @@ export async function tg(env, method, body) {
       await new Promise((resolve) => setTimeout(resolve, wait * 1000));
       continue;
     }
-    console.log(`telegram ${method} failed: ${JSON.stringify(data)}`);
+    // "message is not modified" is a routine no-op edit (the dashboard refresh
+    // hits it constantly); callers that care check the description themselves.
+    if (!String(data.description || '').includes('message is not modified')) {
+      console.log(`telegram ${method} failed: ${JSON.stringify(data)}`);
+    }
     return data;
   }
 }
 
 // Telegram caps messages at 4096 chars; split on line boundaries (every
-// message here is line-oriented HTML with no tags spanning lines).
+// message here is line-oriented HTML with no tags spanning lines), hard-
+// splitting the rare absurdly long single line.
 const TG_MAX = 4096;
-export async function sendLong(env, chatId, html, opts = {}) {
-  if (html.length <= TG_MAX) return sendMessage(env, chatId, html, null, opts);
-  let last;
+function* chunkLines(html) {
   let chunk = '';
   for (let line of html.split('\n')) {
-    while (line.length > TG_MAX) { // absurdly long single line: hard split
-      last = await sendMessage(env, chatId, line.slice(0, TG_MAX), null, opts);
+    while (line.length > TG_MAX) {
+      if (chunk) { yield chunk; chunk = ''; }
+      yield line.slice(0, TG_MAX);
       line = line.slice(TG_MAX);
     }
     if (chunk && chunk.length + 1 + line.length > TG_MAX) {
-      last = await sendMessage(env, chatId, chunk, null, opts);
+      yield chunk;
       chunk = '';
     }
     chunk = chunk ? `${chunk}\n${line}` : line;
   }
-  if (chunk) last = await sendMessage(env, chatId, chunk, null, opts);
+  if (chunk) yield chunk;
+}
+
+export async function sendLong(env, chatId, html, opts = {}) {
+  if (html.length <= TG_MAX) return sendMessage(env, chatId, html, null, opts);
+  let last;
+  for (const chunk of chunkLines(html)) last = await sendMessage(env, chatId, chunk, null, opts);
   return last;
 }
 
@@ -102,15 +112,7 @@ export async function retimeSentMessage(env, chatId, ref, ttlMs) {
 export async function sendPrivateLong(env, ctx, html) {
   if (html.length <= TG_MAX) return sendPrivate(env, ctx, html);
   let last;
-  let chunk = '';
-  for (const line of html.split('\n')) {
-    if (chunk && chunk.length + 1 + line.length > TG_MAX) {
-      last = await sendPrivate(env, ctx, chunk);
-      chunk = '';
-    }
-    chunk = chunk ? `${chunk}\n${line}` : line;
-  }
-  if (chunk) last = await sendPrivate(env, ctx, chunk);
+  for (const chunk of chunkLines(html)) last = await sendPrivate(env, ctx, chunk);
   return last;
 }
 

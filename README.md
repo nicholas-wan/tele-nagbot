@@ -59,13 +59,21 @@ Manage is deliberately **shared**: tapping ⚙️ swaps the pinned message's but
 | File | Purpose |
 |---|---|
 | `src/index.js` | webhook + `/setup` + `/admin` routes, cron entry |
-| `src/handlers.js` | commands, wizard, callbacks, editor, dashboard, stats, nag copy |
+| `src/handlers.js` | command dispatcher, nag replies/reactions, callback router, help |
+| `src/nag.js` | nag messages, buttons, completion/expiry state transitions |
+| `src/chores.js` | chore actions: create, find, delete, pause, done-early, vacation wake |
+| `src/dashboard.js` | pinned board rendering, schedule/emoji text helpers |
+| `src/manage.js` | ⚙️ Manage and ✏️ editor flows (the `m:`/`e:` callbacks) |
+| `src/wizard.js` | no-time drafts, time picker, custom-time replies (`w:` callbacks) |
+| `src/stats.js` | leaderboard, 6-month log, winner streaks |
+| `src/household.js` | settings, member tracking, names, combined credit |
 | `src/cron.js` | fire/re-nag/expire, digest, weekly wrap, sweep, retention, vacation wake |
 | `src/firing.js` | fire-one-reminder, assignee routing, rotation |
 | `src/parse.js` | `/chore` and `/remind` parser — recurrence lives here (200-char cap) |
 | `src/invite.js` | `/invite`: chrono-node dates, address detection, `.ics` builder |
 | `src/time.js` | timezone, next-occurrence, interval anchoring, quiet hours |
-| `src/stickers.js` · `src/ai.js` · `src/tg.js` | packs/tagging · schedule suggestion · API client |
+| `src/stickers.js` · `src/sticker-commands.js` | runtime pack behavior · setup/tagging commands |
+| `src/ai.js` · `src/tg.js` | schedule suggestion · API client, ephemeral refs, sweep bookkeeping |
 
 Two parsers on purpose: `parse.js` owns recurrence, which chrono-node cannot do; `/invite` is always a one-off, so it uses chrono for far better natural-language dates. chrono reasons in the *system* timezone (UTC in a Worker), so it is handed a reference built from the chat's wall clock and its components are rebuilt with `zonedEpoch` — never trust its `Date` directly. Addresses stay hand-rolled: libpostal is a C library and cannot run in a Worker.
 
