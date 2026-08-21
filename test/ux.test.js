@@ -110,6 +110,44 @@ describe('chat UX', () => {
     expect(calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === 5)).toBe(true);
   });
 
+  // Names are the handles: a chore whose name starts with digits must match by
+  // name, not be parseInt'd into some other chore's legacy number.
+  it('matches a digit-leading chore name by name, not by number', async () => {
+    const meds = {
+      id: 21, display_num: 1, text: '10pm meds', paused: 0,
+      next_fire_at: Date.now() + 3600000, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 22, mi: 0 }), assignee_name: null,
+    };
+    const plants = {
+      id: 22, display_num: 10, text: 'Water plants', paused: 0,
+      next_fire_at: Date.now() + 3600000, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null,
+    };
+    const updates = [];
+    const db = {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() { return null; },
+              async all() {
+                if (sql.includes('SELECT * FROM reminders')) return { results: [meds, plants] };
+                return { results: [] };
+              },
+              async run() { updates.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db };
+    await handleUpdate(env, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/pause 10pm meds' },
+    });
+    const upd = updates.find((u) => u.sql.includes('SET paused'));
+    expect(upd.args[2]).toBe(21); // "10pm meds" — not "Water plants" via display #10
+  });
+
   it('shows exact date choices and Cancel without redundant timezone copy', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {

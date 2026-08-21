@@ -790,9 +790,15 @@ async function handleReaction(env, rx) {
     (r) => r.type === 'emoji' && DONE_REACTIONS.has(r.emoji)
   );
   if (!hit) return;
+  // Ephemeral and public ids come from separate sequences, so the flag has to
+  // be part of the match — same rule as the reply path above.
+  const ref = rx.ephemeral_message_id
+    ? { id: rx.ephemeral_message_id, ephemeral: true }
+    : { id: rx.message_id, ephemeral: false };
   const firing = await env.DB.prepare(
-    "SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?) AND last_message_id = ? AND state = 'nagging'"
-  ).bind(rx.chat.id, rx.chat.id, rx.message_id).first();
+    `SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?)
+       AND last_message_id = ? AND last_message_ephemeral = ? AND state = 'nagging'`
+  ).bind(rx.chat.id, rx.chat.id, ref.id, ref.ephemeral ? 1 : 0).first();
   if (!firing) return;
   const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!reminder) return;
@@ -990,8 +996,10 @@ async function findReminder(env, chatId, args, cmd = 'delete') {
   const raw = String(args).replace('#', '').trim();
   if (!raw) throw new ParseError(`Which chore? e.g. /${cmd} nails (see /list).`);
   const { results } = await env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ?').bind(chatId).all();
-  const num = parseInt(raw, 10);
-  if (num) {
+  // Only an argument that is nothing but a number is a legacy handle — a name
+  // that merely starts with digits ("10pm meds") must reach the name match.
+  if (/^\d+$/.test(raw)) {
+    const num = parseInt(raw, 10);
     const r = results.find((x) => x.display_num === num);
     if (r) return r;
     throw new ParseError(`No reminder ${num} here. See /list.`);

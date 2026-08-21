@@ -2,6 +2,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
 import { fireReminder } from '../src/firing.js';
+import { runCron } from '../src/cron.js';
 import worker from '../src/index.js';
 
 const REMINDER = {
@@ -252,5 +253,81 @@ describe('ephemeral interactions', () => {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/help' },
     });
     expect(find('sendMessage').body.receiver_user_id).toBeUndefined();
+  });
+
+  // Ephemeral and public message ids are separate sequences that can collide.
+  // A 👍 on an ordinary public message must never complete an ephemeral nag
+  // that happens to wear the same number.
+  it('ignores a public reaction that collides with an ephemeral nag id', async () => {
+    const firing = {
+      id: 5, reminder_id: 10, chat_id: 1, state: 'nagging',
+      last_message_id: 77, last_message_ephemeral: 1, nag_user_id: 2,
+      snoozes_used: 0, nag_count: 0, fired_at: Date.now(), scored: 1,
+    };
+    const runs = [];
+    const DB = {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM firings')) {
+                  // One ephemeral nag with id 77: a correct lookup binds the
+                  // ephemeral flag alongside the id and only matches on 1.
+                  if (!sql.includes('last_message_ephemeral')) return firing;
+                  return args[3] === 1 ? firing : null;
+                }
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                if (sql.includes('FROM reminders')) return REMINDER;
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() { runs.push(sql); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB }, {
+      message_reaction: {
+        chat: { id: 1 }, message_id: 77, user: { id: 2, first_name: 'Nick' },
+        new_reaction: [{ type: 'emoji', emoji: '👍' }],
+      },
+    });
+    expect(runs.some((sql) => sql.includes("state = 'done'"))).toBe(false);
+  });
+
+  // The draft sweep must not aim public edit/delete calls at ephemeral ids —
+  // in the public sequence the same number is someone else's message. The
+  // sent_messages sweep owns removing those.
+  it('leaves ephemeral wizard messages to the sent-messages sweep', async () => {
+    const stmt = (sql, drafts) => ({
+      async first() { return null; },
+      async all() {
+        if (sql.includes('FROM drafts')) return { results: drafts };
+        return { results: [] };
+      },
+      async run() { return { meta: { changes: 1 } }; },
+    });
+    const cronDb = (drafts) => ({
+      prepare(sql) { return { ...stmt(sql, drafts), bind: () => stmt(sql, drafts) }; },
+    });
+    const draft = {
+      id: 1, chat_id: 1, text: 'laundry',
+      wizard_msg_id: 77, wizard_msg_ephemeral: 1,
+      prompt_msg_id: 78, prompt_msg_ephemeral: 1,
+    };
+    await runCron({ BOT_TOKEN: 'token', DB: cronDb([draft]) });
+    expect(find('editMessageText')).toBeUndefined();
+    expect(find('deleteMessage')).toBeUndefined();
+
+    calls.length = 0;
+    // A draft whose messages were genuinely public still gets tidied here.
+    await runCron({
+      BOT_TOKEN: 'token',
+      DB: cronDb([{ ...draft, wizard_msg_ephemeral: 0, prompt_msg_ephemeral: 0 }]),
+    });
+    expect(find('editMessageText').body.message_id).toBe(77);
+    expect(find('deleteMessage').body.message_id).toBe(78);
   });
 });

@@ -58,12 +58,18 @@ async function pruneDraftsAndTrash(env, now) {
     'SELECT * FROM drafts WHERE created_at < ?'
   ).bind(cutoff).all();
   for (const draft of results) {
-    if (draft.wizard_msg_id) {
+    // Ephemeral wizard/prompt ids live in their own sequence: the public
+    // edit/delete here could hit an unrelated group message wearing the same
+    // number. Those messages are recorded in sent_messages at send time, so
+    // the sweep already removes them — only public ones need tidying here.
+    if (draft.wizard_msg_id && !draft.wizard_msg_ephemeral) {
       await editMessage(env, draft.chat_id, draft.wizard_msg_id,
         `⌛ Time picker expired for <s>${esc(draft.text)}</s>. Send /remind to start again.`,
         { inline_keyboard: [] });
     }
-    if (draft.prompt_msg_id) await deleteMessage(env, draft.chat_id, draft.prompt_msg_id);
+    if (draft.prompt_msg_id && !draft.prompt_msg_ephemeral) {
+      await deleteMessage(env, draft.chat_id, draft.prompt_msg_id);
+    }
   }
   await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(cutoff).run();
   await env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(cutoff).run();
