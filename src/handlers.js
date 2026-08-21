@@ -460,7 +460,12 @@ export async function handleUpdate(env, update) {
     else if (cmd === 'tags') result = await cmdTags(env, ctx, args);
     else handled = false;
 
-    if (!handled) return sendPrivate(env, ctx, `😿 Unknown command /${esc(cmd)}. Try /help.`);
+    if (!handled) {
+      // A typo'd command was the one message class nothing ever swept — tidy
+      // it away like any other command before the private hint.
+      if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
+      return sendPrivate(env, ctx, `😿 Unknown command /${esc(cmd)}. Try /help.`);
+    }
     // Legacy clients still post commands as ordinary group messages; tidy those
     // away. An ephemeral command was never public and carries message_id 0, so
     // there is nothing to delete — guard rather than calling deleteMessage(0).
@@ -810,14 +815,16 @@ async function handleNagReply(env, msg, firing, ctx) {
   const text = msg.text.trim();
   const tz = await getTz(env, msg.chat.id);
   ctx = ctx || replyCtx(env, msg.chat.id, msg.from && msg.from.id);
-  if (/^done\b/i.test(text) || text.includes('✅')) {
+  // Only a complete done-phrase counts — "done?", "not done ✅?" are chat
+  // between people, and completing on those would credit the asker.
+  if (/^(?:done(?:\s+(?:together|both)\b|\s+with\s+.+?)?|✅)[\s!.✅]*$/i.test(text)) {
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (!reminder) return;
     let by = senderName(msg.from);
     // "done together"/"done both" credits the whole roster; "done with @jane"
     // credits the replier plus the named helpers.
     const together = /^done\s+(?:together|both)\b/i.test(text);
-    const withM = text.match(/^done\s+with\s+(.+?)\s*!*$/i);
+    const withM = text.match(/^done\s+with\s+(.+?)[\s!.✅]*$/i);
     if (together || withM) {
       const roster = await householdRoster(env, msg.chat.id);
       const others = withM
@@ -855,6 +862,12 @@ async function handleNagReply(env, msg, firing, ctx) {
       return;
     }
     return sendPrivate(env, ctx, `😴 Snoozed until ${fmtLocal(until, tz)}.`);
+  }
+  // A reply that starts with "snooze" but didn't parse must not die silently —
+  // the person walks away sure it's snoozed while the re-nag stays scheduled.
+  if (/^snooze\b/i.test(text)) {
+    return sendPrivate(env, ctx,
+      '😿 The cats couldn\'t read that snooze — try <code>snooze 2h</code> or <code>snooze 30m</code>, or tap 😴 Snooze… under the nag.');
   }
 }
 

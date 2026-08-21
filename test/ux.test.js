@@ -148,6 +148,79 @@ describe('chat UX', () => {
     expect(upd.args[2]).toBe(21); // "10pm meds" — not "Water plants" via display #10
   });
 
+  // Harness for replies to a live nag: message 77 is the nag, firing 5 owns it.
+  function nagReplyDb(runs = []) {
+    const firing = {
+      id: 5, reminder_id: 10, chat_id: 1, state: 'nagging', fired_at: Date.now(),
+      last_message_id: 77, last_message_ephemeral: 0, snoozes_used: 0, nag_count: 0, scored: 1,
+    };
+    const reminder = {
+      id: 10, chat_id: 1, text: 'Water plants', paused: 0, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null, scored: 1,
+    };
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM firings') && sql.includes('last_message_id')) return firing;
+                if (sql.includes('SELECT * FROM firings WHERE id')) return firing;
+                if (sql.includes('FROM reminders')) return reminder;
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() {
+                if (sql.includes('SELECT * FROM reminders')) return { results: [reminder] };
+                return { results: [] };
+              },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const nagReply = (text) => ({
+    message: {
+      message_id: 6, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text,
+      reply_to_message: { message_id: 77, chat: { id: 1 } },
+    },
+  });
+
+  it('does not complete a chore on a "done?" question', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: nagReplyDb(runs) }, nagReply('done?'));
+    expect(runs.some((u) => u.sql.includes("state = 'done'"))).toBe(false);
+  });
+
+  it('still completes on a real done reply', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: nagReplyDb(runs) }, nagReply('done!'));
+    expect(runs.some((u) => u.sql.includes("state = 'done'"))).toBe(true);
+  });
+
+  it('answers instead of ignoring a snooze it could not read', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: nagReplyDb(runs) }, nagReply('snooze until 6pm'));
+    expect(runs.some((u) => u.sql.includes('snoozes_used'))).toBe(false);
+    const hint = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(hint.body.text).toContain('snooze 2h');
+    expect(hint.body.receiver_user_id).toBe(2);
+  });
+
+  it('tidies away a typo’d command like any other', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/lst' },
+    });
+    expect(calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === 5)).toBe(true);
+    const reply = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(reply.body.text).toContain('Unknown command');
+    expect(reply.body.receiver_user_id).toBe(2);
+  });
+
   it('shows exact date choices and Cancel without redundant timezone copy', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {
