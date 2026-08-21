@@ -1179,14 +1179,59 @@ async function cmdDone(env, ctx, args, by, tz) {
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
-  if (!firing) throw new ParseError(`"${r.text}" is not currently nagging.`);
   let credit = by;
   if (/\b(together|both)\b/i.test(String(args))) {
     const roster = await householdRoster(env, chatId);
     credit = creditTogether(by, [...roster]);
   }
+  if (!firing) {
+    if (r.paused) throw new ParseError(`"${r.text}" is paused — /resume ${r.text} first.`);
+    if (r.next_fire_at == null) {
+      throw new ParseError(`"${r.text}" has nothing scheduled — /delete it or make a new /remind.`);
+    }
+    const early = await completeEarly(env, r, credit, tz);
+    if (!early) return sendPrivate(env, ctx, '😼 Someone beat you to it — already handled.');
+    return;
+  }
   const won = await completeFiring(env, firing, r, credit, tz);
   if (!won) return sendPrivate(env, ctx, '😼 Someone beat you to it — already handled.');
+}
+
+// Doing a chore before it nags still deserves the credit: complete the
+// upcoming occurrence now and advance the schedule past it, so the diligent
+// never have to wait for the nag just to tap Done. Returns false when a race
+// got there first and nothing else could be completed.
+async function completeEarly(env, r, credit, tz) {
+  const now = Date.now();
+  // Claim the upcoming occurrence with the usual compare-and-swap. Recurring
+  // chores advance past the claimed slot (the /skip rule); a one-off is spent
+  // outright, so its conditional delete is the claim.
+  const claim = r.schedule_kind === 'once'
+    ? await env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
+        .bind(r.id, r.next_fire_at).run()
+    : await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+        .bind(nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz),
+          r.id, r.next_fire_at).run();
+  if (!claim.meta.changes) {
+    // The occurrence fired while we looked — complete its live nag instead.
+    const firing = await env.DB.prepare(
+      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+    ).bind(r.id).first();
+    return Boolean(firing && await completeFiring(env, firing, r, credit, tz));
+  }
+  await env.DB.prepare(
+    `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
+     VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
+  ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
+  // The receipt is the shared record — there is no nag message to edit.
+  const next = r.schedule_kind === 'once' ? null
+    : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
+  await sendMessage(env, r.chat_id,
+    `😻 <s>${esc(r.text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
+    (next && next.next_fire_at ? `\nNext: ${fmtLocal(next.next_fire_at, tz)}` : ''),
+    null, { silent: true, ttl: RECEIPT_TTL_MS });
+  await updateDashboard(env, r.chat_id);
+  return true;
 }
 
 // /poke: re-send every outstanding nag right now, loud. Doesn't advance the
@@ -1630,6 +1675,11 @@ async function choreActionsMarkup(env, r, tz) {
     { text: '✅ Done', callback_data: `m:done:${r.id}` },
     { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
   ]);
+  // Not nagging yet but scheduled: doing it ahead of the nag still counts.
+  else if (!r.paused && r.next_fire_at != null) rows.push([
+    { text: '✅ Done early', callback_data: `m:done:${r.id}` },
+    { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
+  ]);
   rows.push([{ text: '✏️ Edit details', callback_data: `m:edit:${r.id}` }]);
   rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `m:${r.paused ? 'resume' : 'pause'}:${r.id}` }]);
   if (r.schedule_kind !== 'once' && r.next_fire_at != null) {
@@ -1778,9 +1828,15 @@ async function handleCallback(env, cb) {
       const firing = await env.DB.prepare(
         "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
       ).bind(r.id).first();
-      if (!firing) return answerCallback(env, cb.id, 'This chore is not nagging now.');
       let credit = senderName(cb.from);
       if (action === 'doneall') credit = creditTogether(credit, [...await householdRoster(env, r.chat_id)]);
+      if (!firing) {
+        if (r.paused || r.next_fire_at == null) {
+          return answerCallback(env, cb.id, 'This chore is not nagging now.');
+        }
+        const early = await completeEarly(env, r, credit, tz);
+        return answerCallback(env, cb.id, early ? 'Done early 😻' : 'Already handled 👍');
+      }
       const won = await completeFiring(env, firing, r, credit, tz);
       return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
     }

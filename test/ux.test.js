@@ -210,6 +210,52 @@ describe('chat UX', () => {
     expect(hint.body.receiver_user_id).toBe(2);
   });
 
+  // Doing a chore ahead of the nag earns the credit instead of "is not
+  // currently nagging": the upcoming occurrence completes and the schedule
+  // advances past it.
+  it('gives done-early credit for a chore that is not nagging yet', async () => {
+    const reminder = {
+      id: 10, display_num: 3, chat_id: 1, text: 'Water plants', paused: 0,
+      next_fire_at: 1_900_000_000_000, schedule_kind: 'daily',
+      schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null, scored: 1,
+    };
+    const runs = [];
+    const db = {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes("state = 'nagging'")) return null;
+                if (sql.includes('SELECT next_fire_at')) return { next_fire_at: 1_900_086_400_000 };
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() {
+                if (sql.includes('SELECT * FROM reminders')) return { results: [reminder] };
+                return { results: [] };
+              },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/done water plants' },
+    });
+    // The upcoming slot is claimed conditionally and a done firing is recorded.
+    const claim = runs.find((u) => u.sql.includes('SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'));
+    expect(claim.args[1]).toBe(10);
+    expect(claim.args[2]).toBe(1_900_000_000_000);
+    const insert = runs.find((u) => u.sql.includes('INSERT INTO firings') && u.sql.includes("'done'"));
+    expect(insert.args).toContain('Nick');
+    // The receipt is public and names the next occurrence.
+    const receipt = calls.find((c) => c.url.endsWith('/sendMessage') && /done early/.test(c.body.text || ''));
+    expect(receipt.body.receiver_user_id).toBeUndefined();
+    expect(receipt.body.text).toContain('Next:');
+  });
+
   it('tidies away a typo’d command like any other', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {

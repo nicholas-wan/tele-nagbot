@@ -24,6 +24,7 @@ Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done togeth
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
 - Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow** — a postponement, not a snooze: it carries `fired_at` forward so the expiry window moves with the nag. Both count against the 3-snooze cap.
 - **One confirmation per new chore, never two.** Unassigned: a public "added" line carrying the Undo. Assigned: a private copy only, because announcing it would leak what its private nag hides.
+- Doing a chore before it nags still counts: `/done <chore>` (or ✅ Done early in Manage) records the credit and advances the schedule past the upcoming slot; a one-off is spent outright.
 - `/chore` scores, `/remind` does not, and they look identical otherwise — so a reminder is flagged `(reminder — no points)` on its nag and `· reminder` on the board. Chores are the default and stay unmarked. **Done together stays on both**: it records who did the work, points or not.
 - Every message the bot sends is recorded in `sent_messages` and swept — a day for most, ~2h for done-receipts and celebration stickers (`RECEIPT_TTL_MS`). The pinned dashboard (`keep: true`) is the sole exception; ✅ OK just gets there sooner.
 - Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
