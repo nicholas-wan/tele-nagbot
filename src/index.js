@@ -2,7 +2,8 @@
 //  - fetch: Telegram webhook (validated with the secret token header)
 //  - scheduled: every-minute cron that fires reminders and re-nags
 
-import { handleUpdate, updateDashboard } from './handlers.js';
+import { handleUpdate } from './handlers.js';
+import { updateDashboard } from './dashboard.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
 import { answerCallback, armWebhookAnswer, tg } from './tg.js';

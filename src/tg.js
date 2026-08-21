@@ -97,6 +97,29 @@ export async function retimeSentMessage(env, chatId, ref, ttlMs) {
   }
 }
 
+// sendLong's chunking, but private. Only the final chunk keeps the callback
+// credential, which sendPrivate consumes on first use anyway.
+export async function sendPrivateLong(env, ctx, html) {
+  if (html.length <= TG_MAX) return sendPrivate(env, ctx, html);
+  let last;
+  let chunk = '';
+  for (const line of html.split('\n')) {
+    if (chunk && chunk.length + 1 + line.length > TG_MAX) {
+      last = await sendPrivate(env, ctx, chunk);
+      chunk = '';
+    }
+    chunk = chunk ? `${chunk}\n${line}` : line;
+  }
+  if (chunk) last = await sendPrivate(env, ctx, chunk);
+  return last;
+}
+
+// True only for a real public group message. Ephemeral messages report
+// message_id 0, so a falsy check is the guard — not `!== undefined`.
+export function isPublicMessage(msg) {
+  return Boolean(msg && msg.message_id && !msg.ephemeral_message_id);
+}
+
 export async function sendMessage(env, chatId, html, replyMarkup, opts = {}) {
   const body = { chat_id: chatId, text: html, parse_mode: 'HTML' };
   const markup = withOk(replyMarkup, opts);

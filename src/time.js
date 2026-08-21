@@ -2,6 +2,7 @@
 // household timezone (IANA name in settings) is used for parsing and display.
 
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const DAY_NAMES = WD;
 
 export function localParts(epochMs, tz) {
   const dtf = new Intl.DateTimeFormat('en-US', {

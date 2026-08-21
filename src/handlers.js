@@ -1,113 +1,29 @@
-// Webhook update handling: commands and inline-button callbacks.
+// Webhook update handling: the command dispatcher, nag replies and reactions,
+// and the callback router. Each button family's handler lives with its
+// feature — editor/manage in manage.js, wizard in wizard.js — and the nag
+// lifecycle, dashboard, chore actions, and stats each have their own module.
 
-import { sendMessage, editMessage, deleteMessage, editReplyMarkup, answerCallback, esc, mentionHtml, pinMessage, unpinMessage,
-         replyCtx, sendPrivate, deleteEphemeral, editRef, deleteRef, msgRef, callbackRef,
-         recordSentMessage, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
-import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtShort, fmtTime, fmtClock, localParts, zonedEpoch, weekStart, deferQuietHours } from './time.js';
-import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, sendCelebrationSticker } from './stickers.js';
-import { tg } from './tg.js';
-import { fireReminder } from './firing.js';
-import { suggestSchedule } from './ai.js';
+import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc,
+         replyCtx, sendPrivate, editRef, deleteRef, callbackRef,
+         isPublicMessage, sendPrivateLong, tg } from './tg.js';
+import { parseRemind, ParseError, NoTimeError } from './parse.js';
+import { nextOccurrence, fmtLocal, fmtShort, fmtClock, deferQuietHours } from './time.js';
+import { getTz, senderName, isScored, householdRoster, canonName, creditTogether,
+         rememberMember, isMember } from './household.js';
+import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
+         editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
+         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
+import { updateDashboard, choreListHtml } from './dashboard.js';
+import { findReminder, createReminder, confirmNewChore, fireIfDue,
+         deleteReminder, setReminderPaused, completeEarly, wakeChat } from './chores.js';
+import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
+import { startWizard, tryDraftTime, handleWizardCallback } from './wizard.js';
+import { cmdStats } from './stats.js';
+import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
-
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MAX_SNOOZES = 3;
-export const EXPIRE_AFTER_MS = 24 * 3600000;
 
 // Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
 let botUsername = null;
-
-export async function getTz(env, chatId) {
-  const row = await env.DB.prepare('SELECT tz FROM settings WHERE chat_id = ?').bind(chatId).first();
-  return row ? row.tz : 'Asia/Singapore';
-}
-
-function senderName(from) {
-  return from.username ? `@${from.username}` : from.first_name || 'someone';
-}
-
-// /chore and /remind differ only in whether they score. Done together stays on
-// both: it records who actually did the thing, which matters even when no
-// points ride on it — dropping it once cost a reminder its shared credit.
-export const isScored = (row) => (row && row.scored != null ? Boolean(row.scored) : true);
-
-export function nagButtons(firingId, scored = true) {
-  return {
-    inline_keyboard: [
-      [
-        { text: '✅ Done', callback_data: `d:${firingId}` },
-        { text: '🤝 Done together', callback_data: `b:${firingId}` },
-        { text: '😴 Snooze…', callback_data: `s:${firingId}` },
-      ],
-      [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
-    ],
-  };
-}
-
-const emptyKeyboard = () => ({ inline_keyboard: [] });
-
-function snoozedButtons(firingId, scored = true) {
-  return { inline_keyboard: [
-    [
-      { text: '✅ Done', callback_data: `d:${firingId}` },
-      { text: '🤝 Done together', callback_data: `b:${firingId}` },
-      { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
-    ],
-    [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
-  ] };
-}
-
-// Everyone the cats have seen tap Done in this chat (combined credits split).
-const CREDIT_SEP = ' & ';
-async function householdRoster(env, chatId) {
-  const { results } = await env.DB.prepare(
-    "SELECT DISTINCT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
-  ).bind(chatId).all();
-  const set = new Set();
-  for (const r of results) {
-    for (const p of String(r.done_by).split(CREDIT_SEP)) if (p.trim()) set.add(p.trim());
-  }
-  return set;
-}
-
-// "jane" typed by hand matches the roster's "@jane" spelling.
-function canonName(roster, name) {
-  const norm = (s) => String(s).replace(/^@/, '').toLowerCase();
-  for (const r of roster) if (norm(r) === norm(name)) return r;
-  return name;
-}
-
-// Combined credit: the actor first, then the given others, deduped.
-function creditTogether(by, others) {
-  const seen = new Set([by]);
-  for (const o of others) seen.add(o);
-  return [...seen].join(CREDIT_SEP);
-}
-
-function snoozeButtons(firingId, tz) {
-  const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
-  const nine = nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz);
-  return {
-    inline_keyboard: [
-      [z('30m', '30'), z('1h', '60'), z('2h', '120')],
-      [z(fmtShort(nine, tz), 't'), z('📅 Tomorrow', 'day')],
-      [z('↩️ Back', 'b')],
-    ],
-  };
-}
-
-// Undo removes the chore that was just made; OK just clears the confirmation.
-function undoButtons(reminderId) {
-  return { inline_keyboard: [[
-    { text: '↩️ Undo', callback_data: `u:${reminderId}` },
-    { text: '✅ OK', callback_data: 'ok' },
-  ]] };
-}
-
-function dashboardButtons() {
-  return { inline_keyboard: [[{ text: '⚙️ Manage chores', callback_data: 'm:list' }]] };
-}
 
 // New members (or the bot itself) joining get a short intro.
 async function handleNewMembers(env, msg) {
@@ -123,226 +39,6 @@ async function handleNewMembers(env, msg) {
     `${hello}\nTry:\n/remind take out trash 7pm daily\n/remind dishes now\n/list · /stats · /help`);
 }
 
-// Escalating nag lines, matched to whichever cat is on the sticker that
-// accompanies the message.
-const NAG_LINES = {
-  latte: [
-    'Mrow! A humble request from Latte 🐾',
-    'Latte is staring at you. Intensely. 👀',
-    'Latte just knocked a pen off the desk in protest 😾',
-    'Latte is now sitting on this chore. It has not done itself 🙀',
-  ],
-  mocha: [
-    'Mrow! A humble request from Mocha 🐾',
-    'Mocha is watching you. Unblinking. 👀',
-    'Mocha just shoved a glass toward the edge of the table 😾',
-    'Mocha is now sitting on this chore. It has not done itself 🙀',
-  ],
-  both: [
-    'Mrow! A humble request from Latte &amp; Mocha 🐾',
-    'Latte &amp; Mocha are staring at you. Intensely. 👀',
-    'Mocha just knocked a pen off the desk. Latte approved. 😾',
-    'Both cats are now sitting on this chore. It has not done itself 🙀',
-  ],
-};
-
-export function nagHtml(reminder, nagCount, cat = 'both') {
-  // Whether this counts is decided here, at the moment someone taps Done.
-  const kind = isScored(reminder) ? '' : ' <i>(reminder — no points)</i>';
-  const head = `🐱 <b>${esc(reminder.text)}</b>${kind}${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
-  const lines = NAG_LINES[cat] || NAG_LINES.both;
-  const line = lines[Math.min(nagCount, lines.length - 1)];
-  const who = reminder.assignee_name
-    ? `${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)} — `
-    : '';
-  return `${head}\n${who}${line}`;
-}
-
-function snoozedHtml(reminder, until, by, tz) {
-  const who = reminder.assignee_name
-    ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
-    : '';
-  return `😴 <b>${esc(reminder.text)}</b>\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${who}`;
-}
-
-// Every nag now lives in the group; only its visibility differs. Kept as a
-// function because nag_chat_id still exists for pre-ephemeral rows, all NULL.
-export const nagChat = (firing) => firing.nag_chat_id || firing.chat_id;
-
-// A nag is public or ephemeral, and the two use different id spaces and
-// different edit/delete methods. These three keep that distinction in one
-// place so the lifecycle below never has to care which kind it is holding.
-const nagRef = (firing) => (firing.last_message_id
-  ? { id: firing.last_message_id, ephemeral: Boolean(firing.last_message_ephemeral) }
-  : null);
-const nagCtx = (env, firing) => replyCtx(env, nagChat(firing), firing.nag_user_id);
-const isEphemeralNag = (firing) => Boolean(firing.last_message_ephemeral);
-
-function editNag(env, firing, html, markup) {
-  return editRef(env, nagCtx(env, firing), nagChat(firing), nagRef(firing), html, markup);
-}
-
-export function deleteNag(env, firing) {
-  return deleteRef(env, nagCtx(env, firing), nagChat(firing), nagRef(firing));
-}
-
-// Re-send a firing's nag with the same visibility as the original, so a re-nag
-// or a /poke never quietly promotes a private chore into public view.
-export async function sendNag(env, firing, html, markup, opts = {}) {
-  if (firing.nag_user_id) {
-    return msgRef(await sendPrivate(env, nagCtx(env, firing), html, markup, opts));
-  }
-  return msgRef(await sendMessage(env, nagChat(firing), html, markup, opts));
-}
-
-// Remove a nag message that lost its compare-and-swap after being sent.
-export function deleteNagRef(env, firing, ref) {
-  return deleteRef(env, nagCtx(env, firing), nagChat(firing), ref);
-}
-
-async function showPausedCard(env, firing, reminder, by, tz, until = null) {
-  if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
-  await env.DB.prepare('UPDATE firings SET last_sticker_id = NULL WHERE id = ?').bind(firing.id).run();
-  if (!firing.last_message_id) return;
-  const state = until
-    ? `Household paused until ${fmtLocal(until, tz)}.`
-    : `Paused by ${esc(by)}.`;
-  await editNag(env, firing, `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, emptyKeyboard());
-}
-
-async function silenceOldNag(env, firing, text, note) {
-  if (!firing.last_message_id) return;
-  await editNag(env, firing, `${note} <s>${esc(text)}</s>`, emptyKeyboard());
-}
-
-export async function completeFiring(env, firing, reminder, byName, tz) {
-  const now = Date.now();
-  // Only the winner of this state transition performs the side effects: a
-  // concurrent cron expiry or second Done tap loses here and returns false.
-  const res = await env.DB.prepare(
-    "UPDATE firings SET state = 'done', done_by = ?, done_at = ?, next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
-  ).bind(byName, now, firing.id).run();
-  if (!res.meta.changes) return false;
-  // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.
-  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
-  if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
-  // An ephemeral nag had no sticker to begin with — one now would be visible to
-  // the whole group and give away a chore only one person could see.
-  const celebration = isEphemeralNag(firing)
-    ? { cat: 'both' }
-    : await sendCelebrationSticker(env, nagChat(firing), firing.id);
-  const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
-    : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
-    : 'The cats purr approvingly.';
-  if (firing.last_message_id) {
-    await editNag(env, firing,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. ${purr}`,
-      emptyKeyboard());
-    // The nag earned a day; its receipt only needs to be glanced at.
-    await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
-  }
-  // A privately-nagged chore leaves a quiet public receipt: the household still
-  // gets to see the chore was done, just not that it was pending.
-  if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id) {
-    await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, null,
-      { silent: true, ttl: RECEIPT_TTL_MS });
-  }
-  if (reminder.schedule_kind === 'once') {
-    await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
-  }
-  await updateDashboard(env, firing.chat_id);
-  return true;
-}
-
-export async function expireFiring(env, firing, reminder, { silent } = {}) {
-  const res = await env.DB.prepare(
-    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
-  ).bind(firing.id).run();
-  if (!res.meta.changes) return false;
-  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
-  await silenceOldNag(env, firing, reminder.text, '🙀');
-  if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
-  if (!silent) {
-    // The tombstone always lands in the group — accountability is household-wide.
-    await sendMessage(env, firing.chat_id,
-      `🙀 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`);
-  }
-  if (reminder.schedule_kind === 'once') {
-    await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
-  }
-  await updateDashboard(env, firing.chat_id);
-  return true;
-}
-
-// One pinned message per chat, silently edited in place: the full chore list
-// (nagging marked 🔔, paused included). Created on first need, unpinned and
-// removed only when the chore list is empty.
-export async function updateDashboard(env, chatId) {
-  try {
-    const row = await env.DB.prepare(
-      'SELECT dashboard_msg_id, tz FROM settings WHERE chat_id = ?'
-    ).bind(chatId).first();
-    const msgId = row && row.dashboard_msg_id;
-    const tz = (row && row.tz) || 'Asia/Singapore';
-    let html = await choreListHtml(env, chatId, tz);
-
-    if (!html) {
-      if (msgId) {
-        await unpinMessage(env, chatId, msgId);
-        await deleteMessage(env, chatId, msgId);
-        await env.DB.prepare('UPDATE settings SET dashboard_msg_id = NULL WHERE chat_id = ?').bind(chatId).run();
-      }
-      return;
-    }
-    // A pin is a single message; past the 4096 cap, trim on a line boundary.
-    if (html.length > 4000) {
-      html = html.slice(0, html.lastIndexOf('\n', 3980)) + '\n… more — /list';
-    }
-
-    if (msgId) {
-      const res = await editMessage(env, chatId, msgId, html, dashboardButtons());
-      if (res.ok || String(res.description || '').includes('not modified')) return;
-      // Message was deleted by hand — fall through and recreate it.
-    }
-    // keep: the pinned dashboard is the one message the daily sweep spares.
-    const sent = await sendMessage(env, chatId, html, dashboardButtons(), { silent: true, keep: true });
-    if (sent.ok) {
-      // A board that exists but isn't pinned is worse than a missing one: it
-      // scrolls away and nobody notices it stopped being the board. Say so
-      // loudly rather than failing silently.
-      const pinned = await pinMessage(env, chatId, sent.result.message_id);
-      if (!pinned.ok) {
-        console.log(`dashboard pin FAILED for chat ${chatId}: ${pinned.description || 'unknown'} ` +
-          '— bot needs the Pin Messages admin right');
-      }
-      await env.DB.prepare(
-        'INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET dashboard_msg_id = excluded.dashboard_msg_id'
-      ).bind(chatId, sent.result.message_id).run();
-    } else {
-      console.log(`dashboard send failed for chat ${chatId}: ${sent.description || 'unknown'}`);
-    }
-  } catch (e) {
-    console.log(`updateDashboard failed: ${e}`);
-  }
-}
-
-function describeSchedule(r) {
-  const d = JSON.parse(r.schedule_detail);
-  if (r.schedule_kind === 'daily') return `daily ${fmtTime(d.h, d.mi)}`;
-  if (r.schedule_kind === 'weekly') {
-    return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')} ${fmtTime(d.h, d.mi)}`;
-  }
-  if (r.schedule_kind === 'monthly') return `on the ${d.dom} at ${fmtTime(d.h, d.mi)}`;
-  if (r.schedule_kind === 'interval') {
-    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`;
-    const w = d.days % 7 === 0 ? d.days / 7 : 0;
-    return w ? `every ${w} week${w > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`
-             : `every ${d.days} days at ${fmtTime(d.h, d.mi)}`;
-  }
-  return 'once';
-}
-
 // Household lock: only chats listed in ALLOWED_CHATS (comma-separated ids)
 // are served; everything else — stranger DMs included — is dropped silently.
 // Missing configuration fails closed: a deploy must explicitly name every
@@ -350,20 +46,6 @@ function describeSchedule(r) {
 function chatAllowed(env, chatId) {
   const allowed = String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean);
   return allowed.length > 0 && chatId != null && allowed.includes(String(chatId));
-}
-
-// Group members the bot has seen; source of DM routing for assigned nags.
-async function rememberMember(env, chatId, from) {
-  await env.DB.prepare(
-    `INSERT INTO members (chat_id, user_id, username, first_name, last_seen) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(chat_id, user_id) DO UPDATE SET username = excluded.username,
-       first_name = excluded.first_name, last_seen = excluded.last_seen`
-  ).bind(chatId, from.id, from.username || null, from.first_name || null, Date.now()).run();
-}
-
-async function isMember(env, userId) {
-  const row = await env.DB.prepare('SELECT 1 AS x FROM members WHERE user_id = ?').bind(userId).first();
-  return Boolean(row);
 }
 
 // A household member's private chat: nag interactions work (buttons arrive as
@@ -480,12 +162,6 @@ export async function handleUpdate(env, update) {
   }
 }
 
-// True only for a real public group message. Ephemeral messages report
-// message_id 0, so a falsy check is the guard — not `!== undefined`.
-function isPublicMessage(msg) {
-  return Boolean(msg && msg.message_id && !msg.ephemeral_message_id);
-}
-
 function helpText(section = 'home') {
   if (section === 'schedule') return '⏰ <b>Scheduling examples</b>\n\n' +
     '<code>/remind trash 7pm daily</code>\n' +
@@ -560,124 +236,13 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   p.scored = scored;
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   await confirmNewChore(env, ctx, by, p, tz, id, html);
-  // "now" reminders fire on the spot instead of waiting for the next cron tick.
-  if (p.firstFireAt <= Date.now() + 500) {
-    const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
-    if (row) await fireReminder(env, row, Date.now(), tz);
-  }
+  await fireIfDue(env, id, tz);
 }
 
-// Exactly one confirmation per new chore, never two saying the same thing.
-//
-// An unassigned chore is the household's problem, so the public line is the
-// confirmation and carries the Undo. An assigned one is deliberately not
-// announced — that would hand the group what its private nag hides — so the
-// creator's own private copy is the only one. Either way the pinned dashboard
-// lists it, so nothing is lost by keeping this to a single message.
-async function confirmNewChore(env, ctx, by, p, tz, id, html) {
-  const buttons = undoButtons(id);
-  if (p.assigneeName || p.assigneeUserId) return sendPrivate(env, ctx, html, buttons);
-  return sendMessage(env, ctx.chatId,
-    `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`, buttons);
-}
-
-async function createReminder(env, chatId, p, by, tz) {
-  // Smallest unused per-chat number, so numbering starts at 1 and fills gaps.
-  const { results } = await env.DB.prepare(
-    'SELECT display_num FROM reminders WHERE chat_id = ?'
-  ).bind(chatId).all();
-  const used = new Set(results.map((r) => r.display_num));
-  let num = 1;
-  while (used.has(num)) num++;
-
-  const res = await env.DB.prepare(
-    `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    chatId, num, p.text, p.assigneeName, p.assigneeUserId, p.kind,
-    JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now(),
-    p.scored != null ? (p.scored ? 1 : 0) : 1
-  ).run();
-  const id = res.meta.last_row_id;
-  await updateDashboard(env, chatId);
-  const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
-  const html = `📝 <b>${esc(p.text)}</b>${forWho}\nFirst reminder: ${fmtLocal(p.firstFireAt, tz)}` +
-    (p.kind !== 'once' ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '');
-  return { id, html };
-}
-
-// No time given: park the parsed pieces as a draft and offer tap-to-choose
-// times instead of an error. Workers AI gets one shot at guessing the intent;
-// a valid guess becomes the top button — applied only if someone taps it.
-async function startWizard(env, ctx, partial, rawArgs, tz, scored) {
-  const chatId = ctx.chatId;
-  const now = Date.now();
-  let ai = null;
-  if (rawArgs && env.AI) {
-    try {
-      ai = await suggestSchedule(env, rawArgs, tz, now);
-    } catch (e) {
-      console.log(`ai suggest failed: ${e}`);
-    }
-  }
-  const res = await env.DB.prepare(
-    `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, ai_json, created_at, scored)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
-    JSON.stringify(partial.detail), JSON.stringify(partial.nagIntervals),
-    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0
-  ).run();
-  const id = res.meta.last_row_id;
-
-  const btn = (label, code) => ({ text: label, callback_data: `w:${id}:${code}` });
-  const seven = nextOccurrence('daily', { h: 19, mi: 0 }, now, tz);
-  const p = localParts(now, tz);
-  const endOfToday = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
-  const tomorrowNine = nextOccurrence('daily', { h: 9, mi: 0 }, endOfToday, tz);
-  const keyboard = partial.kind === 'once'
-    ? [
-        [btn('In 15 min', 'r15'), btn('In 1 hour', 'r60')],
-        [btn(fmtShort(seven, tz), `a${seven}`), btn(fmtShort(tomorrowNine, tz), `a${tomorrowNine}`)],
-        [btn('Every day 7pm', 'd19'), btn('✏️ Type a time', 'custom')],
-      ]
-    : [
-        [btn('8am', 'h8'), btn('12pm', 'h12'), btn('7pm', 'h19'), btn('9pm', 'h21')],
-        [btn('✏️ Type a time', 'custom')],
-      ];
-  if (ai) keyboard.unshift([btn(`✨ ${ai.label}`, 'ai')]);
-  keyboard.push([btn('✕ Cancel', 'cancel')]);
-
-  const kindNote = partial.kind === 'once' ? '' :
-    ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
-        partial.kind === 'monthly' ? 'on the ' + partial.detail.dom :
-        partial.kind === 'interval' ? `every ${partial.detail.days} days` : 'daily'})`;
-  const sent = await sendPrivate(env, ctx,
-    `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
-    'Tap an option, or reply with a custom time.',
-    { inline_keyboard: keyboard }
-  );
-  const ref = msgRef(sent);
-  if (ref) {
-    await env.DB.prepare('UPDATE drafts SET wizard_msg_id = ?, wizard_msg_ephemeral = ? WHERE id = ?')
-      .bind(ref.id, ref.ephemeral ? 1 : 0, id).run();
-  }
-}
-
-// Rebuild a stored { id, ephemeral } pair from a drafts row.
-function draftRef(draft, field) {
-  const id = draft[`${field}_msg_id`];
-  return id ? { id, ephemeral: Boolean(draft[`${field}_msg_ephemeral`]) } : null;
-}
-
-// Plain (non-command) text: only meaningful as a custom time for a pending
-// draft — either a reply to the wizard/prompt message, or freshly typed
-// after a recent popup. Anything else is ignored (normal chat).
+// Plain (non-command) text: a reply acting on a nag, a bare "done", or a
+// custom time for a pending draft. Anything else is ignored (normal chat).
 async function handlePlainText(env, msg) {
   const chatId = msg.chat.id;
-  const now = Date.now();
   const ctx = replyCtx(env, chatId, msg.from && msg.from.id, {
     replyEphemeralId: msg.ephemeral_message_id || null,
   });
@@ -708,82 +273,8 @@ async function handlePlainText(env, msg) {
         rows.results.map((r) => `/done ${esc(r.text)}`).join('\n'));
     }
   }
-
-  // A draft accepts a time sent as a reply to its wizard/prompt message.
-  // Safety net: after "✏️ Type a time" was tapped (prompt exists), a message
-  // that is PURELY a time also counts — some group clients never surface the
-  // forced reply. Ambient chat ("movie at 8pm") has leftover words and is
-  // rejected below.
-  let draft = null;
-  let bareTime = false;
-  if (replyRef) {
-    // Ephemeral and public ids come from separate sequences, so the flag has to
-    // be part of the match or a stray collision could resolve the wrong draft.
-    const eph = replyRef.ephemeral ? 1 : 0;
-    draft = await env.DB.prepare(
-      `SELECT * FROM drafts WHERE chat_id = ?
-         AND ((prompt_msg_id = ? AND prompt_msg_ephemeral = ?)
-           OR (wizard_msg_id = ? AND wizard_msg_ephemeral = ?))`
-    ).bind(chatId, replyRef.id, eph, replyRef.id, eph).first();
-  }
-  if (!draft) {
-    draft = await env.DB.prepare(
-      'SELECT * FROM drafts WHERE chat_id = ? AND prompt_msg_id IS NOT NULL AND created_at > ? ORDER BY id DESC LIMIT 1'
-    ).bind(chatId, now - 15 * 60000).first();
-    bareTime = true;
-  }
-  if (!draft) return;
-
-  const tz = await getTz(env, chatId);
-  let parsed;
-  try {
-    // Dummy task word satisfies the parser; we only want the schedule.
-    parsed = parseRemind(`x ${msg.text}`, `x ${msg.text}`, [], now, tz);
-  } catch (err) {
-    if (!bareTime && err instanceof ParseError) {
-      await sendPrivate(env, ctx,
-        '😿 The cats couldn\'t read that as a time — try <code>10am</code>, <code>tomorrow 9:30am</code>, or <code>in 30m</code>.');
-    }
-    return;
-  }
-  // Non-reply path: anything beyond the bare time means normal conversation.
-  if (bareTime && parsed.text !== 'x') return;
-
-  // The typed reply carries the time; the draft carries everything else.
-  let { kind, detail, firstFireAt } = parsed;
-  if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h != null) {
-    kind = draft.schedule_kind;
-    detail = { ...JSON.parse(draft.schedule_detail), h: parsed.detail.h, mi: parsed.detail.mi };
-    firstFireAt = nextOccurrence(kind, detail, now, tz);
-  }
-  const p = {
-    text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
-    nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt, scored: draft.scored,
-  };
-  // Claim the draft before creating anything. A second reply or wizard tap
-  // racing this one loses the conditional delete and cannot create a duplicate.
-  const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-    .bind(draft.id, chatId).run();
-  if (!claim.meta.changes) return;
-  const by = senderName(msg.from);
-  const { id, html } = await createReminder(env, chatId, p, by, tz);
-  const wizardRef = draftRef(draft, 'wizard');
-  const promptRef = draftRef(draft, 'prompt');
-  if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
-  if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
-  // The wizard message becomes the confirmation for an assigned chore; an
-  // unassigned one is announced instead, so the wizard is cleared away.
-  if (p.assigneeName || p.assigneeUserId) {
-    if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id));
-    else await sendPrivate(env, ctx, html, undoButtons(id));
-  } else {
-    if (wizardRef) await deleteRef(env, ctx, chatId, wizardRef);
-    await confirmNewChore(env, ctx, by, p, tz, id, html);
-  }
-  if (p.firstFireAt <= Date.now() + 500) {
-    const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
-    if (row) await fireReminder(env, row, Date.now(), tz);
-  }
+  // The only other text that means anything here is a time for a pending draft.
+  return tryDraftTime(env, msg, ctx, replyRef);
 }
 
 // Any thumbs-up-ish reaction on a live nag message counts as ✅ Done.
@@ -871,106 +362,6 @@ async function handleNagReply(env, msg, firing, ctx) {
   }
 }
 
-function scheduleFromCode(code, draft, now, tz) {
-  const kind = draft.schedule_kind;
-  const detail = JSON.parse(draft.schedule_detail);
-  const absolute = code.match(/^a(\d+)$/);
-  if (absolute) {
-    const firstFireAt = +absolute[1];
-    return firstFireAt > now ? { kind: 'once', detail: {}, firstFireAt } : null;
-  }
-  if (code === 'r15' || code === 'r60') {
-    return { kind: 'once', detail: {}, firstFireAt: now + (code === 'r15' ? 15 : 60) * 60000 };
-  }
-  if (code === 't19') {
-    const d = { h: 19, mi: 0 };
-    return { kind: 'once', detail: d, firstFireAt: nextOccurrence('daily', d, now, tz) };
-  }
-  if (code === 'm9') {
-    const d = { h: 9, mi: 0 };
-    const p = localParts(now, tz);
-    const endOfToday = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
-    return { kind: 'once', detail: d, firstFireAt: nextOccurrence('daily', d, endOfToday, tz) };
-  }
-  if (code === 'd19') {
-    const d = { h: 19, mi: 0 };
-    return { kind: 'daily', detail: d, firstFireAt: nextOccurrence('daily', d, now, tz) };
-  }
-  const hm = code.match(/^h(\d+)$/);
-  if (hm) {
-    const d = { ...detail, h: +hm[1], mi: 0 };
-    return { kind, detail: d, firstFireAt: nextOccurrence(kind, d, now, tz) };
-  }
-  return null;
-}
-
-// Schedule cadence without the time-of-day (list cards lead with the time).
-function cadence(r) {
-  const d = JSON.parse(r.schedule_detail);
-  if (r.schedule_kind === 'daily') return 'daily';
-  if (r.schedule_kind === 'weekly') return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')}`;
-  if (r.schedule_kind === 'monthly') return `on the ${d.dom}`;
-  if (r.schedule_kind === 'interval') {
-    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''}`;
-    const w = d.days % 7 === 0 ? d.days / 7 : 0;
-    return w ? `every ${w} week${w > 1 ? 's' : ''}` : `every ${d.days} days`;
-  }
-  return 'once';
-}
-
-// Hybrid countdown + absolute: "today 9:00 PM" / "tomorrow 9:00 AM" /
-// "in 3 days · Fri 5:00 PM" / "in 13 days · Aug 24, 7:00 PM".
-function fmtWhen(ms, tz) {
-  const time = fmtClock(ms, tz);
-  const t = localParts(ms, tz);
-  const n = localParts(Date.now(), tz);
-  const days = Math.round((Date.UTC(t.y, t.mo - 1, t.d) - Date.UTC(n.y, n.mo - 1, n.d)) / 86400000);
-  if (days <= 0) return `today ${time}`;
-  if (days === 1) return `tomorrow ${time}`;
-  const when = days < 7 ? `${DAY_NAMES[t.wd]} ${time}` : fmtShort(ms, tz);
-  return `in ${days} days · ${when}`;
-}
-
-// Renders the chore-card list shared by /list and the pinned dashboard.
-// Null when there are no chores at all.
-async function choreListHtml(env, chatId, tz) {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
-  ).bind(chatId).all();
-  if (!results.length) return null;
-  const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
-  const nagging = new Set((await env.DB.prepare(
-    "SELECT reminder_id FROM firings WHERE chat_id = ? AND state = 'nagging'"
-  ).bind(chatId).all()).results.map((f) => f.reminder_id));
-  const lines = ['🐾 <b>Chores</b>'];
-  if (st && st.paused_until && st.paused_until > Date.now()) {
-    lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
-  }
-  // Nagging first, then upcoming soonest-first, paused last.
-  const rank = (r) => r.paused ? 2 : (nagging.has(r.id) || !r.next_fire_at) ? 0 : 1;
-  results.sort((a, b) => rank(a) - rank(b)
-    || (a.next_fire_at || 0) - (b.next_fire_at || 0)
-    || a.display_num - b.display_num);
-  // Two short lines per chore — when, then what — so nothing wraps on a phone
-  // (squashbot's board layout). "once" says nothing a missing cadence doesn't.
-  for (const r of results) {
-    const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
-    const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
-    const lead = r.paused ? '⏸️ paused'
-      : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
-      : fmtWhen(r.next_fire_at, tz);
-    const each = cadence(r);
-    lines.push('');
-    lines.push(lead);
-    // Chores are the default here; a reminder is the thing worth flagging,
-    // since it looks identical but never reaches the leaderboard.
-    const kind = isScored(r) ? '' : ' · <i>reminder</i>';
-    lines.push(`${[choreEmoji(r.text), `<b>${esc(r.text)}</b>`].filter(Boolean).join(' ')}${rot}${who}` +
-      (each === 'once' ? '' : ` · <i>${each}</i>`) + kind);
-  }
-  return lines.join('\n');
-}
-
 async function cmdList(env, ctx, tz) {
   const html = await choreListHtml(env, ctx.chatId, tz);
   if (!html) return sendPrivate(env, ctx, '😺 No chores on the list. Add one with /remind.');
@@ -980,86 +371,14 @@ async function cmdList(env, ctx, tz) {
   await sendPrivateLong(env, ctx, html);
 }
 
-// sendLong's chunking, but private. Only the final chunk keeps the callback
-// credential, which sendPrivate consumes on first use anyway.
-const TG_MAX = 4096;
-async function sendPrivateLong(env, ctx, html) {
-  if (html.length <= TG_MAX) return sendPrivate(env, ctx, html);
-  let last;
-  let chunk = '';
-  for (const line of html.split('\n')) {
-    if (chunk && chunk.length + 1 + line.length > TG_MAX) {
-      last = await sendPrivate(env, ctx, chunk);
-      chunk = '';
-    }
-    chunk = chunk ? `${chunk}\n${line}` : line;
-  }
-  if (chunk) last = await sendPrivate(env, ctx, chunk);
-  return last;
-}
-
 async function cmdEdit(env, ctx, args, tz) {
   const r = await findReminder(env, ctx.chatId, args, 'edit');
   await sendPrivate(env, ctx, editorText(r, tz), await editorButtons(env, r));
 }
 
-// Chores are addressed by name ("/done nails"); bare numbers still work as
-// the legacy handles.
-async function findReminder(env, chatId, args, cmd = 'delete') {
-  const raw = String(args).replace('#', '').trim();
-  if (!raw) throw new ParseError(`Which chore? e.g. /${cmd} nails (see /list).`);
-  const { results } = await env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ?').bind(chatId).all();
-  // Only an argument that is nothing but a number is a legacy handle — a name
-  // that merely starts with digits ("10pm meds") must reach the name match.
-  if (/^\d+$/.test(raw)) {
-    const num = parseInt(raw, 10);
-    const r = results.find((x) => x.display_num === num);
-    if (r) return r;
-    throw new ParseError(`No reminder ${num} here. See /list.`);
-  }
-  const q = raw.toLowerCase();
-  const matches = results.filter((x) => x.text.toLowerCase().includes(q));
-  if (matches.length === 1) return matches[0];
-  if (!matches.length) throw new ParseError(`The cats can't find a chore matching "${raw}". See /list.`);
-  throw new ParseError(`"${raw}" matches: ${matches.map((x) => x.text).join(', ')} — be more specific.`);
-}
-
 async function cmdDelete(env, ctx, args) {
   const r = await findReminder(env, ctx.chatId, args);
   await deleteReminder(env, r, ctx);
-}
-
-// `by` names the person in the log line. A deletion removes the chore for
-// everyone, so when it is triggered from a nag the log goes to the group even
-// though the nag itself may have been private — both of you need to see it.
-async function deleteReminder(env, r, ctx = null, by = null) {
-  const chatId = r.chat_id;
-  // Like Undo: remove live nag messages and hard-delete the nagging firings,
-  // so an intentional delete never counts as "expired unclaimed" in stats.
-  const firings = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
-  ).bind(r.id).all();
-  for (const f of firings.results) {
-    if (f.last_message_id) await deleteNag(env, f);
-    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-  }
-  await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
-  await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-  // Stash the row for a day so the Undo button can bring it back.
-  const stash = await env.DB.prepare(
-    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
-  ).bind(chatId, JSON.stringify(r), Date.now()).run();
-  // OK dismisses the log once everyone has seen it; Undo restores the chore.
-  const undo = { inline_keyboard: [[
-    { text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` },
-    { text: '✅ OK', callback_data: 'ok' },
-  ]] };
-  const html = by
-    ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
-    : `🗑️ Deleted <s>${esc(r.text)}</s>`;
-  if (ctx) await sendPrivate(env, ctx, html, undo);
-  else await sendMessage(env, chatId, html, undo);
-  await updateDashboard(env, chatId);
 }
 
 // Vacation mode: "/pause all 14" mutes everything for N days (auto-resumes),
@@ -1096,34 +415,6 @@ async function cmdPauseResumeAll(env, ctx, args, tz, pause) {
     `✈️ All chores paused until ${fmtLocal(until, tz)}. The cats will nap on your luggage.\n/resume all to end early.`);
 }
 
-// Ends vacation mode: clears the flag, removes stale pre-vacation nags (and
-// their spent one-off reminders), rolls recurring schedules past the gap.
-export async function wakeChat(env, chatId, tz) {
-  const now = Date.now();
-  await env.DB.prepare('UPDATE settings SET paused_until = NULL WHERE chat_id = ?').bind(chatId).run();
-  const firings = await env.DB.prepare(
-    "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
-  ).bind(chatId).all();
-  for (const f of firings.results) {
-    if (f.last_message_id) await deleteNag(env, f);
-    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-    await env.DB.prepare('DELETE FROM firings WHERE id = ?').bind(f.id).run();
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
-    if (r && r.schedule_kind === 'once' && r.next_fire_at == null) {
-      await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-    }
-  }
-  const rems = await env.DB.prepare(
-    "SELECT * FROM reminders WHERE chat_id = ? AND schedule_kind != 'once' AND next_fire_at IS NOT NULL AND next_fire_at <= ?"
-  ).bind(chatId, now).all();
-  for (const r of rems.results) {
-    const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
-    await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
-  }
-  await updateDashboard(env, chatId);
-  await sendMessage(env, chatId, '😺 The cats are back on duty — chores resume. /list to see what\'s up.');
-}
-
 async function cmdPauseResume(env, ctx, args, tz, pause, by) {
   if (/^all\b/i.test(String(args).trim())) return cmdPauseResumeAll(env, ctx, args, tz, pause);
   const r = await findReminder(env, ctx.chatId, args, pause ? 'pause' : 'resume');
@@ -1138,26 +429,6 @@ async function cmdPauseResume(env, ctx, args, tz, pause, by) {
     await sendPrivate(env, ctx,
       `😼 <b>${esc(r.text)}</b> already fired and has nothing scheduled — /delete it or make a new /remind.`);
   }
-}
-
-async function setReminderPaused(env, r, pause, tz, by) {
-  let next = r.next_fire_at;
-  if (!pause) next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), Date.now(), tz) || next;
-  await env.DB.prepare('UPDATE reminders SET paused = ?, next_fire_at = ? WHERE id = ?')
-    .bind(pause ? 1 : 0, next, r.id).run();
-  const firing = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-  ).bind(r.id).first();
-  if (firing) {
-    if (pause) {
-      await showPausedCard(env, firing, r, by, tz);
-    } else if (firing.last_message_id) {
-      await editNag(env, firing,
-        nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
-    }
-  }
-  await updateDashboard(env, r.chat_id);
-  return { firing, next };
 }
 
 async function cmdSkip(env, ctx, args, tz) {
@@ -1197,43 +468,6 @@ async function cmdDone(env, ctx, args, by, tz) {
   if (!won) return sendPrivate(env, ctx, '😼 Someone beat you to it — already handled.');
 }
 
-// Doing a chore before it nags still deserves the credit: complete the
-// upcoming occurrence now and advance the schedule past it, so the diligent
-// never have to wait for the nag just to tap Done. Returns false when a race
-// got there first and nothing else could be completed.
-async function completeEarly(env, r, credit, tz) {
-  const now = Date.now();
-  // Claim the upcoming occurrence with the usual compare-and-swap. Recurring
-  // chores advance past the claimed slot (the /skip rule); a one-off is spent
-  // outright, so its conditional delete is the claim.
-  const claim = r.schedule_kind === 'once'
-    ? await env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
-        .bind(r.id, r.next_fire_at).run()
-    : await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz),
-          r.id, r.next_fire_at).run();
-  if (!claim.meta.changes) {
-    // The occurrence fired while we looked — complete its live nag instead.
-    const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-    ).bind(r.id).first();
-    return Boolean(firing && await completeFiring(env, firing, r, credit, tz));
-  }
-  await env.DB.prepare(
-    `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
-     VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
-  ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
-  // The receipt is the shared record — there is no nag message to edit.
-  const next = r.schedule_kind === 'once' ? null
-    : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
-  await sendMessage(env, r.chat_id,
-    `😻 <s>${esc(r.text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
-    (next && next.next_fire_at ? `\nNext: ${fmtLocal(next.next_fire_at, tz)}` : ''),
-    null, { silent: true, ttl: RECEIPT_TTL_MS });
-  await updateDashboard(env, r.chat_id);
-  return true;
-}
-
 // /poke: re-send every outstanding nag right now, loud. Doesn't advance the
 // escalation ladder or consume snoozes — it's a manual "oi, everyone".
 async function cmdPoke(env, ctx) {
@@ -1263,443 +497,6 @@ async function cmdPoke(env, ctx) {
   }
 }
 
-async function cmdMakeStickers(env, ctx, msg) {
-  const res = await createStickerSet(env, msg.from.id);
-  if (res.ok) {
-    const link = `https://t.me/addstickers/${res.name}`;
-    await sendPrivate(env, ctx, res.already
-      ? (res.added
-          ? `🐾 Added ${res.added} new sticker${res.added > 1 ? 's' : ''} to <a href="${link}">Latte &amp; Mocha</a>.`
-          : `🐾 The pack already exists and is up to date: <a href="${link}">Latte &amp; Mocha</a>`)
-      : `🎉 Sticker pack created: <a href="${link}">Latte &amp; Mocha</a>\n` +
-        'Random cat stickers now accompany every nag. Tap the link to add them to your own sticker keyboard too!');
-  } else {
-    await sendPrivate(env, ctx, `😿 Telegram refused: ${esc(res.description || 'unknown error')}`);
-  }
-}
-
-async function cmdDelSticker(env, ctx, args) {
-  const index = parseInt(args, 10);
-  if (!index) throw new ParseError('Which one? e.g. /delsticker 3 (position in the pack, per /tags).');
-  const res = await deleteSticker(env, ctx.chatId, index);
-  if (res.ok) {
-    await sendPrivate(env, ctx, `🗑️ Sticker ${index} removed — ${res.remaining} left in the pack.`);
-  } else {
-    await sendPrivate(env, ctx,
-      `😿 ${esc(res.description || 'Telegram refused.')}\n` +
-      'Note: only packs created by this bot can be edited here — packs made via @Stickers are edited there.');
-  }
-}
-
-async function cmdTagSticker(env, ctx, args) {
-  const m = args.trim().match(/^#?(\d+)\s+(latte|mocha|both)$/i);
-  if (!m) throw new ParseError('Usage: /tagsticker 3 latte (or mocha, or both) — position in the active pack.');
-  const res = await tagSticker(env, ctx.chatId, +m[1], m[2].toLowerCase());
-  if (!res.ok) return sendPrivate(env, ctx, `😿 ${esc(res.description)}`);
-  const label = m[2].toLowerCase() === 'both' ? 'Latte &amp; Mocha' : m[2][0].toUpperCase() + m[2].slice(1).toLowerCase();
-  await sendPrivate(env, ctx, `🏷️ Sticker ${+m[1]} is ${label}. The nag lines will match.`);
-}
-
-async function cmdAutoTag(env, ctx, args = '') {
-  const redo = /\bredo\b/i.test(args);
-  await sendPrivate(env, ctx, redo
-    ? '🔎 Wiping old tags — the cats are re-inspecting the pack…'
-    : '🔎 The cats are inspecting the sticker pack…');
-  const res = await autoTagPack(env, ctx.chatId, { redo });
-  if (!res.ok) return sendPrivate(env, ctx, `😿 ${esc(res.description)}`);
-  const c = res.counts;
-  if (!res.processed && !c.skipped) {
-    return sendPrivate(env, ctx, '🏷️ Everything in the pack is already tagged.');
-  }
-  let msg = `🤖 Tagged ${res.processed} sticker${res.processed === 1 ? '' : 's'}: ` +
-    `${c.latte} Latte, ${c.mocha} Mocha, ${c.both} both` +
-    (c.skipped ? `, ${c.skipped} skipped` : '') + '.';
-  if (res.remaining) msg += `\n${res.remaining} to go — run /autotag again.`;
-  msg += '\nFix any misses with /tagsticker N latte (position in the pack).';
-  await sendPrivate(env, ctx, msg);
-}
-
-const CAT_LABEL = { latte: 'Latte 🥛', mocha: 'Mocha 🍫', both: 'Latte &amp; Mocha 🐈🐈' };
-
-async function cmdTags(env, ctx, args) {
-  const chatId = ctx.chatId;
-  const res = await listTags(env, chatId);
-  if (!res.ok) return sendPrivate(env, ctx, `😿 ${esc(res.description)}`);
-  const n = parseInt(args, 10);
-  if (n) {
-    const e = res.entries.find((x) => x.pos === n);
-    if (!e) throw new ParseError(`The pack has ${res.entries.length} stickers — pick 1 to ${res.entries.length}.`);
-    // A sticker cannot be sent ephemerally with a caption attached, so the
-    // preview itself is public; the label that follows is not.
-    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: e.fileId }));
-    return sendPrivate(env, ctx,
-      `☝️ Sticker ${n}: ${e.cat ? CAT_LABEL[e.cat] : 'untagged'} — change with /tagsticker ${n} latte|mocha|both`);
-  }
-  const lines = res.entries.map((e) => `${e.pos}. ${e.cat ? CAT_LABEL[e.cat] : '—'}`);
-  await sendPrivate(env, ctx,
-    `🏷️ <b>${esc(res.name)}</b> (order as shown in the pack)\n${lines.join('\n')}\n` +
-    'Peek at one with /tags N · fix with /tagsticker N latte');
-}
-
-async function cmdUsePack(env, ctx, args) {
-  const chatId = ctx.chatId;
-  const raw = args.trim();
-  if (!raw) {
-    const row = await env.DB.prepare('SELECT sticker_set FROM settings WHERE chat_id = ?').bind(chatId).first();
-    return sendPrivate(env, ctx,
-      `Current nag stickers: <code>${esc((row && row.sticker_set) || 'Latte & Mocha (default)')}</code>\n` +
-      'Switch with /usepack &lt;pack link or name&gt; — get the link by tapping any sticker → the pack name → share.\n' +
-      'Back to the cats: /usepack reset');
-  }
-  if (raw.toLowerCase() === 'reset') {
-    await env.DB.prepare(
-      'INSERT INTO settings (chat_id, sticker_set) VALUES (?, NULL) ON CONFLICT(chat_id) DO UPDATE SET sticker_set = NULL'
-    ).bind(chatId).run();
-    return sendPrivate(env, ctx, '🐾 Back to the Latte &amp; Mocha pack.');
-  }
-  const pack = await lookupPack(env, raw);
-  if (!pack.ok) {
-    throw new ParseError(`Couldn't find a sticker pack called "${pack.name || raw}". Paste the t.me/addstickers/... link.`);
-  }
-  await env.DB.prepare(
-    'INSERT INTO settings (chat_id, sticker_set) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET sticker_set = excluded.sticker_set'
-  ).bind(chatId, pack.name).run();
-  await sendPrivate(env, ctx,
-    `🐾 Nag stickers switched to <b>${esc(pack.title)}</b> (${pack.count} stickers).`);
-}
-
-const STATS_MAX_PER_PERSON = 15;
-const MEDALS = ['🥇', '🥈', '🥉'];
-
-// Best-guess emoji for a chore, by keyword. Falls back to a paw.
-const CHORE_EMOJI = [
-  [/nails?|trim|groom/i, '✂️'],
-  [/vaccin|nexgard|flea|tick|deworm|jab|injection/i, '💉'],
-  [/fountain|aquarium|tank/i, '💧'],
-  [/wifi|internet|router|broadband|modem|myrepublic/i, '🌐'],
-  [/dish|plate|dishwasher|bowl|cutlery/i, '🍽️'],
-  [/poop|litter|litterbox|scoop/i, '💩'],
-  [/trash|garbage|rubbish|bin\b/i, '🗑️'],
-  [/laundry|clothes|fold|iron/i, '🧺'],
-  [/plant|water the|garden|flower/i, '🪴'],
-  [/vacuum|sweep|mop|clean|dust|scrub|wipe/i, '🧹'],
-  [/rent|pay|bill|tax|insurance/i, '💸'],
-  [/cook|dinner|lunch|breakfast|meal|oven|bake/i, '🍳'],
-  [/groceries|grocery|shop|buy|market/i, '🛒'],
-  [/feed|food|treat/i, '🍚'],
-  [/cat|latte|mocha|vet/i, '🐱'],
-  [/car|gas|fuel|tire|oil/i, '🚗'],
-  [/bed|sheet|pillow|blanket/i, '🛏️'],
-  [/gym|run|walk|exercise/i, '🏃'],
-  [/call|phone|email|message/i, '📞'],
-  [/doctor|dentist|meds|medicine|pill/i, '💊'],
-];
-
-function choreEmoji(text) {
-  // A chore typed with its own leading emoji is self-labeled — no second icon.
-  if (/^\p{Extended_Pictographic}/u.test(text)) return '';
-  for (const [re, emoji] of CHORE_EMOJI) if (re.test(text)) return emoji;
-  return '📌';
-}
-
-// Fetches done-history and expired count for a window; shared by the weekly
-// leaderboard, /stats all, and the Sunday recap.
-export async function choreStats(env, chatId, since) {
-  const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ?"
-  ).bind(chatId, since).first();
-  const history = await env.DB.prepare(
-    `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
-     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ?
-     ORDER BY f.done_at DESC`
-  ).bind(chatId, since).all();
-  const byPerson = new Map();
-  for (const h of history.results) {
-    // "nick & jane" (done together) credits each person individually.
-    for (const who of String(h.done_by || '?').split(CREDIT_SEP)) {
-      if (!byPerson.has(who)) byPerson.set(who, []);
-      byPerson.get(who).push(h);
-    }
-  }
-  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-  return { people, expired: expired.n, total: history.results.length };
-}
-
-// Consecutive past full weeks the given person won outright (ties break it).
-export async function winnerStreak(env, chatId, tz, leader) {
-  let streak = 0;
-  let start = weekStart(Date.now(), tz);
-  for (let w = 0; w < 26; w++) {
-    const end = start;
-    start -= 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
-    const { results } = await env.DB.prepare(
-      "SELECT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
-    ).bind(chatId, start, end).all();
-    const counts = new Map();
-    for (const r of results) {
-      for (const p of String(r.done_by || '').split(CREDIT_SEP)) {
-        if (p) counts.set(p, (counts.get(p) || 0) + 1);
-      }
-    }
-    if (!counts.size) break;
-    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    if (sorted[0][0] !== leader) break;
-    if (sorted[1] && sorted[1][1] === sorted[0][1]) break;
-    streak++;
-  }
-  return streak;
-}
-
-async function cmdStats(env, ctx, tz, args = '') {
-  const chatId = ctx.chatId;
-  if (/^\s*all\b/i.test(args)) return statsAll(env, ctx, tz);
-
-  const since = weekStart(Date.now(), tz);
-  const s = await choreStats(env, chatId, since);
-  if (!s.total && !s.expired) {
-    return sendPrivate(env, ctx,
-      '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday; /stats all for history.)');
-  }
-
-  const streak = s.people.length ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
-  const lines = [`🏆 <b>Weekly leaderboard</b> — week of ${fmtShort(since, tz).replace(/,.*$/, '')}`];
-  s.people.forEach(([who, items], i) => {
-    lines.push('');
-    const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
-    lines.push(`${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${fire}`);
-    for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
-      lines.push(`  ${[choreEmoji(h.text), esc(h.text)].filter(Boolean).join(" ")} — ${fmtShort(h.done_at, tz)}`);
-    }
-    if (items.length > STATS_MAX_PER_PERSON) lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
-  });
-  if (s.expired) {
-    lines.push('');
-    lines.push(`🪦 Expired unclaimed this week: ${s.expired}`);
-  }
-  lines.push('');
-  lines.push('Resets Monday · /stats all for the 6-month log');
-  await sendPrivateLong(env, ctx, lines.join('\n'));
-}
-
-async function statsAll(env, ctx, tz) {
-  const chatId = ctx.chatId;
-  const since = Date.now() - 183 * 24 * 3600000; // ~6 months
-  const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ?"
-  ).bind(chatId, since).first();
-  const history = await env.DB.prepare(
-    `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
-     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ?
-     ORDER BY f.done_at DESC`
-  ).bind(chatId, since).all();
-
-  if (!history.results.length && !expired.n) {
-    return sendPrivate(env, ctx, 'Nothing completed in the last 6 months yet. The cats are patient.');
-  }
-
-  // Group by person, most completions first; combined credits split.
-  const byPerson = new Map();
-  for (const h of history.results) {
-    for (const who of String(h.done_by || '?').split(CREDIT_SEP)) {
-      if (!byPerson.has(who)) byPerson.set(who, []);
-      byPerson.get(who).push(h);
-    }
-  }
-  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-
-  const lines = ['📜 <b>Chore log — last 6 months</b>'];
-  for (const [who, items] of people) {
-    lines.push('');
-    lines.push(`<b>${esc(who)}</b> — ${items.length} ✅`);
-    for (const h of items.slice(0, STATS_MAX_PER_PERSON)) {
-      lines.push(`  ${[choreEmoji(h.text), esc(h.text)].filter(Boolean).join(" ")} — ${fmtShort(h.done_at, tz)}`);
-    }
-    if (items.length > STATS_MAX_PER_PERSON) {
-      lines.push(`  …and ${items.length - STATS_MAX_PER_PERSON} more`);
-    }
-  }
-  if (expired.n) {
-    lines.push('');
-    lines.push(`🪦 Expired unclaimed: ${expired.n}`);
-  }
-  await sendPrivateLong(env, ctx, lines.join('\n'));
-}
-
-function editorText(r, tz) {
-  const d = JSON.parse(r.schedule_detail);
-  const nags = JSON.parse(r.nag_intervals).join('/');
-  const assignee = r.assignee_name ? esc(r.assignee_name) : 'Anyone';
-  const next = r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : 'nagging now';
-  return `✏️ <b>Edit #${r.display_num}: ${esc(r.text)}</b>\n` +
-    `Schedule: ${esc(describeSchedule(r))}\n` +
-    `Next: ${next}\n` +
-    `Assigned: ${assignee}\n` +
-    `Nag pace: ${nags} min\n` +
-    `Rotation: ${d.rotate ? 'on' : 'off'}\n` +
-    `Points: ${r.scored ? 'counts on the board' : 'no points'}${r.paused ? '\nStatus: paused' : ''}`;
-}
-
-async function editorButtons(env, r) {
-  const d = JSON.parse(r.schedule_detail);
-  const rows = [];
-  if (r.next_fire_at != null) rows.push([
-    { text: '🕐 Time', callback_data: `e:time:${r.id}` },
-    { text: '🔁 Schedule', callback_data: `e:schedule:${r.id}` },
-  ]);
-  rows.push([
-    { text: '😾 Nag pace', callback_data: `e:nag:${r.id}` },
-    { text: '👤 Assignee', callback_data: `e:assign:${r.id}` },
-  ]);
-  rows.push([
-    { text: `🔄 Rotation: ${d.rotate ? 'on' : 'off'}`, callback_data: `e:rotate:${r.id}` },
-    { text: `🏆 Points: ${r.scored ? 'on' : 'off'}`, callback_data: `e:score:${r.id}` },
-  ]);
-  rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `e:pause:${r.id}` }]);
-  rows.push([{ text: '✕ Close', callback_data: `e:close:${r.id}` }]);
-  return { inline_keyboard: rows };
-}
-
-function editorSubmenu(kind, r, roster = []) {
-  const b = (text, value) => ({ text, callback_data: `e:set${kind}:${r.id}:${value}` });
-  let rows;
-  if (kind === 'time') rows = [
-    [b('8:00 AM', '8'), b('12:00 PM', '12')],
-    [b('7:00 PM', '19'), b('9:00 PM', '21')],
-  ];
-  else if (kind === 'schedule') rows = [
-    [b('Daily', 'daily'), b('Weekdays', 'weekdays'), b('Weekends', 'weekends')],
-  ];
-  else if (kind === 'nag') rows = [
-    [b('Every 10m', '10'), b('15/30/60m', 'default')],
-    [b('Every 30m', '30'), b('Every 60m', '60')],
-  ];
-  else {
-    rows = [[b('Anyone', '0')]];
-    roster.slice(0, 8).forEach((name, i) => rows.push([b(name, String(i + 1))]));
-  }
-  rows.push([{ text: '← Edit chore', callback_data: `e:menu:${r.id}` }]);
-  return { inline_keyboard: rows };
-}
-
-async function editorIsDashboard(env, cb) {
-  if (!cb.message.message_id) return false;
-  const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
-    .bind(cb.message.chat.id).first();
-  return Boolean(row && row.dashboard_msg_id === cb.message.message_id);
-}
-
-async function refreshEditor(env, cb, r, tz, buttons = null) {
-  const markup = buttons || await editorButtons(env, r);
-  if (await editorIsDashboard(env, cb)) {
-    const html = await choreListHtml(env, r.chat_id, tz);
-    return editMessage(env, r.chat_id, cb.message.message_id, html, markup);
-  }
-  return editMessage(env, r.chat_id, cb.message.message_id, editorText(r, tz), markup);
-}
-
-async function applyEditorChoice(env, r, kind, value, tz) {
-  if (kind === 'time') {
-    const detail = { ...JSON.parse(r.schedule_detail), h: +value, mi: 0 };
-    const next = r.schedule_kind === 'once'
-      ? nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz)
-      : nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
-    await env.DB.prepare('UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ?')
-      .bind(JSON.stringify(detail), next, r.id).run();
-  } else if (kind === 'schedule') {
-    const old = JSON.parse(r.schedule_detail);
-    const base = { h: old.h ?? 9, mi: old.mi ?? 0, ...(old.rotate ? { rotate: true } : {}) };
-    const schedule = value === 'daily'
-      ? { kind: 'daily', detail: base }
-      : { kind: 'weekly', detail: { ...base, days: value === 'weekdays' ? [1, 2, 3, 4, 5] : [0, 6] } };
-    const next = nextOccurrence(schedule.kind, schedule.detail, Date.now(), tz);
-    await env.DB.prepare(
-      'UPDATE reminders SET schedule_kind = ?, schedule_detail = ?, next_fire_at = ? WHERE id = ?'
-    ).bind(schedule.kind, JSON.stringify(schedule.detail), next, r.id).run();
-  } else if (kind === 'nag') {
-    const intervals = value === 'default' ? DEFAULT_NAGS : [+value];
-    await env.DB.prepare('UPDATE reminders SET nag_intervals = ? WHERE id = ?')
-      .bind(JSON.stringify(intervals), r.id).run();
-  } else if (kind === 'assign') {
-    const roster = [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b));
-    const name = value === '0' ? null : roster[+value - 1];
-    if (value !== '0' && !name) return false;
-    await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
-      .bind(name, r.id).run();
-  }
-  return true;
-}
-
-// Every management button carries the chore's own identity — name plus when —
-// because the pinned board's text never changes while you navigate. Internal
-// numbers stay out of labels; the name is the handle everywhere else too.
-function buttonText(r, tz = 'Asia/Singapore') {
-  const when = r.paused ? 'paused'
-    : r.next_fire_at ? fmtWhen(r.next_fire_at, tz)
-    : 'nagging now';
-  return clip(`${[choreEmoji(r.text), r.text].filter(Boolean).join(' ')} · ${when}`);
-}
-
-function clip(text, max = 42) {
-  const chars = [...text];
-  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
-}
-
-async function dashboardCallbackAllowed(env, cb) {
-  const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
-    .bind(cb.message.chat.id).first();
-  return row && row.dashboard_msg_id === cb.message.message_id;
-}
-
-async function chorePickerMarkup(env, chatId, tz) {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE chat_id = ? ORDER BY display_num'
-  ).bind(chatId).all();
-  const rows = results.slice(0, 20).map((r) => [
-    { text: `✏️ ${buttonText(r, tz)}`, callback_data: `m:item:${r.id}` },
-  ]);
-  if (results.length > 20) rows.push([{ text: '…use /list for the rest', callback_data: 'm:close' }]);
-  rows.push([{ text: '← Done', callback_data: 'm:close' }]);
-  return { inline_keyboard: rows };
-}
-
-async function choreActionsMarkup(env, r, tz) {
-  const firing = await env.DB.prepare(
-    "SELECT id FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-  ).bind(r.id).first();
-  // First row names what you are acting on, so the board's unchanged text is
-  // never the only thing telling you where you are. Tapping it is a no-op.
-  const rows = [[{ text: buttonText(r, tz), callback_data: `m:item:${r.id}` }]];
-  if (firing) rows.push([
-    { text: '✅ Done', callback_data: `m:done:${r.id}` },
-    { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
-  ]);
-  // Not nagging yet but scheduled: doing it ahead of the nag still counts.
-  else if (!r.paused && r.next_fire_at != null) rows.push([
-    { text: '✅ Done early', callback_data: `m:done:${r.id}` },
-    { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
-  ]);
-  rows.push([{ text: '✏️ Edit details', callback_data: `m:edit:${r.id}` }]);
-  rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `m:${r.paused ? 'resume' : 'pause'}:${r.id}` }]);
-  if (r.schedule_kind !== 'once' && r.next_fire_at != null) {
-    rows.push([{ text: '⏭️ Skip next', callback_data: `m:skip:${r.id}` }]);
-  }
-  rows.push([{ text: '🗑️ Delete…', callback_data: `m:delete:${r.id}` }]);
-  rows.push([
-    { text: '← Back to chores', callback_data: 'm:list' },
-    { text: '✕ Close', callback_data: 'm:close' },
-  ]);
-  return { inline_keyboard: rows };
-}
-
-// Manage runs inside the pinned dashboard itself: swap its buttons, leave its
-// text alone. Deliberately a shared surface — anyone in the household can pick
-// up where another left off, and there is nothing private on it.
-function renderManager(env, cb, markup) {
-  return editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, markup);
-}
-
 async function handleCallback(env, cb) {
   // The tap authorizes a private reply for the next 15 seconds even if the bot
   // has no other recent contact with this member.
@@ -1707,218 +504,25 @@ async function handleCallback(env, cb) {
     callbackQueryId: cb.id,
   });
   const ref = callbackRef(cb);
-  const editNav = (cb.data || '').match(/^e:(menu|time|schedule|nag|assign|rotate|score|pause|close):(\d+)$/);
-  const editSet = (cb.data || '').match(/^e:set(time|schedule|nag|assign):(\d+):([a-z0-9]+)$/);
-  if ((editNav || editSet) && cb.message) {
-    const reminderId = +(editNav ? editNav[2] : editSet[2]);
-    let r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-      .bind(reminderId, cb.message.chat.id).first();
-    if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
-    const tz = await getTz(env, r.chat_id);
+  const data = cb.data || '';
+  if (!cb.message) return answerCallback(env, cb.id, '');
 
-    if (editNav) {
-      const action = editNav[1];
-      if (action === 'close') {
-        if (ref && ref.ephemeral) await deleteEphemeral(env, ctx, ref.id);
-        else if (await editorIsDashboard(env, cb)) await updateDashboard(env, r.chat_id);
-        else await deleteMessage(env, r.chat_id, cb.message.message_id);
-        return answerCallback(env, cb.id, 'Closed');
-      }
-      if (action === 'menu') {
-        await refreshEditor(env, cb, r, tz);
-        return answerCallback(env, cb.id, '');
-      }
-      if (['time', 'schedule', 'nag', 'assign'].includes(action)) {
-        const roster = action === 'assign'
-          ? [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b)) : [];
-        await refreshEditor(env, cb, r, tz, editorSubmenu(action, r, roster));
-        return answerCallback(env, cb.id, '');
-      }
-      if (action === 'rotate') {
-        const detail = JSON.parse(r.schedule_detail);
-        if (detail.rotate) delete detail.rotate;
-        else detail.rotate = true;
-        await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
-          .bind(JSON.stringify(detail), r.id).run();
-      } else if (action === 'score') {
-        await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
-          .bind(r.scored ? 0 : 1, r.id).run();
-      } else if (action === 'pause') {
-        await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
-      }
-    } else {
-      const ok = await applyEditorChoice(env, r, editSet[1], editSet[3], tz);
-      if (!ok) return answerCallback(env, cb.id, 'That household member is no longer available.');
-    }
+  // Each button family routes to the module that owns it; anything
+  // unrecognized is answered blank so the button never spins.
+  if (data.startsWith('e:')) return handleEditorCallback(env, cb, ctx, ref);
+  if (data.startsWith('m:')) return handleManageCallback(env, cb);
+  if (data.startsWith('w:')) return handleWizardCallback(env, cb, ctx, ref);
 
-    r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
-    if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
-    await updateDashboard(env, r.chat_id);
-    await refreshEditor(env, cb, r, tz);
-    return answerCallback(env, cb.id, 'Updated ✓');
-  }
-
-  const help = (cb.data || '').match(/^h:(home|schedule|more|stickers)$/);
-  if (help && cb.message) {
+  const help = data.match(/^h:(home|schedule|more|stickers)$/);
+  if (help) {
     await editRef(env, ctx, cb.message.chat.id, ref,
       helpText(help[1]), await helpMarkup(env, cb.message.chat.id, help[1]));
     return answerCallback(env, cb.id, '');
   }
 
-  const manage = (cb.data || '').match(/^m:(list|close)$/);
-  const manageItem = (cb.data || '').match(/^m:(item|edit|pause|resume|skip|done|doneall|delete|confirm):(\d+)$/);
-  if ((manage || manageItem) && cb.message) {
-    if (!await dashboardCallbackAllowed(env, cb)) {
-      return answerCallback(env, cb.id, 'That dashboard is no longer active.');
-    }
-    if (manage) {
-      if (manage[1] === 'close') {
-        await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons());
-      } else {
-        const listTz = await getTz(env, cb.message.chat.id);
-        await renderManager(env, cb, await chorePickerMarkup(env, cb.message.chat.id, listTz));
-      }
-      return answerCallback(env, cb.id, '');
-    }
-
-    const action = manageItem[1];
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-      .bind(+manageItem[2], cb.message.chat.id).first();
-    if (!r) {
-      await updateDashboard(env, cb.message.chat.id);
-      return answerCallback(env, cb.id, 'That chore is already gone.');
-    }
-    const tz = await getTz(env, r.chat_id);
-    if (action === 'item') {
-      await renderManager(env, cb, await choreActionsMarkup(env, r, tz));
-      return answerCallback(env, cb.id, buttonText(r, tz));
-    }
-    if (action === 'edit') {
-      await renderManager(env, cb, await editorButtons(env, r));
-      return answerCallback(env, cb.id, `Editing ${r.text}`);
-    }
-    if (action === 'delete') {
-      // The confirm button says exactly what it will delete — the board's text
-      // is unchanged and cannot be relied on to say which chore this is.
-      await renderManager(env, cb, { inline_keyboard: [
-        [{ text: clip(`🗑 Delete · ${r.text}`), callback_data: `m:confirm:${r.id}` }],
-        [{ text: '← Back to chores', callback_data: `m:item:${r.id}` }],
-      ] });
-      return answerCallback(env, cb.id, 'This removes the chore for everyone.');
-    }
-    if (action === 'confirm') {
-      await deleteReminder(env, r);
-      return answerCallback(env, cb.id, 'Deleted — Undo is available below.');
-    }
-
-    if (action === 'pause' || action === 'resume') {
-      await setReminderPaused(env, r, action === 'pause', tz, senderName(cb.from));
-      return answerCallback(env, cb.id, action === 'pause' ? 'Paused ⏸️' : 'Resumed ▶️');
-    }
-    if (action === 'skip') {
-      if (r.schedule_kind === 'once' || !r.next_fire_at) {
-        return answerCallback(env, cb.id, 'One-off chores cannot be skipped.');
-      }
-      const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
-      await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
-      await updateDashboard(env, r.chat_id);
-      return answerCallback(env, cb.id, `Next: ${fmtLocal(next, tz)}`);
-    }
-    if (action === 'done' || action === 'doneall') {
-      const firing = await env.DB.prepare(
-        "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-      ).bind(r.id).first();
-      let credit = senderName(cb.from);
-      if (action === 'doneall') credit = creditTogether(credit, [...await householdRoster(env, r.chat_id)]);
-      if (!firing) {
-        if (r.paused || r.next_fire_at == null) {
-          return answerCallback(env, cb.id, 'This chore is not nagging now.');
-        }
-        const early = await completeEarly(env, r, credit, tz);
-        return answerCallback(env, cb.id, early ? 'Done early 😻' : 'Already handled 👍');
-      }
-      const won = await completeFiring(env, firing, r, credit, tz);
-      return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
-    }
-  }
-
-  const wiz = (cb.data || '').match(/^w:(\d+):([a-z]+\d*)$/);
-  if (wiz && cb.message) {
-    const draft = await env.DB.prepare('SELECT * FROM drafts WHERE id = ? AND chat_id = ?')
-      .bind(+wiz[1], cb.message.chat.id).first();
-    if (!draft) return answerCallback(env, cb.id, 'That one expired — send /remind again.');
-    const tz = await getTz(env, draft.chat_id);
-    if (wiz[2] === 'cancel') {
-      const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-        .bind(draft.id, draft.chat_id).run();
-      if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already closed.');
-      const promptRef = draftRef(draft, 'prompt');
-      if (promptRef) await deleteRef(env, ctx, draft.chat_id, promptRef);
-      await editRef(env, ctx, draft.chat_id, ref,
-        `✕ Cancelled <s>${esc(draft.text)}</s>`, emptyKeyboard());
-      return answerCallback(env, cb.id, 'Cancelled');
-    }
-    if (wiz[2] === 'custom') {
-      // selective force_reply only auto-opens the reply box for a mentioned
-      // user in groups — so mention whoever tapped the button.
-      const mention = cb.from.username
-        ? `@${cb.from.username}`
-        : mentionHtml(cb.from.first_name || 'you', cb.from.id);
-      const prompt = await sendPrivate(env, ctx,
-        `⏰ ${mention} — reply with a time for <b>${esc(draft.text)}</b> — e.g. <code>10am</code>, ` +
-        '<code>tomorrow 9:30am</code>, <code>in 30m</code>, or <code>now</code>.',
-        { force_reply: true, selective: true });
-      const pRef = msgRef(prompt);
-      if (pRef) {
-        await env.DB.prepare('UPDATE drafts SET prompt_msg_id = ?, prompt_msg_ephemeral = ? WHERE id = ?')
-          .bind(pRef.id, pRef.ephemeral ? 1 : 0, draft.id).run();
-        await editRef(env, ctx, draft.chat_id, ref,
-          `🐾 Waiting for a time for <b>${esc(draft.text)}</b>…`,
-          { inline_keyboard: [[{ text: '✕ Cancel', callback_data: `w:${draft.id}:cancel` }]] });
-      }
-      return answerCallback(env, cb.id, 'Type the time as a reply ⏰');
-    }
-    let sched;
-    if (wiz[2] === 'ai') {
-      // Apply the confirmed AI suggestion; recompute recurring first-fires so
-      // a late tap doesn't schedule into the past.
-      let ai = null;
-      try { ai = draft.ai_json && JSON.parse(draft.ai_json); } catch { /* fall through */ }
-      if (!ai) return answerCallback(env, cb.id, 'That suggestion expired — pick a time below.');
-      if (ai.kind === 'once' && ai.firstFireAt <= Date.now()) {
-        return answerCallback(env, cb.id, 'That suggested time has passed — choose another.');
-      }
-      const firstFireAt = ai.kind === 'once'
-        ? ai.firstFireAt
-        : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
-      sched = { kind: ai.kind, detail: ai.detail, firstFireAt };
-    } else {
-      sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
-    }
-    if (!sched) return answerCallback(env, cb.id, 'That time has passed — choose another.');
-    // Claim the draft before creating anything. Telegram can deliver multiple
-    // taps close together; only the first conditional delete may proceed.
-    const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-      .bind(draft.id, draft.chat_id).run();
-    if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already scheduled.');
-    const wizBy = senderName(cb.from);
-    const wizP = {
-      text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
-      nagIntervals: JSON.parse(draft.nag_intervals), scored: draft.scored, ...sched,
-    };
-    const { id: newId, html } = await createReminder(env, draft.chat_id, wizP, wizBy, tz);
-    if (wizP.assigneeName || wizP.assigneeUserId) {
-      await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId));
-    } else {
-      await deleteRef(env, ctx, draft.chat_id, ref);
-      await confirmNewChore(env, ctx, wizBy, wizP, tz, newId, html);
-    }
-    return answerCallback(env, cb.id, 'Scheduled 📝');
-  }
-
   // Undo a just-created reminder: remove it and any live nag it produced.
-  const um = (cb.data || '').match(/^u:(\d+)$/);
-  if (um && cb.message) {
+  const um = data.match(/^u:(\d+)$/);
+  if (um) {
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
       .bind(+um[1], cb.message.chat.id).first();
     if (!r) return answerCallback(env, cb.id, 'Already gone.');
@@ -1937,8 +541,8 @@ async function handleCallback(env, cb) {
   }
 
   // Undo a /delete: restore the stashed reminder row.
-  const tr = (cb.data || '').match(/^t:(\d+)$/);
-  if (tr && cb.message) {
+  const tr = data.match(/^t:(\d+)$/);
+  if (tr) {
     const row = await env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?')
       .bind(+tr[1], cb.message.chat.id).first();
     if (!row) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
@@ -1965,15 +569,15 @@ async function handleCallback(env, cb) {
 
   // Dismiss a log line. Works on either kind of message, since deleteRef picks
   // the method from the ref rather than assuming a public message id.
-  if (cb.data === 'ok' && cb.message) {
+  if (data === 'ok') {
     await deleteRef(env, ctx, cb.message.chat.id, ref);
     return answerCallback(env, cb.id, '');
   }
 
   // 🗑 on a nag removes the chore outright. One tap, because the log line it
   // leaves carries Undo — a mis-tap is recoverable for a day.
-  const xm = (cb.data || '').match(/^x:(\d+)$/);
-  if (xm && cb.message) {
+  const xm = data.match(/^x:(\d+)$/);
+  if (xm) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+xm[1]).first();
     if (!firing) return answerCallback(env, cb.id, 'Already gone.');
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
@@ -1985,8 +589,8 @@ async function handleCallback(env, cb) {
   }
 
   // Snooze preset picked (or Back to the main buttons).
-  const zm = (cb.data || '').match(/^z:(\d+):(\w+)$/);
-  if (zm && cb.message) {
+  const zm = data.match(/^z:(\d+):(\w+)$/);
+  if (zm) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+zm[1]).first();
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
     if (zm[2] === 'b') {
@@ -2045,8 +649,8 @@ async function handleCallback(env, cb) {
       `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);
   }
 
-  const m = (cb.data || '').match(/^([dsb]):(\d+)$/);
-  if (!m || !cb.message) return answerCallback(env, cb.id, '');
+  const m = data.match(/^([dsb]):(\d+)$/);
+  if (!m) return answerCallback(env, cb.id, '');
   const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+m[2]).first();
   if (!firing || firing.state !== 'nagging') {
     return answerCallback(env, cb.id, 'Already handled 👍');

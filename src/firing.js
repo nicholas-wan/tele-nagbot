@@ -3,7 +3,9 @@
 
 import { sendMessage, sendPrivate, replyCtx, msgRef } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
-import { nagButtons, nagHtml, expireFiring, updateDashboard, isScored } from './handlers.js';
+import { isScored, CREDIT_SEP } from './household.js';
+import { nagButtons, nagHtml, expireFiring } from './nag.js';
+import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
 
 // How long a one-off's fire claim holds before an unfinished fire retries.
@@ -125,7 +127,7 @@ async function pickRotation(env, chatId, tz) {
   const ws = weekStart(Date.now(), tz);
   const stats = new Map();
   for (const row of results) {
-    for (const p of String(row.done_by).split(' & ')) {
+    for (const p of String(row.done_by).split(CREDIT_SEP)) {
       if (!p.trim()) continue;
       const s = stats.get(p) || { week: 0, total: 0 };
       s.total++;

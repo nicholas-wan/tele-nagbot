@@ -1,5 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { handleUpdate, nagButtons, updateDashboard } from '../src/handlers.js';
+import { handleUpdate } from '../src/handlers.js';
+import { nagButtons } from '../src/nag.js';
+import { updateDashboard } from '../src/dashboard.js';
 
 function dbForDashboard(reminders = []) {
   return {
@@ -596,7 +598,7 @@ describe('telling chores and reminders apart', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('flags a reminder on its nag, and leaves a chore unmarked', async () => {
-    const { nagHtml } = await import('../src/handlers.js');
+    const { nagHtml } = await import('../src/nag.js');
     expect(nagHtml({ text: 'brush cattos teeth', scored: 0 }, 0)).toContain('reminder');
     expect(nagHtml({ text: 'clear poop', scored: 1 }, 0)).not.toContain('reminder');
   });

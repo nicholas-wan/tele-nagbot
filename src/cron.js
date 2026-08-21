@@ -2,7 +2,11 @@
 // expire firings older than 24h.
 
 import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
-import { getTz, isScored, nagButtons, nagHtml, expireFiring, updateDashboard, choreStats, wakeChat, winnerStreak, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './handlers.js';
+import { getTz, isScored } from './household.js';
+import { nagButtons, nagHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './nag.js';
+import { updateDashboard } from './dashboard.js';
+import { choreStats, winnerStreak } from './stats.js';
+import { wakeChat } from './chores.js';
 import { fireReminder } from './firing.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
 
