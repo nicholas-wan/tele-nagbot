@@ -3,7 +3,7 @@
 // also serves /edit as its own message. Handles the m: and e: callbacks.
 
 import { editMessage, editReplyMarkup, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
-import { nextOccurrence, fmtLocal } from './time.js';
+import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, senderName, creditTogether } from './household.js';
 import { completeFiring } from './nag.js';
@@ -85,9 +85,19 @@ async function refreshEditor(env, cb, r, tz, buttons = null) {
 async function applyEditorChoice(env, r, kind, value, tz) {
   if (kind === 'time') {
     const detail = { ...JSON.parse(r.schedule_detail), h: +value, mi: 0 };
-    const next = r.schedule_kind === 'once'
-      ? nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz)
-      : nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
+    let next;
+    if (r.schedule_kind === 'once') {
+      next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
+    } else if (r.schedule_kind === 'interval' && r.next_fire_at) {
+      // An interval chore is anchored to its scheduled date — changing the
+      // time must not push the date a whole gap out. Keep the date; if the
+      // new time has already passed on it, take the next daily slot.
+      const f = localParts(r.next_fire_at, tz);
+      next = zonedEpoch(f.y, f.mo, f.d, +value, 0, tz);
+      if (next <= Date.now()) next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
+    } else {
+      next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
+    }
     await env.DB.prepare('UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ?')
       .bind(JSON.stringify(detail), next, r.id).run();
   } else if (kind === 'schedule') {

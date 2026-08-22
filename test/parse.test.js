@@ -197,3 +197,22 @@ describe('fortnightly weekdays and calendar start dates', () => {
     expect(p('call mom on the 3rd 9am').kind).toBe('monthly');
   });
 });
+
+// "today" on a recurring schedule is a promise: silently rolling a passed
+// time to tomorrow once turned "every 2 weeks today 6pm" into a Sunday chore.
+describe('a stated "today" on recurring schedules', () => {
+  const now = Date.UTC(2026, 7, 22, 10, 22); // Sat 22 Aug 2026, 6:22pm SGT
+  const p = (s) => parseRemind(s, s, [], now, 'Asia/Singapore');
+  const sgt = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(0, 16);
+
+  it('errors when the time has already passed today', () => {
+    expect(() => p('sheets every 2 weeks today 6pm')).toThrow(/already passed/);
+    expect(() => p('dishes today 5pm daily')).toThrow(/already passed/);
+  });
+
+  it('starts today when the time is still ahead', () => {
+    const r = p('sheets every 2 weeks today 9pm');
+    expect(r.kind).toBe('interval');
+    expect(sgt(r.firstFireAt)).toBe('2026-08-22T21:00');
+  });
+});

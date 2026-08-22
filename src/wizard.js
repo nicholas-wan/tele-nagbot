@@ -161,7 +161,10 @@ function scheduleFromCode(code, draft, now, tz) {
   const hm = code.match(/^h(\d+)$/);
   if (hm) {
     const d = { ...detail, h: +hm[1], mi: 0 };
-    return { kind, detail: d, firstFireAt: nextOccurrence(kind, d, now, tz) };
+    // Interval first occurrence: the next h:mi slot, not a full gap out.
+    return { kind, detail: d, firstFireAt: kind === 'interval'
+      ? nextOccurrence('daily', { h: d.h, mi: 0 }, now, tz)
+      : nextOccurrence(kind, d, now, tz) };
   }
   return null;
 }
@@ -187,11 +190,14 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
     if (draft && !draft.text) return resolveTextPrompt(env, msg, ctx, draft);
   }
   if (!draft) {
-    // Awaiting-text drafts are excluded here on purpose: only a direct reply
-    // may resolve them, or any group chat with a time in it would become a
-    // chore with no name.
+    // The wizard invites "reply with a custom time", but not every client
+    // makes replying obvious — so a message that is PURELY a time also counts
+    // while any wizard or prompt is fresh (the parsed.text check below rejects
+    // ambient chat). Awaiting-text drafts are still excluded: only a direct
+    // reply may resolve them, or any group chat with a time in it would
+    // become a chore with no name.
     draft = await env.DB.prepare(
-      `SELECT * FROM drafts WHERE chat_id = ? AND prompt_msg_id IS NOT NULL AND text <> ''
+      `SELECT * FROM drafts WHERE chat_id = ? AND text <> ''
          AND created_at > ? ORDER BY id DESC LIMIT 1`
     ).bind(chatId, now - 15 * 60000).first();
     bareTime = true;
@@ -218,7 +224,11 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h != null) {
     kind = draft.schedule_kind;
     detail = { ...JSON.parse(draft.schedule_detail), h: parsed.detail.h, mi: parsed.detail.mi };
-    firstFireAt = nextOccurrence(kind, detail, now, tz);
+    // Interval first occurrence: the next h:mi slot (the parser's rule) — an
+    // interval nextOccurrence would put the FIRST fire a whole gap away.
+    firstFireAt = kind === 'interval'
+      ? nextOccurrence('daily', { h: detail.h, mi: detail.mi }, now, tz)
+      : nextOccurrence(kind, detail, now, tz);
   }
   const p = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
@@ -295,9 +305,11 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
     if (ai.kind === 'once' && ai.firstFireAt <= Date.now()) {
       return answerCallback(env, cb.id, 'That suggested time has passed — choose another.');
     }
-    const firstFireAt = ai.kind === 'once'
-      ? ai.firstFireAt
-      : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
+    const firstFireAt = ai.kind === 'once' ? ai.firstFireAt
+      // Interval first occurrence: the next h:mi slot, not a full gap out.
+      : ai.kind === 'interval'
+        ? nextOccurrence('daily', { h: ai.detail.h, mi: ai.detail.mi }, Date.now(), tz)
+        : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
     sched = { kind: ai.kind, detail: ai.detail, firstFireAt };
   } else {
     sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);

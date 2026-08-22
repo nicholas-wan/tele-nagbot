@@ -322,6 +322,17 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     firstFireAt = kind === 'interval'
       ? nextOccurrence('daily', { h, mi }, after, tz)
       : nextOccurrence(kind, detail, after, tz);
+    // A stated "today" is a promise, not a hint: when the schedule's first
+    // slot can't land today any more, say so instead of silently starting
+    // tomorrow — "every 2 weeks today 6pm" sent at 6:22pm once became a
+    // Sunday chore with no warning.
+    if (td && !tm) {
+      const f = localParts(firstFireAt, tz);
+      const n = localParts(nowMs, tz);
+      if (f.y !== n.y || f.mo !== n.mo || f.d !== n.d) {
+        throw new ParseError('That can\'t start today — the time has already passed. Drop "today" or pick a later time.');
+      }
+    }
   }
 
   return finish(args, { kind, detail, firstFireAt, assigneeName, assigneeUserId, nagIntervals });

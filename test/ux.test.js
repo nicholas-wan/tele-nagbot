@@ -320,6 +320,57 @@ describe('chat UX', () => {
     expect(wizard.body.text).toContain('water plants');
   });
 
+  // A custom time for an interval draft must set the FIRST fire at the next
+  // matching slot — nextOccurrence('interval') would put it a whole gap out.
+  function intervalDraftDb(runs) {
+    const draft = {
+      id: 12, chat_id: 1, text: 'slutbed', scored: 1, schedule_kind: 'interval',
+      schedule_detail: '{"days":14}', nag_intervals: '[15,30,60]',
+      wizard_msg_id: 77, wizard_msg_ephemeral: 0, prompt_msg_id: null, created_at: Date.now(),
+    };
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM drafts') && sql.includes('prompt_msg_id = ?')) return draft;
+                if (sql.includes('FROM drafts') && sql.includes("text <> ''")) return draft;
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 30 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const firesSoon = (runs) => {
+    const insert = runs.find((u) => u.sql.includes('INSERT INTO reminders'));
+    expect(insert.args.join()).toContain('"days":14');
+    expect(insert.args.join()).toContain('"h":9');
+    const at = insert.args.find((a) => typeof a === 'number' && a > Date.now());
+    expect(at).toBeLessThan(Date.now() + 26 * 3600000); // next 9am slot, not +14 days
+  };
+
+  it('starts an interval chore at the next slot after a typed time', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: intervalDraftDb(runs) },
+      promptReply('9am'));
+    firesSoon(runs);
+  });
+
+  it('picks up a pure time typed after the wizard without a reply', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: intervalDraftDb(runs) }, {
+      message: { message_id: 6, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '9am' },
+    });
+    firesSoon(runs);
+  });
+
   it('tidies away a typo’d command like any other', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {
