@@ -216,3 +216,24 @@ describe('a stated "today" on recurring schedules', () => {
     expect(sgt(r.firstFireAt)).toBe('2026-08-22T21:00');
   });
 });
+
+// The weekday marker is part of the date phrase: "this saturday" must not
+// leave "this" behind in the task text.
+describe('weekday phrases with markers', () => {
+  const now = Date.UTC(2026, 7, 10, 4, 0); // Mon 10 Aug 2026, noon SGT
+  const p = (s) => parseRemind(s, s, [], now, 'Asia/Singapore');
+  const sgt = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(0, 16);
+
+  it('consumes "this saturday" whole', () => {
+    const r = p('book something this saturday 2pm');
+    expect(r.text).toBe('book something');
+    expect(sgt(r.firstFireAt)).toBe('2026-08-15T14:00');
+  });
+
+  it('anchors "starting saturday" without leaving words behind', () => {
+    const r = p('gift every 2 weeks starting saturday 10am');
+    expect(r.text).toBe('gift');
+    expect(r.kind).toBe('interval');
+    expect(sgt(r.firstFireAt)).toBe('2026-08-15T10:00');
+  });
+});

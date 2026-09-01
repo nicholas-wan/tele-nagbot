@@ -63,9 +63,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     args = args.replace(rotM[0], ' ');
   }
 
-  // "from [this|next|the] friday": anchors the first occurrence to that day.
+  // "from [this|next|the] friday" (or "starting friday"): anchors the first
+  // occurrence to that day.
   let fromDay = null;
-  const fromM = args.match(new RegExp(`\\bfrom\\s+(?:this\\s+|next\\s+|the\\s+)?(${DAY_WORD})\\b`, 'i'));
+  const fromM = args.match(new RegExp(`\\b(?:from|start(?:ing)?)\\s+(?:this\\s+|next\\s+|the\\s+)?(${DAY_WORD})\\b`, 'i'));
   if (fromM) {
     fromDay = DAY_INDEX[fromM[1].slice(0, 3).toLowerCase()];
     args = args.replace(fromM[0], ' ');
@@ -287,9 +288,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     const p = localParts(nowMs, tz);
     const tomorrowM = args.match(/\btomorrow\b/i);
     const todayM = args.match(/\btoday\b/i);
-    // A weekday only counts as a date when marked ("on/next fri") or left
-    // dangling at the end — "buy sun hat" keeps its sun.
-    const wdM = args.match(new RegExp(`\\b(?:on|next)\\s+(${DAY_WORD})\\b`, 'i'))
+    // A weekday only counts as a date when marked ("on/next/this fri") or
+    // left dangling at the end — "buy sun hat" keeps its sun. The marker is
+    // consumed too, or "book something this saturday" kept its "this".
+    const wdM = args.match(new RegExp(`\\b(?:on|next|this)\\s+(${DAY_WORD})\\b`, 'i'))
       || args.match(new RegExp(`\\b(${DAY_WORD})\\s*$`, 'i'));
 
     if (tomorrowM) {
