@@ -44,17 +44,21 @@ export async function choreStats(env, chatId, since, until = Date.now()) {
 }
 
 // Consecutive past full weeks the given person won outright (ties break it).
+// One query for the whole 26-week window, grouped into weeks here — the old
+// query-per-week loop made /stats up to 26 sequential D1 round trips.
 export async function winnerStreak(env, chatId, tz, leader) {
+  const end = weekStart(Date.now(), tz);
+  const start = end - 26 * 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
+  const { results } = await env.DB.prepare(
+    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
+  ).bind(chatId, start, end).all();
   let streak = 0;
-  let start = weekStart(Date.now(), tz);
   for (let w = 0; w < 26; w++) {
-    const end = start;
-    start -= 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
-    const { results } = await env.DB.prepare(
-      "SELECT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
-    ).bind(chatId, start, end).all();
+    const hi = end - w * 7 * 86400000;
+    const lo = hi - 7 * 86400000;
     const counts = new Map();
     for (const r of results) {
+      if (r.done_at <= lo || r.done_at > hi) continue;
       for (const p of String(r.done_by || '').split(CREDIT_SEP)) {
         if (p) counts.set(p, (counts.get(p) || 0) + 1);
       }
