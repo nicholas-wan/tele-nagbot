@@ -9,7 +9,7 @@ import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc,
 import { parseRemind, ParseError, NoTimeError } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtClock, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, canonName, creditTogether,
-         rememberMember, isMember } from './household.js';
+         rememberMember, isMember, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
@@ -569,6 +569,28 @@ async function handleCallback(env, cb) {
     await updateDashboard(env, r.chat_id);
     await editRef(env, ctx, r.chat_id, ref, `↩️ Restored <b>${esc(r.text)}</b>`);
     return answerCallback(env, cb.id, 'Restored 😺');
+  }
+
+  // Upgrade a done receipt's credit to the whole household — the fix for
+  // tapping Done early solo when the work was actually shared.
+  const gm = data.match(/^g:(\d+)$/);
+  if (gm) {
+    const firing = await env.DB.prepare("SELECT * FROM firings WHERE id = ? AND state = 'done'")
+      .bind(+gm[1]).first();
+    if (!firing) return answerCallback(env, cb.id, 'That one is gone.');
+    const names = String(firing.done_by || '').split(CREDIT_SEP).filter(Boolean);
+    const roster = await householdRoster(env, firing.chat_id);
+    const credit = creditTogether(names[0] || senderName(cb.from), [...names.slice(1), ...roster]);
+    await env.DB.prepare("UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done'")
+      .bind(credit, firing.id).run();
+    const tz = await getTz(env, firing.chat_id);
+    const next = await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?')
+      .bind(firing.reminder_id).first();
+    await editRef(env, ctx, firing.chat_id, ref,
+      `😻 <s>${esc(firing.reminder_text || 'chore')}</s> — done early by ${esc(credit)}. The cats are impressed.` +
+      (next && next.next_fire_at ? `\nNext: ${fmtLocal(next.next_fire_at, tz)}` : ''),
+      { inline_keyboard: [[{ text: '✅ OK', callback_data: 'ok' }]] });
+    return answerCallback(env, cb.id, 'Shared credit 🤝');
   }
 
   // Dismiss a log line. Works on either kind of message, since deleteRef picks

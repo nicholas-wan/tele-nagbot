@@ -4,7 +4,7 @@
 import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, RECEIPT_TTL_MS } from './tg.js';
 import { nextOccurrence, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
-import { isScored } from './household.js';
+import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons, completeFiring } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
@@ -161,17 +161,23 @@ export async function completeEarly(env, r, credit, tz) {
     ).bind(r.id).first();
     return Boolean(firing && await completeFiring(env, firing, r, credit, tz));
   }
-  await env.DB.prepare(
+  const ins = await env.DB.prepare(
     `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
      VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
   ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
-  // The receipt is the shared record — there is no nag message to edit.
+  // The receipt is the shared record — there is no nag message to edit. A solo
+  // credit carries a fix-up button, because tapping Done early when the work
+  // was actually shared shouldn't need an admin to repair.
   const next = r.schedule_kind === 'once' ? null
     : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
+  const markup = credit.includes(CREDIT_SEP) ? null : { inline_keyboard: [[
+    { text: '🤝 Together too', callback_data: `g:${ins.meta.last_row_id}` },
+    { text: '✅ OK', callback_data: 'ok' },
+  ]] };
   await sendMessage(env, r.chat_id,
     `😻 <s>${esc(r.text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
     (next && next.next_fire_at ? `\nNext: ${fmtLocal(next.next_fire_at, tz)}` : ''),
-    null, { silent: true, ttl: RECEIPT_TTL_MS });
+    markup, { silent: true, ttl: RECEIPT_TTL_MS });
   await updateDashboard(env, r.chat_id);
   return true;
 }

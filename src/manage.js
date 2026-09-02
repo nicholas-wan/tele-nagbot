@@ -209,7 +209,7 @@ async function choreActionsMarkup(env, r, tz) {
   // Not nagging yet but scheduled: doing it ahead of the nag still counts.
   else if (!r.paused && r.next_fire_at != null) rows.push([
     { text: '✅ Done early', callback_data: `m:done:${r.id}` },
-    { text: '🤝 Together', callback_data: `m:doneall:${r.id}` },
+    { text: '🤝 Together early', callback_data: `m:doneall:${r.id}` },
   ]);
   rows.push([{ text: '✏️ Edit details', callback_data: `m:edit:${r.id}` }]);
   rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `m:${r.paused ? 'resume' : 'pause'}:${r.id}` }]);

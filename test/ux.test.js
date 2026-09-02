@@ -256,6 +256,47 @@ describe('chat UX', () => {
     const receipt = calls.find((c) => c.url.endsWith('/sendMessage') && /done early/.test(c.body.text || ''));
     expect(receipt.body.receiver_user_id).toBeUndefined();
     expect(receipt.body.text).toContain('Next:');
+    // A solo done-early is fixable in place: the receipt offers Together too.
+    expect(JSON.stringify(receipt.body.reply_markup)).toContain('g:');
+  });
+
+  // Tapping Together too on a done receipt upgrades the credit to everyone.
+  it('upgrades a solo done-early credit to the whole household', async () => {
+    const runs = [];
+    const db = {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM firings WHERE id')) {
+                  return { id: 27, chat_id: 1, reminder_id: 8, state: 'done',
+                    done_by: '@nick', reminder_text: 'cat fountain' };
+                }
+                if (sql.includes('SELECT next_fire_at')) return { next_fire_at: Date.now() + 86400000 };
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() {
+                if (sql.includes('DISTINCT done_by')) return { results: [{ done_by: '@nick & @jane' }] };
+                return { results: [] };
+              },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
+      callback_query: {
+        id: 'cb7', data: 'g:27', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 55, chat: { id: 1 }, text: 'receipt' },
+      },
+    });
+    const upd = runs.find((u) => u.sql.includes('SET done_by'));
+    expect(upd.args[0]).toBe('@nick & @jane');
+    const edited = calls.find((c) => c.url.endsWith('/editMessageText'));
+    expect(edited.body.text).toContain('done early by @nick &amp; @jane');
   });
 
   // The "/" autocomplete menu sends the bare command; that must ask for the
