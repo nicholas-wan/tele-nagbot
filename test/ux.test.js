@@ -385,6 +385,49 @@ describe('chat UX', () => {
     expect(data).not.toContain('st:week');
   });
 
+  // Boards split shared work from solo work: one 🤝 block for together
+  // items, then each person's block listing only what they did alone.
+  it('groups the board by done-together, then solo per person', async () => {
+    const now = Date.now();
+    const rows = [
+      { done_by: '@nick & @jane', done_at: now - 3000, text: 'cut nails' },
+      { done_by: '@nick & @jane', done_at: now - 2000, text: 'bedsheets' },
+      { done_by: '@nick', done_at: now - 1000, text: 'clear poop' },
+    ];
+    const db = {
+      prepare(sql) {
+        return {
+          bind() {
+            return {
+              async first() {
+                if (sql.includes('COUNT(*)')) return { n: 0 };
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() {
+                if (sql.includes('COALESCE')) return { results: rows };
+                return { results: [] };
+              },
+              async run() { return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/stats' },
+    });
+    const sent = calls.find((c) => c.url.endsWith('/sendMessage') && /Weekly leaderboard/.test(c.body.text));
+    const text = sent.body.text;
+    expect(text).toContain('🤝 <b>Done together</b> — 2 ✅');
+    expect(text).toContain('<b>@nick</b> — 3 ✅ (1 solo)');
+    expect(text).toContain('<b>@jane</b> — 2 ✅ (0 solo)');
+    // Together items appear once, in the shared block, not under each person.
+    expect(text.match(/cut nails/g)).toHaveLength(1);
+    // The solo item sits under its person, after the together block.
+    expect(text.indexOf('clear poop')).toBeGreaterThan(text.indexOf('Done together'));
+  });
+
   it('flips the stats message to last week in place', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {

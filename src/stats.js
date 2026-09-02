@@ -23,15 +23,24 @@ export async function choreStats(env, chatId, since, until = Date.now()) {
      ORDER BY f.done_at DESC`
   ).bind(chatId, since, until).all();
   const byPerson = new Map();
+  const together = [];
+  const solo = new Map();
   for (const h of history.results) {
-    // "nick & jane" (done together) credits each person individually.
-    for (const who of String(h.done_by || '?').split(CREDIT_SEP)) {
+    // "nick & jane" (done together) credits each person individually; the
+    // boards also split shared work from solo work, so both views are kept.
+    const names = String(h.done_by || '?').split(CREDIT_SEP);
+    if (names.length > 1) together.push(h);
+    else {
+      if (!solo.has(names[0])) solo.set(names[0], []);
+      solo.get(names[0]).push(h);
+    }
+    for (const who of names) {
       if (!byPerson.has(who)) byPerson.set(who, []);
       byPerson.get(who).push(h);
     }
   }
   const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-  return { people, expired: (expired && expired.n) || 0, total: history.results.length };
+  return { people, together, solo, expired: (expired && expired.n) || 0, total: history.results.length };
 }
 
 // Consecutive past full weeks the given person won outright (ties break it).
@@ -57,6 +66,13 @@ export async function winnerStreak(env, chatId, tz, leader) {
     streak++;
   }
   return streak;
+}
+
+// "(N solo)" on a person's total, shown only when some of it was shared —
+// an all-solo count needs no qualifier.
+function soloNote(s, who, items) {
+  const solo = (s.solo.get(who) || []).length;
+  return solo === items.length ? '' : ` (${solo} solo)`;
 }
 
 // One person's block of the board: header line plus their recent items.
@@ -86,8 +102,12 @@ async function statsHtml(env, chatId, tz, view) {
       return 'Nothing completed in the last 6 months yet. The cats are patient.';
     }
     const lines = ['📜 <b>Chore log — last 6 months</b>'];
+    if (s.together.length) {
+      lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
+    }
     for (const [who, items] of s.people) {
-      lines.push(...personLines(who, items, tz, `<b>${esc(who)}</b> — ${items.length} ✅`));
+      lines.push(...personLines(who, s.solo.get(who) || [], tz,
+        `<b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}`));
     }
     if (s.expired) {
       lines.push('');
@@ -110,10 +130,13 @@ async function statsHtml(env, chatId, tz, view) {
     const lines = [view === 'last'
       ? `📅 <b>Last week</b> — ${ofWeek}`
       : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
+    if (s.together.length) {
+      lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
+    }
     s.people.forEach(([who, items], i) => {
       const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
-      lines.push(...personLines(who, items, tz,
-        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${fire}`));
+      lines.push(...personLines(who, s.solo.get(who) || [], tz,
+        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}${fire}`));
     });
     if (s.expired) {
       lines.push('');
