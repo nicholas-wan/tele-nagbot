@@ -371,6 +371,36 @@ describe('chat UX', () => {
     firesSoon(runs);
   });
 
+  // One /stats: the board carries tabs for the other views and flips in place.
+  it('sends one stats message with view tabs', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/stats' },
+    });
+    const sent = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(sent.body.text).toContain('Fresh week');
+    const data = sent.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
+    expect(data).toContain('st:last');
+    expect(data).toContain('st:all');
+    expect(data).not.toContain('st:week');
+  });
+
+  it('flips the stats message to last week in place', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb9', data: 'st:last', from: { id: 2, first_name: 'Nick' },
+        message: { message_id: 98, chat: { id: 1 }, text: 'board' },
+      },
+    });
+    const edited = calls.find((c) => c.url.endsWith('/editMessageText'));
+    expect(edited.body.message_id).toBe(98);
+    expect(edited.body.text).toContain('Last week');
+    const data = edited.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
+    expect(data).toContain('st:week');
+    expect(data).not.toContain('st:last');
+  });
+
   it('tidies away a typo’d command like any other', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: dbForDashboard() };
     await handleUpdate(env, {

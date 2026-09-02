@@ -1,25 +1,27 @@
-// The leaderboard: weekly stats, the 6-month log, and winner streaks.
+// The leaderboard: one /stats message with This week / Last week / 6 months
+// tabs that edit in place (the st: callbacks), plus the shared stats queries
+// the cron recap uses.
 
-import { sendPrivate, sendPrivateLong, esc } from './tg.js';
+import { sendPrivate, editRef, answerCallback, esc } from './tg.js';
 import { weekStart, fmtShort } from './time.js';
-import { CREDIT_SEP } from './household.js';
+import { getTz, CREDIT_SEP } from './household.js';
 import { choreEmoji } from './dashboard.js';
 
 const STATS_MAX_PER_PERSON = 15;
 const MEDALS = ['🥇', '🥈', '🥉'];
 
-// Fetches done-history and expired count for a window; shared by the weekly
-// leaderboard, /stats all, and the Sunday recap.
-export async function choreStats(env, chatId, since) {
+// Fetches done-history and expired count for a window; shared by the tabs
+// and the Sunday recap. `until` bounds a closed week (defaults to now).
+export async function choreStats(env, chatId, since, until = Date.now()) {
   const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ?"
-  ).bind(chatId, since).first();
+    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ? AND fired_at <= ?"
+  ).bind(chatId, since, until).first();
   const history = await env.DB.prepare(
     `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
      FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ?
+     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ? AND f.done_at <= ?
      ORDER BY f.done_at DESC`
-  ).bind(chatId, since).all();
+  ).bind(chatId, since, until).all();
   const byPerson = new Map();
   for (const h of history.results) {
     // "nick & jane" (done together) credits each person individually.
@@ -29,7 +31,7 @@ export async function choreStats(env, chatId, since) {
     }
   }
   const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-  return { people, expired: expired.n, total: history.results.length };
+  return { people, expired: (expired && expired.n) || 0, total: history.results.length };
 }
 
 // Consecutive past full weeks the given person won outright (ties break it).
@@ -67,48 +69,79 @@ function personLines(who, items, tz, header) {
   return lines;
 }
 
-export async function cmdStats(env, ctx, tz, args = '') {
-  const chatId = ctx.chatId;
-  if (/^\s*all\b/i.test(args)) return statsAll(env, ctx, tz);
-
-  const since = weekStart(Date.now(), tz);
-  const s = await choreStats(env, chatId, since);
-  if (!s.total && !s.expired) {
-    return sendPrivate(env, ctx,
-      '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday; /stats all for history.)');
-  }
-
-  const streak = s.people.length ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
-  const lines = [`🏆 <b>Weekly leaderboard</b> — week of ${fmtShort(since, tz).replace(/,.*$/, '')}`];
-  s.people.forEach(([who, items], i) => {
-    const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
-    lines.push(...personLines(who, items, tz,
-      `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${fire}`));
-  });
-  if (s.expired) {
-    lines.push('');
-    lines.push(`🪦 Expired unclaimed this week: ${s.expired}`);
-  }
-  lines.push('');
-  lines.push('Resets Monday · /stats all for the 6-month log');
-  await sendPrivateLong(env, ctx, lines.join('\n'));
+// The two tabs that aren't showing, plus OK. Tapping edits in place.
+function statsButtons(view) {
+  const tabs = [['week', '🏆 This week'], ['last', '📅 Last week'], ['all', '📜 6 months']]
+    .filter(([v]) => v !== view)
+    .map(([v, text]) => ({ text, callback_data: `st:${v}` }));
+  return { inline_keyboard: [tabs, [{ text: '✅ OK', callback_data: 'ok' }]] };
 }
 
-async function statsAll(env, ctx, tz) {
-  const chatId = ctx.chatId;
-  const since = Date.now() - 183 * 24 * 3600000; // ~6 months
-  const s = await choreStats(env, chatId, since);
-  if (!s.total && !s.expired) {
-    return sendPrivate(env, ctx, 'Nothing completed in the last 6 months yet. The cats are patient.');
+async function statsHtml(env, chatId, tz, view) {
+  const now = Date.now();
+  let html;
+  if (view === 'all') {
+    const s = await choreStats(env, chatId, now - 183 * 24 * 3600000, now); // ~6 months
+    if (!s.total && !s.expired) {
+      return 'Nothing completed in the last 6 months yet. The cats are patient.';
+    }
+    const lines = ['📜 <b>Chore log — last 6 months</b>'];
+    for (const [who, items] of s.people) {
+      lines.push(...personLines(who, items, tz, `<b>${esc(who)}</b> — ${items.length} ✅`));
+    }
+    if (s.expired) {
+      lines.push('');
+      lines.push(`🪦 Expired unclaimed: ${s.expired}`);
+    }
+    html = lines.join('\n');
+  } else {
+    const thisWeek = weekStart(now, tz);
+    const since = view === 'last' ? thisWeek - 7 * 86400000 : thisWeek; // fixed-offset tz
+    const until = view === 'last' ? thisWeek : now;
+    const s = await choreStats(env, chatId, since, until);
+    const ofWeek = `week of ${fmtShort(since, tz).replace(/,.*$/, '')}`;
+    if (!s.total && !s.expired) {
+      return view === 'last'
+        ? `📅 <b>Last week</b> — ${ofWeek}\n\nNothing was completed. The cats pretend not to remember.`
+        : '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday.)';
+    }
+    const streak = view === 'week' && s.people.length
+      ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
+    const lines = [view === 'last'
+      ? `📅 <b>Last week</b> — ${ofWeek}`
+      : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
+    s.people.forEach(([who, items], i) => {
+      const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
+      lines.push(...personLines(who, items, tz,
+        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${fire}`));
+    });
+    if (s.expired) {
+      lines.push('');
+      lines.push(`🪦 Expired unclaimed${view === 'week' ? ' this week' : ''}: ${s.expired}`);
+    }
+    if (view === 'week') {
+      lines.push('');
+      lines.push('Resets Monday');
+    }
+    html = lines.join('\n');
   }
+  // One message with tabs cannot chunk; past the cap, trim on a line boundary.
+  if (html.length > 4000) html = html.slice(0, html.lastIndexOf('\n', 3980)) + '\n…';
+  return html;
+}
 
-  const lines = ['📜 <b>Chore log — last 6 months</b>'];
-  for (const [who, items] of s.people) {
-    lines.push(...personLines(who, items, tz, `<b>${esc(who)}</b> — ${items.length} ✅`));
-  }
-  if (s.expired) {
-    lines.push('');
-    lines.push(`🪦 Expired unclaimed: ${s.expired}`);
-  }
-  await sendPrivateLong(env, ctx, lines.join('\n'));
+export async function cmdStats(env, ctx, tz, args = '') {
+  // "/stats all" and "/stats last" still work as deep links into the tabs.
+  const view = /\b(all|6)/i.test(args) ? 'all' : /\b(last|prev)/i.test(args) ? 'last' : 'week';
+  await sendPrivate(env, ctx, await statsHtml(env, ctx.chatId, tz, view), statsButtons(view));
+}
+
+// The st: callback family: flip the message to another tab in place.
+export async function handleStatsCallback(env, cb, ctx, ref) {
+  const m = (cb.data || '').match(/^st:(week|last|all)$/);
+  if (!m) return answerCallback(env, cb.id, '');
+  const chatId = cb.message.chat.id;
+  const tz = await getTz(env, chatId);
+  await editRef(env, ctx, chatId, ref, await statsHtml(env, chatId, tz, m[1]), statsButtons(m[1]));
+  return answerCallback(env, cb.id, '');
 }

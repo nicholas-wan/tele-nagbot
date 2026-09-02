@@ -11,7 +11,7 @@ Telegram chore bot that nags until someone marks a chore done. Cloudflare Worker
 /remind pay tax friday        same syntax, no leaderboard points
 /chore @jane dishes now       assignee · rotate = fair-share it
 /list · /edit · /done · /pause · /resume · /skip · /delete    (by chore name)
-/poke · /stats · /stats all · /pause all 14 · /resume all
+/poke · /stats (tabs: This week · Last week · 6 months) · /pause all 14 · /resume all
 /invite bday lunch 13 sep 12pm at Fu Yuan, 80 Middle Rd    calendar file, tap to add
 ```
 

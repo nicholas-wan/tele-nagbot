@@ -18,7 +18,7 @@ import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, setReminderPaused, completeEarly, wakeChat } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
-import { cmdStats } from './stats.js';
+import { cmdStats, handleStatsCallback } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
 
@@ -174,7 +174,7 @@ function helpText(section = 'home') {
     '/edit · /delete · /pause · /resume · /skip — use a chore name or number\n' +
     '/poke — re-send everything outstanding\n' +
     '/pause all 14 · /resume all — vacation mode\n' +
-    '/stats · /stats all — weekly board and history\n' +
+    '/stats — leaderboard with This week / Last week / 6 months tabs\n' +
     '/invite dentist tomorrow 3pm at Mount E — get a calendar file to add\n\n' +
     'Reply <code>done</code>, <code>done together</code>, or <code>snooze 2h</code> directly to a nag.';
   if (section === 'stickers') return '🐾 <b>Sticker tools</b>\n\n' +
@@ -515,6 +515,7 @@ async function handleCallback(env, cb) {
   if (data.startsWith('e:')) return handleEditorCallback(env, cb, ctx, ref);
   if (data.startsWith('m:')) return handleManageCallback(env, cb);
   if (data.startsWith('w:')) return handleWizardCallback(env, cb, ctx, ref);
+  if (data.startsWith('st:')) return handleStatsCallback(env, cb, ctx, ref);
 
   const help = data.match(/^h:(home|schedule|more|stickers)$/);
   if (help) {

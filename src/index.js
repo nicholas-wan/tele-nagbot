@@ -123,7 +123,7 @@ export default {
             { command: 'chore', description: 'New chore — counts on the leaderboard' },
             { command: 'remind', description: 'Plain reminder — no points' },
             { command: 'list', description: 'Active chores and reminders' },
-            { command: 'stats', description: 'Weekly leaderboard — add "all" for history' },
+            { command: 'stats', description: 'Leaderboard — this week, last week, history' },
             { command: 'invite', description: 'Calendar file for a meeting — tap to add' },
             { command: 'help', description: 'Quick guide and more options' },
           ],
