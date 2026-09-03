@@ -17,22 +17,24 @@ Telegram chore bot that nags until someone marks a chore done. Cloudflare Worker
 
 Schedules: `7pm daily`, `every mon,thu 8am`, `every 8 days`, `every 2 weeks`, `every other saturday`, `every 3 months`, `on the 1st`, `weekdays`, `starting 29 aug`, `tomorrow 9:30am`, `in 20m`, `now`, `noon`, `nag:10m`. Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped). A bare `/chore` or `/remind` — a menu tap — asks what to nag about; the reply is the rest of the command.
 
-Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane`, or `snooze 2h` works, as does a 👍/✅ reaction. Max 3 snoozes.
+Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane`, or `snooze 2h` works, as does a 👍/✅ reaction. Max 3 snoozes. The household roster (Done together, `done with`, the Assignee menu, rotation) is everyone the bot has seen post in the chat (`members`), spelled `@username` or first name; a `done with` name that matches nobody is dropped with a private note rather than becoming a phantom housemate.
 
 ## Behavior
 
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
-- Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow** — a postponement, not a snooze: it carries `fired_at` forward so the expiry window moves with the nag. Both count against the 3-snooze cap.
-- **One confirmation per new chore, never two.** Unassigned: a public "added" line carrying the Undo. Assigned: a private copy only, because announcing it would leak what its private nag hides.
+- Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow** — a postponement, not a snooze: it carries `fired_at` forward so the expiry window moves with the nag. Both count against the 3-snooze cap. If the schedule's next occurrence arrives before a postponed nag returns, the postponed one is dropped as superseded — it is not counted as expired.
+- `/pause` freezes a live nag: no re-nags, and no expiry either — `/resume` hands it a fresh 24h window. Resume never moves a chore that is still due in the future, and an interval chore advances from its own anchor rather than a full gap from now.
+- **One confirmation per new chore, never two.** Unassigned: a public "added" line carrying the Undo. Assigned: a private copy only, so the group is not pinged about someone else's chore. (The pinned board still lists it with its assignee — the privacy is about noise, not secrecy.)
 - Doing a chore before it nags still counts: `/done <chore>` (or ✅ Done early in Manage) records the credit and advances the schedule past the upcoming slot; a one-off is spent outright.
 - `/chore` scores, `/remind` does not, and they look identical otherwise — so a reminder is flagged `(reminder — no points)` on its nag and `· reminder` on the board. Chores are the default and stay unmarked. **Done together stays on both**: it records who did the work, points or not.
 - Every message the bot sends is recorded in `sent_messages` and swept — a day for most, ~2h for done-receipts and celebration stickers (`RECEIPT_TTL_MS`). The pinned dashboard (`keep: true`) is the sole exception; ✅ OK just gets there sooner.
 - Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
 - Pinned dashboard lists every chore, urgency-ordered, two short lines each so nothing wraps on a phone. Refreshed on every change and each morning.
 - Manage, edit, and delete happen **in place on the pinned message** — only its `reply_markup` changes, never its text. So every button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`); internal numbers never appear in labels.
-- Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins it, as does `POST /admin?board`.
+- Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins it, as does `POST /admin?board`. A board edit that fails for a transient reason (network, a 429 that outlived the retry) keeps the existing board; only a "message not found" style error recreates it, so a blip no longer pins a duplicate.
+- Toggling 🏆 Points in the editor also updates the chore's live nag, not just future ones.
 - The 8am digest speaks only when something was left nagging overnight — the board already carries the day's agenda. Weekly wrap Sunday 8pm. Both silent. Streaks 🔥 for repeat weekly winners.
-- Chore icons come from a keyword table in `handlers.js`; lead the text with your own emoji to override.
+- Chore icons come from a keyword table in `dashboard.js`; lead the text with your own emoji to override.
 - Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Latte is the light calico, Mocha the dark tortie, and the nag line names whichever the sticker shows — so a wrong tag reads as the wrong cat. Fix with `/tagsticker N latte|mocha|both`; `/tags` lists them.
 
 ## Ephemeral messages (Bot API 10.2)
@@ -51,7 +53,8 @@ Manage is deliberately **shared**: tapping ⚙️ swaps the pinned message's but
 - A private send needs `receiver_user_id`; within 15s of a tap it also carries `callback_query_id`, which is what lets the bot reach a member it has no other recent contact with. The bot must be a group admin, and delivery to an offline user is not guaranteed — `sendPrivate` falls back to public when Telegram refuses.
 - Ephemeral messages report `message_id: 0` plus a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs (`drafts.*_msg_ephemeral`, `firings.last_message_ephemeral` + `nag_user_id`). Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
 - The nag lifecycle goes through `sendNag` / `editNag` / `deleteNag`; never touch `last_message_id` with the public helpers, or a private nag becomes unreachable. There is no reply-markup-only edit for ephemeral messages, so those paths re-render the text too.
-- DM nag routing is **gone**. `nag_chat_id` is always NULL; `members.dm_ok` is vestigial.
+- DM nag routing is **gone**. `nag_chat_id` is always NULL; `members.dm_ok` is vestigial and no longer written. A known member who DMs the bot gets one line pointing them back to the group; strangers are ignored.
+- Every nag button (`d:`, `b:`, `s:`, `z:`, `x:`, `g:`) resolves its firing scoped to the chat the tap came from, so a forged callback id from another household is inert.
 - Kill switch: set `EPHEMERAL = "0"` in `wrangler.toml` `[vars]` and deploy to make everything public again.
 
 ## Code
@@ -87,9 +90,9 @@ npx wrangler deploy
 npx wrangler tail
 ```
 
-- Secrets: `BOT_TOKEN` (never handle it — hand the user the command), `WEBHOOK_SECRET` (Telegram's header only), `ADMIN_SECRET`. Local copies in `%TEMP%\nagbot-webhook-secret.txt` and `%TEMP%\nagbot-admin-secret.txt`.
+- Secrets: `BOT_TOKEN` (never handle it — hand the user the command), `WEBHOOK_SECRET` (Telegram's header only), `ADMIN_SECRET`. Keep local copies in `.dev.vars` (gitignored, and what `wrangler dev` reads) rather than `%TEMP%`, which Windows cleans up. `/setup` refuses to register a webhook while `WEBHOOK_SECRET` is unset — a secretless webhook would fail the header check on every delivery.
 - Allowed chats live in `wrangler.toml` `[vars] ALLOWED_CHATS`; missing config fails closed. The bot needs Pin Messages and Delete Messages, and admin status is also what makes ephemeral sends possible.
-- Wrangler is pinned in `devDependencies` — the floating `npx` release broke once.
+- Wrangler is a local `devDependency` locked by `package-lock.json` (the range in `package.json` is a caret) — the floating `npx` release broke once, so always run it through the project.
 - Register webhook + command menu (also after changing the menu):
 
 ```powershell
@@ -97,7 +100,8 @@ curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.latte
 ```
 
 - Other admin actions, same bearer token: `?info` (webhook + registered commands, read back from Telegram), `?diag[=<chat>][&user=<id>]` (membership, admin rights, whether the chat id changed), `?board` (rebuild and re-pin the dashboard), `?stickers&chat=<id>` and `?stickerimg=N&chat=<id>` (list tags, fetch one image).
-- `?board` walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pin a human made. Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
+- `?board` walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pinned message a human *authored* (`pinned_message.from` is the author, not whoever pinned it — a bot message a human pinned is treated as the bot's). Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
 - Migrations: `npx wrangler d1 execute nagbot-eu --remote --command "ALTER …"`, one statement at a time, mirrored into `schema.sql`.
+- Tests: `test/fixes-*.test.js` are regression tests for specific past bugs (ephemeral editor, duplicate boards, postpone/pause accounting, roster); keep them when refactoring.
 - Deploys take ~30s to propagate — re-run before concluding a change didn't work. Debug with `wrangler tail`, or by querying `firings` / `reminders` / `settings` in `nagbot-eu`; they explain almost every "the bot didn't do X" report.
 - A group upgraded to a supergroup gets a **new chat id** and loses its pin. Rejected group chats are logged, so `wrangler tail` shows the new id immediately; update `ALLOWED_CHATS`, migrate the D1 rows, then `?board`.
