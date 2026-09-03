@@ -1,10 +1,10 @@
 // Fires one reminder: expires any stale nag, sends sticker + nag message,
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
-import { sendMessage, sendPrivate, replyCtx, msgRef } from './tg.js';
+import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
 import { isScored, CREDIT_SEP } from './household.js';
-import { nagButtons, nagHtml, expireFiring } from './nag.js';
+import { nagButtons, nagHtml, expireFiring, deleteNag, nagChat } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
 
@@ -39,11 +39,29 @@ export async function fireReminder(env, r, now, tz) {
   }
 
   // A previous occurrence still nagging when the next one fires gets
-  // quietly expired so only one live nag exists per reminder.
+  // quietly expired so only one live nag exists per reminder — unless it was
+  // deliberately postponed. "📅 Tomorrow" carries fired_at forward, so a
+  // still-nagging firing dated in the future is one the household moved past
+  // this very occurrence; the nag it asked for is arriving right now. That is
+  // superseded, not failed, so the row is removed outright instead of being
+  // expired into /stats as "expired unclaimed".
   const stale = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
   ).bind(r.id).all();
-  for (const f of stale.results) await expireFiring(env, f, r, { silent: true });
+  for (const f of stale.results) {
+    if (f.fired_at <= now) {
+      await expireFiring(env, f, r, { silent: true });
+      continue;
+    }
+    // Claim it the usual way first: a Done landing mid-sweep wins and keeps
+    // its receipt, exactly as expireFiring's conditional update would.
+    const gone = await env.DB.prepare(
+      "DELETE FROM firings WHERE id = ? AND state = 'nagging'"
+    ).bind(f.id).run();
+    if (!gone.meta.changes) continue;
+    if (f.last_message_id) await deleteNag(env, f);
+    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+  }
 
   // Everything from the claim to the firing row existing is the danger zone: a
   // throw in here advances the schedule with no nag to show for it, and the
@@ -111,9 +129,19 @@ export async function fireReminder(env, r, now, tz) {
 async function assigneeUserId(env, r) {
   if (!r.assignee_name && !r.assignee_user_id) return null;
   if (r.assignee_user_id) return r.assignee_user_id;
-  const row = await env.DB.prepare(
-    'SELECT user_id FROM members WHERE chat_id = ? AND lower(username) = ?'
-  ).bind(r.chat_id, String(r.assignee_name).replace(/^@/, '').toLowerCase()).first();
+  // Stored names come from senderName: "@handle" for a member who has a
+  // Telegram username, their plain first name for one who has not. Matching
+  // only on username left the second kind unresolved, so their nag went public
+  // with a sticker — the one thing an assigned chore must never do. Match the
+  // column the name actually came from, then try username as a fallback; the
+  // most recently seen member wins when a first name is shared.
+  const name = String(r.assignee_name).trim();
+  const bare = name.replace(/^@/, '').toLowerCase();
+  const column = name.startsWith('@') ? 'username' : 'first_name';
+  const lookup = (col) => env.DB.prepare(
+    `SELECT user_id FROM members WHERE chat_id = ? AND lower(${col}) = ? ORDER BY last_seen DESC LIMIT 1`
+  ).bind(r.chat_id, bare).first();
+  const row = await lookup(column) || (column === 'username' ? null : await lookup('username'));
   return row ? row.user_id : null;
 }
 
