@@ -2,7 +2,7 @@
 // create, find, delete, pause/resume, complete-early, and vacation wake-up.
 
 import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, RECEIPT_TTL_MS } from './tg.js';
-import { nextOccurrence, fmtLocal } from './time.js';
+import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons, completeFiring } from './nag.js';
@@ -81,9 +81,20 @@ export async function confirmNewChore(env, ctx, by, p, tz, id, html) {
 // "now" reminders fire on the spot instead of waiting for the next cron tick.
 export async function fireIfDue(env, id, tz) {
   const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
-  if (row && row.next_fire_at != null && row.next_fire_at <= Date.now() + 500) {
-    await fireReminder(env, row, Date.now(), tz);
-  }
+  if (!row || row.next_fire_at == null || row.next_fire_at > Date.now() + 500) return;
+  // Vacation mode is a household-wide "not now", and this is the one fire path
+  // that doesn't go through the cron loop's paused-chat filter. Without the
+  // check a chore added during /pause all nagged once on the spot and wakeChat
+  // then deleted the nag — a reminder that shouted and vanished. Leaving
+  // next_fire_at alone means the wake rolls it and the cron picks it up.
+  if (await chatPaused(env, row.chat_id)) return;
+  await fireReminder(env, row, Date.now(), tz);
+}
+
+async function chatPaused(env, chatId) {
+  const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?')
+    .bind(chatId).first();
+  return Boolean(st && st.paused_until && st.paused_until > Date.now());
 }
 
 // `by` names the person in the log line. A deletion removes the chore for
@@ -119,11 +130,39 @@ export async function deleteReminder(env, r, ctx = null, by = null) {
   await updateDashboard(env, chatId);
 }
 
+// Where a resumed chore's schedule lands. A pause must not cost the chore its
+// place in the queue: an "every 8 days" chore that was due tomorrow is still
+// due tomorrow. Only a slot that went by during the pause is recomputed, and
+// an interval is advanced from its own anchor so the pause never shifts the
+// date it has always fired on.
+function resumeNextFire(r, now, tz) {
+  if (r.next_fire_at != null && r.next_fire_at > now) return r.next_fire_at;
+  if (r.schedule_kind === 'once') return r.next_fire_at;
+  const detail = JSON.parse(r.schedule_detail);
+  const next = r.schedule_kind === 'interval' && r.next_fire_at != null
+    ? advanceOccurrence(r.schedule_kind, detail, r.next_fire_at, now, tz)
+    : nextOccurrence(r.schedule_kind, detail, now, tz);
+  return next != null ? next : r.next_fire_at;
+}
+
 export async function setReminderPaused(env, r, pause, tz, by) {
+  const now = Date.now();
   let next = r.next_fire_at;
-  if (!pause) next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), Date.now(), tz) || next;
+  if (!pause) next = resumeNextFire(r, now, tz);
   await env.DB.prepare('UPDATE reminders SET paused = ?, next_fire_at = ? WHERE id = ?')
     .bind(pause ? 1 : 0, next, r.id).run();
+  // A pause freezes an in-flight nag, but fired_at kept ticking underneath it:
+  // pause a nagging chore for a day and the first tick after resume expired it
+  // with a public tombstone and a scored failure, for time nobody was asked to
+  // act in. Resuming hands each live nag a fresh 24h window, and a next_nag_at
+  // in the future — otherwise the cron would delete and re-send the card the
+  // very next minute, right after the edit below restored its buttons.
+  if (!pause) {
+    const intervals = JSON.parse(r.nag_intervals || '[15,30,60]');
+    await env.DB.prepare(
+      "UPDATE firings SET fired_at = ?, next_nag_at = ? WHERE reminder_id = ? AND state = 'nagging'"
+    ).bind(now, deferQuietHours(now + intervals[0] * 60000, tz), r.id).run();
+  }
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
@@ -203,7 +242,13 @@ export async function wakeChat(env, chatId, tz) {
     "SELECT * FROM reminders WHERE chat_id = ? AND schedule_kind != 'once' AND next_fire_at IS NOT NULL AND next_fire_at <= ?"
   ).bind(chatId, now).all();
   for (const r of rems.results) {
-    const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), now, tz);
+    // Intervals roll from their own anchor, never from the wake-up moment: the
+    // gap counts from the date the chore was due, so a fortnight of vacation
+    // doesn't quietly move an "every 8 days" chore onto a new day forever.
+    const detail = JSON.parse(r.schedule_detail);
+    const next = r.schedule_kind === 'interval'
+      ? advanceOccurrence(r.schedule_kind, detail, r.next_fire_at, now, tz)
+      : nextOccurrence(r.schedule_kind, detail, now, tz);
     await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
   }
   await updateDashboard(env, chatId);

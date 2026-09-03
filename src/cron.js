@@ -101,11 +101,15 @@ async function pausedChats(env, now) {
   return new Set(results.map((r) => r.chat_id));
 }
 
-// Once a day (the 03:00 UTC tick): drop settled firings older than the
+// Once a day (the 03:00 UTC hour): drop settled firings older than the
 // 6-month /stats window so the table doesn't grow forever on the free tier.
+// A five-minute window rather than the 03:00 minute exactly: a cron tick that
+// runs late or is skipped altogether used to cost the whole day's retention,
+// and repeating this DELETE is idempotent and cheap.
+const RETENTION_WINDOW_MIN = 5;
 async function pruneOldFirings(env, now) {
   const d = new Date(now);
-  if (d.getUTCHours() !== 3 || d.getUTCMinutes() !== 0) return;
+  if (d.getUTCHours() !== 3 || d.getUTCMinutes() >= RETENTION_WINDOW_MIN) return;
   await env.DB.prepare(
     "DELETE FROM firings WHERE state IN ('done', 'expired') AND fired_at < ?"
   ).bind(now - 183 * 86400000).run();
