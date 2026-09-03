@@ -35,8 +35,11 @@ async function handleNewMembers(env, msg) {
   const hello = botAdded
     ? '🐱 Mrow! Latte &amp; Mocha here — we nag about chores until someone taps ✅ Done.'
     : `🐱 Welcome ${humans.map((u) => esc(u.first_name)).join(', ')}! We're Latte &amp; Mocha — we nag about chores until someone taps ✅ Done.`;
+  // /chore is the default and the one that scores; /remind is the exception,
+  // so it is labelled rather than being the example people copy.
   await sendMessage(env, msg.chat.id,
-    `${hello}\nTry:\n/remind take out trash 7pm daily\n/remind dishes now\n/list · /stats · /help`);
+    `${hello}\nTry:\n/chore take out trash 7pm daily\n/chore dishes now\n` +
+    '/remind pay tax friday — no points\n/list · /stats · /help');
 }
 
 // Household lock: only chats listed in ALLOWED_CHATS (comma-separated ids)
@@ -48,23 +51,14 @@ function chatAllowed(env, chatId) {
   return allowed.length > 0 && chatId != null && allowed.includes(String(chatId));
 }
 
-// A household member's private chat: nag interactions work (buttons arrive as
-// callbacks regardless, replies and reactions resolve via nag_chat_id); chore
-// management stays in the group. Any DM opens their nag line.
-async function handleMemberDm(env, update, chat, from) {
-  await env.DB.prepare('UPDATE members SET dm_ok = 1 WHERE user_id = ?').bind(from.id).run();
-  if (update.message_reaction) return handleReaction(env, update.message_reaction);
-  if (update.callback_query) return handleCallback(env, update.callback_query);
+// A household member's private chat: nothing happens here any more. Every nag
+// lives in the group (an assigned one ephemerally), so a DM has nothing to
+// route and no nag line to open — it just gets pointed back at the group.
+async function handleMemberDm(env, update, chat) {
   const msg = update.message;
   if (!msg || !msg.text) return;
-  if (/^\/start\b/i.test(msg.text)) {
-    return sendMessage(env, chat.id,
-      '😺 Mrow! Your personal nag line is open — chores assigned to you will pester you here.\nManage the chore list in the family group.');
-  }
-  if (msg.text.startsWith('/')) {
-    return sendMessage(env, chat.id, '😺 Manage chores in the family group — this DM is just for your nags.');
-  }
-  return handlePlainText(env, msg);
+  return sendMessage(env, chat.id,
+    '😺 Mrow! Everything happens in the family group — add, list, and finish chores there.');
 }
 
 export async function handleUpdate(env, update) {
@@ -81,11 +75,11 @@ export async function handleUpdate(env, update) {
     if (chat && chat.id < 0) {
       console.log(`rejected chat ${chat.id} (${chat.type}) "${chat.title || ''}"`);
     }
-    // Private chats: known household members get their DM nag line; everyone
-    // else stays silently ignored.
+    // Private chats: known household members get one line pointing them back
+    // to the group; everyone else stays silently ignored.
     if (!env.DB || !chat || chat.id < 0 || !from || from.is_bot) return;
     if (!(await isMember(env, from.id))) return;
-    return handleMemberDm(env, update, chat, from);
+    return handleMemberDm(env, update, chat);
   }
   // Learn member ids from group traffic so assigned nags can route to DMs.
   if (from && !from.is_bot) await rememberMember(env, chat.id, from);
@@ -319,16 +313,36 @@ async function handleNagReply(env, msg, firing, ctx) {
     // credits the replier plus the named helpers.
     const together = /^done\s+(?:together|both)\b/i.test(text);
     const withM = text.match(/^done\s+with\s+(.+?)[\s!.✅]*$/i);
+    let roster = null;
+    const unknown = [];
     if (together || withM) {
-      const roster = await householdRoster(env, msg.chat.id);
-      const others = withM
-        ? withM[1].split(/\s*(?:,|&|\+|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)
-            .map((n) => canonName(roster, n))
-        : [...roster];
+      roster = await householdRoster(env, msg.chat.id);
+      let others;
+      if (withM) {
+        // Only real household members may be credited. A name nobody in this
+        // chat answers to is dropped rather than invented: done_by is read back
+        // by the leaderboard and the rotation, so a typo used to become a
+        // person who then took turns and collected points.
+        others = [];
+        for (const typed of withM[1].split(/\s*(?:,|&|\+|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)) {
+          const hit = canonName(roster, typed);
+          if (roster.has(hit)) others.push(hit);
+          else unknown.push(typed);
+        }
+      } else {
+        others = [...roster];
+      }
       by = creditTogether(by, others);
     }
     const won = await completeFiring(env, firing, reminder, by, tz);
     if (!won) return sendPrivate(env, ctx, '😼 Someone beat you to it — already handled.');
+    if (unknown.length) {
+      const known = [...roster].sort((a, b) => a.localeCompare(b));
+      await sendPrivate(env, ctx,
+        `😿 Not in this household: ${unknown.map((n) => `<b>${esc(n)}</b>`).join(', ')} — credited the rest.\n` +
+        (known.length ? `Household: ${known.map((n) => esc(n)).join(', ')}`
+          : 'Nobody else has been seen in this chat yet.'));
+    }
     if (isPublicMessage(msg)) await deleteMessage(env, msg.chat.id, msg.message_id);
     return;
   }
@@ -575,8 +589,11 @@ async function handleCallback(env, cb) {
   // tapping Done early solo when the work was actually shared.
   const gm = data.match(/^g:(\d+)$/);
   if (gm) {
-    const firing = await env.DB.prepare("SELECT * FROM firings WHERE id = ? AND state = 'done'")
-      .bind(+gm[1]).first();
+    // Scoped to the chat the tap came from, like every other firing lookup
+    // here: an id from another household must not be actionable.
+    const firing = await env.DB.prepare(
+      "SELECT * FROM firings WHERE id = ? AND chat_id = ? AND state = 'done'"
+    ).bind(+gm[1], cb.message.chat.id).first();
     if (!firing) return answerCallback(env, cb.id, 'That one is gone.');
     const names = String(firing.done_by || '').split(CREDIT_SEP).filter(Boolean);
     const roster = await householdRoster(env, firing.chat_id);
@@ -604,7 +621,8 @@ async function handleCallback(env, cb) {
   // leaves carries Undo — a mis-tap is recoverable for a day.
   const xm = data.match(/^x:(\d+)$/);
   if (xm) {
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+xm[1]).first();
+    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
+      .bind(+xm[1], cb.message.chat.id).first();
     if (!firing) return answerCallback(env, cb.id, 'Already gone.');
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
       .bind(firing.reminder_id, firing.chat_id).first();
@@ -617,7 +635,8 @@ async function handleCallback(env, cb) {
   // Snooze preset picked (or Back to the main buttons).
   const zm = data.match(/^z:(\d+):(\w+)$/);
   if (zm) {
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+zm[1]).first();
+    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
+      .bind(+zm[1], cb.message.chat.id).first();
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
     if (zm[2] === 'b') {
       const wasSnoozed = String(cb.message.text || '').startsWith('😴');
@@ -677,7 +696,8 @@ async function handleCallback(env, cb) {
 
   const m = data.match(/^([dsb]):(\d+)$/);
   if (!m) return answerCallback(env, cb.id, '');
-  const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(+m[2]).first();
+  const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
+    .bind(+m[2], cb.message.chat.id).first();
   if (!firing || firing.state !== 'nagging') {
     return answerCallback(env, cb.id, 'Already handled 👍');
   }

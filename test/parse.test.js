@@ -188,6 +188,18 @@ describe('fortnightly weekdays and calendar start dates', () => {
     expect(sgt(p('passport from 3 jan 9am').firstFireAt)).toBe('2027-01-03T09:00');
   });
 
+  it('rolls a past start date on by the cadence, not by a year', () => {
+    // A week after the anchor: "every 2 weeks starting 29 aug" means the
+    // fortnight that began on the 29th, so the next slot is 12 Sep — jumping to
+    // next August would silence the chore for a year.
+    const later = Date.UTC(2026, 8, 5, 4, 0); // Sat 5 Sep 2026, noon SGT
+    const s = 'x every 2 weeks starting 29 aug 9pm';
+    const r = parseRemind(s, `/chore ${s}`, [], later, 'Asia/Singapore');
+    expect(r.kind).toBe('interval');
+    expect(r.detail.days).toBe(14);
+    expect(sgt(r.firstFireAt)).toBe('2026-09-12T21:00');
+  });
+
   it('keeps "every other day" at two days, not a fortnight', () => {
     expect(p('bins every other day 10am').detail.days).toBe(2);
   });

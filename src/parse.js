@@ -275,9 +275,26 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     // starting 29 aug" begins on the 29th and repeats fortnightly from there.
     const p = localParts(nowMs, tz);
     firstFireAt = zonedEpoch(p.y, fromDate.mon + 1, fromDate.dom, h, mi, tz);
-    // A date already gone this year means they mean next year's.
     if (firstFireAt <= nowMs) {
-      firstFireAt = zonedEpoch(p.y + 1, fromDate.mon + 1, fromDate.dom, h, mi, tz);
+      if (kind === 'once') {
+        // A one-off date already gone this year means they mean next year's.
+        firstFireAt = zonedEpoch(p.y + 1, fromDate.mon + 1, fromDate.dom, h, mi, tz);
+      } else if (kind === 'interval') {
+        // A recurring chore's start date is the anchor its cadence counts from,
+        // not a first fire that has to be in the future: "every 2 weeks starting
+        // 29 aug" typed in September means the fortnight begun on the 29th, so
+        // step forward from that past anchor instead of jumping a whole year.
+        let next = firstFireAt;
+        for (let i = 0; i < 400 && next != null && next <= nowMs; i++) {
+          next = nextOccurrence('interval', detail, next, tz);
+        }
+        if (next != null) firstFireAt = next;
+      } else {
+        // daily / weekly / monthly repeat on their own calendar terms, so a
+        // past anchor has nothing left to contribute.
+        const next = nextOccurrence(kind, detail, nowMs, tz);
+        if (next != null) firstFireAt = next;
+      }
     }
   } else if (fromDay != null) {
     // Anchored start: first occurrence on the coming <weekday> at h:mi; the

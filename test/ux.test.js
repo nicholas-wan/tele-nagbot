@@ -278,7 +278,10 @@ describe('chat UX', () => {
                 return null;
               },
               async all() {
-                if (sql.includes('DISTINCT done_by')) return { results: [{ done_by: '@nick & @jane' }] };
+                // The roster is the chat's members, not who has tapped Done.
+                if (sql.includes('FROM members')) {
+                  return { results: [{ username: 'nick' }, { username: 'jane' }] };
+                }
                 return { results: [] };
               },
               async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
