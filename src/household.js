@@ -15,15 +15,22 @@ export function senderName(from) {
 // points ride on it — dropping it once cost a reminder its shared credit.
 export const isScored = (row) => (row && row.scored != null ? Boolean(row.scored) : true);
 
-// Everyone the cats have seen tap Done in this chat (combined credits split).
+// Combined credits join names with this separator, in firings.done_by.
 export const CREDIT_SEP = ' & ';
+
+// Everyone the cats have actually seen in this chat, spelled exactly the way
+// senderName spells them. Built from `members` — which rememberMember keeps
+// fresh on every update, bots excluded — and not from past credits: a mistyped
+// "done with brian" used to mint a permanent phantom housemate who then drew
+// rotations and rode along on every later shared credit.
 export async function householdRoster(env, chatId) {
   const { results } = await env.DB.prepare(
-    "SELECT DISTINCT done_by FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
+    'SELECT username, first_name FROM members WHERE chat_id = ?'
   ).bind(chatId).all();
   const set = new Set();
-  for (const r of results) {
-    for (const p of String(r.done_by).split(CREDIT_SEP)) if (p.trim()) set.add(p.trim());
+  for (const r of results || []) {
+    const name = String(r.username ? `@${r.username}` : (r.first_name || '')).trim();
+    if (name) set.add(name);
   }
   return set;
 }

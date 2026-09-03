@@ -184,23 +184,35 @@ const icsDate = (ms, tz) => {
   return `${p.y}${pad(p.mo)}${pad(p.d)}`;
 };
 
+// A calendar keeps one event per UID, so two invites that happen to share a
+// start and a length must not share one — the second would silently replace
+// the first. Every generated file gets its own; tests pass `uid` to pin it.
+function inviteUid(startMs, durationMs, now) {
+  const rand = Math.floor(Math.random() * 0xffffffff).toString(36);
+  return `invite-${startMs}-${durationMs}-${now.toString(36)}-${rand}@nag-bot`;
+}
+
+// Newlines are legal in /invite arguments but not in an unescaped ICS value —
+// a raw one would end the property and corrupt the rest of the file.
+const collapse = (s) => String(s).replace(/\s+/g, ' ').trim();
+
 export function buildIcs({ summary, location, startMs, durationMs, allDay = false,
-  tz = 'Asia/Singapore', now = Date.now() }) {
+  tz = 'Asia/Singapore', now = Date.now(), uid = null }) {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//nag-bot//invite//EN',
     'METHOD:PUBLISH',
     'BEGIN:VEVENT',
-    `UID:invite-${startMs}-${durationMs}@nag-bot`,
+    `UID:${uid || inviteUid(startMs, durationMs, now)}`,
     `DTSTAMP:${icsUtc(now)}`,
     // An all-day event is a DATE value, and DTEND is the morning after.
     ...(allDay
       ? [`DTSTART;VALUE=DATE:${icsDate(startMs, tz)}`, `DTEND;VALUE=DATE:${icsDate(startMs + 86400000, tz)}`]
       : [`DTSTART:${icsUtc(startMs)}`, `DTEND:${icsUtc(startMs + durationMs)}`]),
-    `SUMMARY:${icsEscape(summary)}`,
+    `SUMMARY:${icsEscape(collapse(summary))}`,
   ];
-  if (location) lines.push(`LOCATION:${icsEscape(location)}`);
+  if (location) lines.push(`LOCATION:${icsEscape(collapse(location))}`);
   lines.push('STATUS:CONFIRMED', 'END:VEVENT', 'END:VCALENDAR');
   return lines.join('\r\n');
 }
