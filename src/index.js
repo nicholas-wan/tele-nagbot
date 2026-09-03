@@ -85,6 +85,14 @@ export default {
       if (!env.BOT_TOKEN) {
         return new Response('BOT_TOKEN secret is not set — run: npx wrangler secret put BOT_TOKEN', { status: 500 });
       }
+      // Registering without a secret token would make every later delivery
+      // fail the /webhook header check — a silently dead bot. Refuse instead.
+      if (!env.WEBHOOK_SECRET || !String(env.WEBHOOK_SECRET).trim()) {
+        return new Response(
+          'WEBHOOK_SECRET secret is not set — run: npx wrangler secret put WEBHOOK_SECRET',
+          { status: 500 }
+        );
+      }
       const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/setWebhook`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -174,17 +182,10 @@ export default {
         });
       }
       if (url.searchParams.get('info') !== null) {
-        const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
-        const cmds = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`);
-        const groupCmds = await fetch(`https://api.telegram.org/bot${token}/getMyCommands`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scope: { type: 'all_group_chats' } }),
-        });
         return new Response(JSON.stringify({
-          webhook: await res.json(),
-          commands_default: await cmds.json(),
-          commands_groups: await groupCmds.json(),
+          webhook: await tg(env, 'getWebhookInfo', {}),
+          commands_default: await tg(env, 'getMyCommands', {}),
+          commands_groups: await tg(env, 'getMyCommands', { scope: { type: 'all_group_chats' } }),
         }, null, 2), { status: 200 });
       }
       // Diagnosis helper: is the bot still in the chat, did the chat migrate to
@@ -195,7 +196,7 @@ export default {
       // until the next chore change or the morning refresh.
       if (url.searchParams.get('board') !== null) {
         const out = [];
-        const me = await fetch(`https://api.telegram.org/bot${token}/getMe`).then((r) => r.json());
+        const me = await tg(env, 'getMe', {});
         const meId = me.ok ? me.result.id : null;
         for (const id of String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
           const chatId = +id;
@@ -208,27 +209,22 @@ export default {
           // getChat only ever reports the TOP of the pin stack, so walk down by
           // unpinning each bot-authored pin in turn (including the live board,
           // re-pinned at the end) and stop at the first pin a human made.
-          const call = (method, body) => fetch(`https://api.telegram.org/bot${token}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          }).then((r) => r.json());
           let removed = 0;
           const seen = new Set();
           for (let i = 0; i < 12; i++) {
-            const chat = await call('getChat', { chat_id: chatId });
+            const chat = await tg(env, 'getChat', { chat_id: chatId });
             const pin = chat.ok && chat.result.pinned_message;
             if (!pin || seen.has(pin.message_id)) break;
             if (!meId || !pin.from || pin.from.id !== meId) break; // a human pinned this — leave it
             seen.add(pin.message_id);
-            await call('unpinChatMessage', { chat_id: chatId, message_id: pin.message_id });
+            await tg(env, 'unpinChatMessage', { chat_id: chatId, message_id: pin.message_id });
             if (pin.message_id !== current) {
-              await call('deleteMessage', { chat_id: chatId, message_id: pin.message_id });
+              await tg(env, 'deleteMessage', { chat_id: chatId, message_id: pin.message_id });
               removed++;
             }
           }
           if (current) {
-            await call('pinChatMessage', {
+            await tg(env, 'pinChatMessage', {
               chat_id: chatId, message_id: current, disable_notification: true,
             });
           }
@@ -239,22 +235,14 @@ export default {
       if (url.searchParams.get('diag') !== null) {
         const id = url.searchParams.get('diag')
           || String(env.ALLOWED_CHATS || '').split(',')[0].trim();
-        const call = async (method, params) => {
-          const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(params || {}),
-          });
-          return r.json();
-        };
-        const me = await call('getMe');
-        const chat = await call('getChat', { chat_id: id });
+        const me = await tg(env, 'getMe', {});
+        const chat = await tg(env, 'getChat', { chat_id: id });
         const member = me.ok
-          ? await call('getChatMember', { chat_id: id, user_id: me.result.id })
+          ? await tg(env, 'getChatMember', { chat_id: id, user_id: me.result.id })
           : null;
         // &user=<id> answers "why can't this person do X" — status and rights.
         const who = url.searchParams.get('user');
-        const user = who ? await call('getChatMember', { chat_id: id, user_id: +who }) : null;
+        const user = who ? await tg(env, 'getChatMember', { chat_id: id, user_id: +who }) : null;
         return new Response(JSON.stringify({
           allowed_chats: env.ALLOWED_CHATS, probed_chat: id, me, chat, member, user,
         }, null, 2), { status: 200 });
@@ -268,12 +256,7 @@ export default {
       for (const [param, method, field] of calls) {
         const value = url.searchParams.get(param);
         if (value === null) continue;
-        const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [field]: value }),
-        });
-        const data = await res.json();
+        const data = await tg(env, method, { [field]: value });
         out.push(`${method}: ${data.ok ? 'ok' : JSON.stringify(data)}`);
       }
       return new Response(out.join('\n') || 'nothing to do', { status: 200 });

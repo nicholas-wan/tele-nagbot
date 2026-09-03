@@ -138,6 +138,15 @@ export async function choreListHtml(env, chatId, tz) {
   return lines.join('\n');
 }
 
+// The ways Telegram says "that message no longer exists / can never be
+// edited". Everything else an edit can fail with is worth retrying next time
+// rather than replacing the board over.
+const GONE = /message to edit not found|message to be edited not found|MESSAGE_ID_INVALID|message can['’]?t be edited|message identifier is not specified/i;
+
+function messageIsGone(description) {
+  return GONE.test(String(description || ''));
+}
+
 // One pinned message per chat, silently edited in place: the full chore list
 // (nagging marked 🔔, paused included). Created on first need, unpinned and
 // removed only when the chore list is empty.
@@ -166,6 +175,15 @@ export async function updateDashboard(env, chatId) {
     if (msgId) {
       const res = await editMessage(env, chatId, msgId, html, dashboardButtons());
       if (res.ok || String(res.description || '').includes('not modified')) return;
+      // Only a board that is genuinely gone earns a replacement. Anything else
+      // — a network blip, a 429 that outlived tg()'s one retry, any other
+      // Telegram error — is transient, and recreating on it pins a second
+      // board beside the first every time it happens.
+      if (!messageIsGone(res.description)) {
+        console.log(`dashboard edit failed for chat ${chatId}: ${res.description || 'unknown'} ` +
+          '— keeping the existing board');
+        return;
+      }
       // Message was deleted by hand — fall through and recreate it.
     }
     // keep: the pinned dashboard is the one message the daily sweep spares.
