@@ -2,7 +2,7 @@
 // dashboard (picker → per-chore actions) and the ✏️ editor it opens, which
 // also serves /edit as its own message. Handles the m: and e: callbacks.
 
-import { editMessage, editReplyMarkup, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
+import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, senderName, creditTogether } from './household.js';
@@ -73,28 +73,35 @@ async function editorIsDashboard(env, cb) {
   return Boolean(row && row.dashboard_msg_id === cb.message.message_id);
 }
 
-async function refreshEditor(env, cb, r, tz, buttons = null) {
+// The editor lives on one of two surfaces: the shared pinned dashboard (always
+// a public message, whose text is the chore list) or its own message from
+// /edit, which is usually ephemeral. Only the ref knows which id space that
+// second one belongs to — editing an ephemeral message with the public method
+// silently does nothing, leaving a dead screen behind a "Updated ✓" toast.
+async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
   const markup = buttons || await editorButtons(env, r);
   if (await editorIsDashboard(env, cb)) {
     const html = await choreListHtml(env, r.chat_id, tz);
     return editMessage(env, r.chat_id, cb.message.message_id, html, markup);
   }
-  return editMessage(env, r.chat_id, cb.message.message_id, editorText(r, tz), markup);
+  return editRef(env, ctx, r.chat_id, ref, editorText(r, tz), markup);
 }
 
 async function applyEditorChoice(env, r, kind, value, tz) {
   if (kind === 'time') {
     const detail = { ...JSON.parse(r.schedule_detail), h: +value, mi: 0 };
+    const dailySlot = () => nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
     let next;
-    if (r.schedule_kind === 'once') {
-      next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
-    } else if (r.schedule_kind === 'interval' && r.next_fire_at) {
-      // An interval chore is anchored to its scheduled date — changing the
-      // time must not push the date a whole gap out. Keep the date; if the
-      // new time has already passed on it, take the next daily slot.
+    if ((r.schedule_kind === 'once' || r.schedule_kind === 'interval') && r.next_fire_at) {
+      // Both kinds are anchored to their scheduled date: a one-off set for
+      // next Friday stays on Friday, and an interval chore must not be pushed
+      // a whole gap out. Keep the date; if the new time has already passed on
+      // it, take the next daily slot.
       const f = localParts(r.next_fire_at, tz);
       next = zonedEpoch(f.y, f.mo, f.d, +value, 0, tz);
-      if (next <= Date.now()) next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
+      if (next <= Date.now()) next = dailySlot();
+    } else if (r.schedule_kind === 'once') {
+      next = dailySlot();
     } else {
       next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
     }
@@ -144,13 +151,13 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       return answerCallback(env, cb.id, 'Closed');
     }
     if (action === 'menu') {
-      await refreshEditor(env, cb, r, tz);
+      await refreshEditor(env, cb, ctx, ref, r, tz);
       return answerCallback(env, cb.id, '');
     }
     if (['time', 'schedule', 'nag', 'assign'].includes(action)) {
       const roster = action === 'assign'
         ? [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b)) : [];
-      await refreshEditor(env, cb, r, tz, editorSubmenu(action, r, roster));
+      await refreshEditor(env, cb, ctx, ref, r, tz, editorSubmenu(action, r, roster));
       return answerCallback(env, cb.id, '');
     }
     if (action === 'rotate') {
@@ -160,8 +167,15 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
         .bind(JSON.stringify(detail), r.id).run();
     } else if (action === 'score') {
+      const scored = r.scored ? 0 : 1;
       await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
-        .bind(r.scored ? 0 : 1, r.id).run();
+        .bind(scored, r.id).run();
+      // A firing snapshots scored at fire time, so a nag already on screen
+      // would keep its old "(reminder — no points)" line, its old button label
+      // and its old credit until the next occurrence. Move the live one too.
+      await env.DB.prepare(
+        "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
+      ).bind(scored, r.id).run();
     } else if (action === 'pause') {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }
@@ -173,7 +187,7 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
   r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
   if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
   await updateDashboard(env, r.chat_id);
-  await refreshEditor(env, cb, r, tz);
+  await refreshEditor(env, cb, ctx, ref, r, tz);
   return answerCallback(env, cb.id, 'Updated ✓');
 }
 
