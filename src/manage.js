@@ -5,8 +5,8 @@
 import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
-import { getTz, householdRoster, senderName, creditTogether } from './household.js';
-import { completeFiring } from './nag.js';
+import { getTz, householdRoster, senderName, creditTogether, isScored } from './household.js';
+import { completeFiring, editNag, nagHtml, nagButtons } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
 import { setReminderPaused, deleteReminder, completeEarly } from './chores.js';
 
@@ -90,19 +90,17 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
 async function applyEditorChoice(env, r, kind, value, tz) {
   if (kind === 'time') {
     const detail = { ...JSON.parse(r.schedule_detail), h: +value, mi: 0 };
-    const dailySlot = () => nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
     let next;
-    if ((r.schedule_kind === 'once' || r.schedule_kind === 'interval') && r.next_fire_at) {
-      // Both kinds are anchored to their scheduled date: a one-off set for
+    if (r.schedule_kind === 'once' || (r.schedule_kind === 'interval' && r.next_fire_at)) {
+      // Anchored to a date rather than to a calendar rule: a one-off set for
       // next Friday stays on Friday, and an interval chore must not be pushed
-      // a whole gap out. Keep the date; if the new time has already passed on
-      // it, take the next daily slot.
-      const f = localParts(r.next_fire_at, tz);
+      // a whole gap out. Keep the date (today, for a one-off with no date
+      // left); if the new time has already passed on it, take the next slot.
+      const f = localParts(r.next_fire_at || Date.now(), tz);
       next = zonedEpoch(f.y, f.mo, f.d, +value, 0, tz);
-      if (next <= Date.now()) next = dailySlot();
-    } else if (r.schedule_kind === 'once') {
-      next = dailySlot();
+      if (next <= Date.now()) next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
     } else {
+      // daily / weekly / monthly regenerate their own next slot from the rule.
       next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
     }
     await env.DB.prepare('UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ?')
@@ -129,6 +127,25 @@ async function applyEditorChoice(env, r, kind, value, tz) {
       .bind(name, r.id).run();
   }
   return true;
+}
+
+// The points flag is written into the nag itself — the "(reminder — no points)"
+// line and the Delete button's wording both come from it — so flipping it in
+// the database alone leaves the card on screen contradicting the editor until
+// the next occurrence. Redraw the live card with the new answer.
+//
+// A snoozed card and a nagging card cannot be told apart from the firing row:
+// both sit in state 'nagging' with a future next_nag_at, and only the message
+// text (which starts "😴") says which is on screen. So a firing that has been
+// snoozed is left alone rather than risk replacing a snooze notice with a nag.
+async function redrawLiveNag(env, r, scored) {
+  const firing = await env.DB.prepare(
+    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+  ).bind(r.id).first();
+  if (!firing || !firing.last_message_id || firing.snoozes_used) return;
+  const live = { ...firing, scored };
+  await editNag(env, live, nagHtml({ ...r, scored }, firing.nag_count || 0, firing.cat || 'both'),
+    nagButtons(firing.id, isScored(live)));
 }
 
 // The e: callback family: editor navigation and value taps.
@@ -176,6 +193,7 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       await env.DB.prepare(
         "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
       ).bind(scored, r.id).run();
+      await redrawLiveNag(env, r, scored);
     } else if (action === 'pause') {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }

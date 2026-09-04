@@ -248,6 +248,53 @@ describe('editor, board, and setup fixes', () => {
     expect(runs.find((r) => r.sql.includes('UPDATE firings SET scored')).args).toEqual([1, 10]);
   });
 
+  // The database flip is only half of it: the card already on screen carries the
+  // points answer in its text and in its Delete label, and would keep the old
+  // wording until the next occurrence unless it is redrawn.
+  const nagging = (extra) => ({
+    id: 5, reminder_id: 10, chat_id: 1, state: 'nagging', scored: 1,
+    nag_count: 0, cat: 'both', snoozes_used: 0, last_message_id: 77,
+    last_message_ephemeral: 0, nag_user_id: null, ...extra,
+  });
+
+  it('redraws a public nag when points are switched off', async () => {
+    await handleUpdate(env(CHORE, { firings: [nagging()] }), ephemeralTap('e:score:10'));
+    const nag = all('editMessageText').find((c) => c.body.message_id === 77);
+    expect(nag, 'the live nag card was redrawn').toBeTruthy();
+    expect(nag.body.text).toContain('Water plants');
+    expect(nag.body.text).toContain('no points');
+    expect(JSON.stringify(nag.body.reply_markup)).toContain('Delete reminder');
+    expect(JSON.stringify(nag.body.reply_markup)).toContain('d:5');
+  });
+
+  it('redraws an ephemeral nag with the ephemeral edit method', async () => {
+    const firing = nagging({ last_message_id: 43, last_message_ephemeral: 1, nag_user_id: 7 });
+    await handleUpdate(env({ ...CHORE, scored: 0 }, { firings: [firing] }),
+      ephemeralTap('e:score:10'));
+    const nag = all('editEphemeralMessageText').find((c) => c.body.ephemeral_message_id === 43);
+    expect(nag, 'the private nag was redrawn privately').toBeTruthy();
+    expect(nag.body.receiver_user_id).toBe(7);
+    // Points just came back on, so the "no points" note has to be gone.
+    expect(nag.body.text).toContain('Water plants');
+    expect(nag.body.text).not.toContain('no points');
+    // The public edit method must never be aimed at an ephemeral id.
+    expect(all('editMessageText').some((c) => c.body.message_id === 43)).toBe(false);
+  });
+
+  // A snoozed card and a nagging card are indistinguishable from the row, so a
+  // snoozed firing is left alone rather than have its snooze notice overwritten.
+  it('leaves a snoozed card alone', async () => {
+    const firing = nagging({ snoozes_used: 1, next_nag_at: Date.now() + 3600000 });
+    await handleUpdate(env(CHORE, { firings: [firing] }), ephemeralTap('e:score:10'));
+    expect(all('editMessageText').some((c) => c.body.message_id === 77)).toBe(false);
+  });
+
+  it('does nothing extra when the firing has no message on screen', async () => {
+    const firing = nagging({ last_message_id: null });
+    await handleUpdate(env(CHORE, { firings: [firing] }), ephemeralTap('e:score:10'));
+    expect(all('editMessageText').some((c) => c.body.message_id === 77)).toBe(false);
+  });
+
   // 5. Registering a webhook with no secret token makes every later delivery
   // fail the header check — a bot that is live and completely deaf.
   const setup = (secrets) => worker.fetch(

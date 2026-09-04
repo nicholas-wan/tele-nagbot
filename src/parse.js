@@ -1,7 +1,7 @@
 // Parses "/remind" arguments: assignee mention, schedule, time, nag config.
 // Deterministic pattern matching — no LLM, no external parser.
 
-import { localParts, zonedEpoch, nextOccurrence } from './time.js';
+import { localParts, zonedEpoch, nextOccurrence, advanceOccurrence } from './time.js';
 
 export const DEFAULT_NAGS = [15, 30, 60];
 export const MAX_CHORE_TEXT = 200;
@@ -270,10 +270,15 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   if (rotate) detail.rotate = true;
 
   let firstFireAt;
+  // A month interval re-clamps from this day each hop, so "starting 31 jan"
+  // keeps meaning the 31st instead of sliding down to February's 28th and
+  // staying there. The anchor's own day wins; otherwise the first fire's.
+  let intendedDom = null;
   if (fromDate) {
     // A stated calendar date wins over a weekday anchor: "every other saturday
     // starting 29 aug" begins on the 29th and repeats fortnightly from there.
     const p = localParts(nowMs, tz);
+    intendedDom = fromDate.dom;
     firstFireAt = zonedEpoch(p.y, fromDate.mon + 1, fromDate.dom, h, mi, tz);
     if (firstFireAt <= nowMs) {
       if (kind === 'once') {
@@ -284,10 +289,12 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
         // not a first fire that has to be in the future: "every 2 weeks starting
         // 29 aug" typed in September means the fortnight begun on the 29th, so
         // step forward from that past anchor instead of jumping a whole year.
-        let next = firstFireAt;
-        for (let i = 0; i < 400 && next != null && next <= nowMs; i++) {
-          next = nextOccurrence('interval', detail, next, tz);
-        }
+        // advanceOccurrence does that jump arithmetically — walking it hop by
+        // hop cost ~31ms for a New Year's anchor typed in December, three times
+        // a Worker's CPU budget, so the webhook died and Telegram retried it
+        // forever.
+        if (detail.months) detail.dom = intendedDom;
+        const next = advanceOccurrence('interval', detail, firstFireAt, nowMs, tz);
         if (next != null) firstFireAt = next;
       } else {
         // daily / weekly / monthly repeat on their own calendar terms, so a
@@ -352,6 +359,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
         throw new ParseError('That can\'t start today — the time has already passed. Drop "today" or pick a later time.');
       }
     }
+  }
+
+  if (kind === 'interval' && detail.months && firstFireAt != null) {
+    detail.dom = intendedDom ?? localParts(firstFireAt, tz).d;
   }
 
   return finish(args, { kind, detail, firstFireAt, assigneeName, assigneeUserId, nagIntervals });
