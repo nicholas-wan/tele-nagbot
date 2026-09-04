@@ -100,7 +100,9 @@ export default {
           url: `${url.origin}/webhook`,
           secret_token: env.WEBHOOK_SECRET,
           // message_reaction needs the bot to be a group admin (it is, for pins).
-          allowed_updates: ['message', 'callback_query', 'message_reaction'],
+          // chat_member is never delivered by default and has to be named here;
+          // without it, someone who leaves stays on the household roster.
+          allowed_updates: ['message', 'callback_query', 'message_reaction', 'chat_member'],
         }),
       });
       const data = await res.json();

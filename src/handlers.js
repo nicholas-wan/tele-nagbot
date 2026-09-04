@@ -8,8 +8,8 @@ import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc,
          isPublicMessage, sendPrivateLong, tg } from './tg.js';
 import { parseRemind, ParseError, NoTimeError } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtClock, deferQuietHours } from './time.js';
-import { getTz, senderName, isScored, householdRoster, canonName, creditTogether,
-         rememberMember, isMember, CREDIT_SEP } from './household.js';
+import { getTz, senderName, isScored, householdRoster, householdNames, canonName, creditTogether,
+         rememberMember, forgetMember, isMember, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
@@ -51,23 +51,51 @@ function chatAllowed(env, chatId) {
   return allowed.length > 0 && chatId != null && allowed.includes(String(chatId));
 }
 
+// Membership changes seen as `chat_member` updates. Only the statuses that
+// mean "still here" keep a row; left and kicked take it away.
+const IN_CHAT = new Set(['member', 'administrator', 'creator', 'restricted']);
+
+async function handleChatMember(env, upd) {
+  const who = upd.new_chat_member && upd.new_chat_member.user;
+  const status = upd.new_chat_member && upd.new_chat_member.status;
+  if (!who || who.is_bot) return;
+  if (status === 'left' || status === 'kicked') return forgetMember(env, upd.chat.id, who.id);
+  if (IN_CHAT.has(status)) return rememberMember(env, upd.chat.id, who);
+}
+
 // A household member's private chat: nothing happens here any more. Every nag
 // lives in the group (an assigned one ephemerally), so a DM has nothing to
 // route and no nag line to open — it just gets pointed back at the group.
 async function handleMemberDm(env, update, chat) {
+  const cb = update.callback_query;
+  if (cb) {
+    // Nothing in a DM is actionable, but a tap that goes unanswered spins on
+    // the button until Telegram gives up — which reads as a dead bot. Old DM
+    // messages still carry buttons, so answer, and honour ✅ OK's one meaning.
+    if (cb.data === 'ok') {
+      const ctx = replyCtx(env, chat.id, cb.from && cb.from.id, { callbackQueryId: cb.id });
+      await deleteRef(env, ctx, chat.id, callbackRef(cb));
+    }
+    return answerCallback(env, cb.id, '');
+  }
   const msg = update.message;
   if (!msg || !msg.text) return;
+  // No ✅ OK button: this pointer has nothing to act on, and a button whose tap
+  // arrives back in the DM is exactly the loop above. The daily sweep tidies it.
   return sendMessage(env, chat.id,
-    '😺 Mrow! Everything happens in the family group — add, list, and finish chores there.');
+    '😺 Mrow! Everything happens in the family group — add, list, and finish chores there.',
+    null, { noOk: true });
 }
 
 export async function handleUpdate(env, update) {
   const chat = (update.message && update.message.chat)
     || (update.callback_query && update.callback_query.message && update.callback_query.message.chat)
-    || (update.message_reaction && update.message_reaction.chat);
+    || (update.message_reaction && update.message_reaction.chat)
+    || (update.chat_member && update.chat_member.chat);
   const from = (update.message && update.message.from)
     || (update.callback_query && update.callback_query.from)
-    || (update.message_reaction && update.message_reaction.user);
+    || (update.message_reaction && update.message_reaction.user)
+    || (update.chat_member && update.chat_member.from);
   if (!chatAllowed(env, chat && chat.id)) {
     // Group traffic we reject is worth a log line: the usual cause is a basic
     // group being upgraded to a supergroup, which mints a new chat id that
@@ -81,7 +109,17 @@ export async function handleUpdate(env, update) {
     if (!(await isMember(env, from.id))) return;
     return handleMemberDm(env, update, chat);
   }
-  // Learn member ids from group traffic so assigned nags can route to DMs.
+  // Membership bookkeeping comes first, so someone on their way out is not
+  // re-learned from the very message that announces they left.
+  const leaving = update.message && update.message.left_chat_member;
+  if (leaving) {
+    // The bot itself leaving needs no cleanup — the whole chat goes quiet.
+    if (!leaving.is_bot) await forgetMember(env, chat.id, leaving.id);
+    return;
+  }
+  if (update.chat_member) return handleChatMember(env, update.chat_member);
+  // Learn member ids from group traffic: they are the household roster, and an
+  // ephemeral (in-group private) nag is addressed to one of them.
   if (from && !from.is_bot) await rememberMember(env, chat.id, from);
   if (update.message_reaction) return handleReaction(env, update.message_reaction);
   if (update.callback_query) return handleCallback(env, update.callback_query);
@@ -316,16 +354,19 @@ async function handleNagReply(env, msg, firing, ctx) {
     let roster = null;
     const unknown = [];
     if (together || withM) {
-      roster = await householdRoster(env, msg.chat.id);
+      const household = await householdNames(env, msg.chat.id);
+      roster = household.roster;
       let others;
       if (withM) {
         // Only real household members may be credited. A name nobody in this
         // chat answers to is dropped rather than invented: done_by is read back
         // by the leaderboard and the rotation, so a typo used to become a
-        // person who then took turns and collected points.
+        // person who then took turns and collected points. A first name counts
+        // as answering to it — the roster spells Jane "@janedoe", but nobody
+        // types that — unless two housemates share it, which is a guess.
         others = [];
         for (const typed of withM[1].split(/\s*(?:,|&|\+|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)) {
-          const hit = canonName(roster, typed);
+          const hit = canonName(roster, typed, household.aliases);
           if (roster.has(hit)) others.push(hit);
           else unknown.push(typed);
         }
