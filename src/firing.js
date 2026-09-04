@@ -3,7 +3,7 @@
 
 import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
-import { isScored, householdRoster, canonName, CREDIT_SEP } from './household.js';
+import { isScored, householdNames, canonName, CREDIT_SEP } from './household.js';
 import { nagButtons, nagHtml, expireFiring, deleteNag, nagChat } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
@@ -158,7 +158,7 @@ async function assigneeUserId(env, r) {
 // roster, so a mistyped "done with brian" cannot draw a rotation for a
 // housemate who does not exist.
 async function pickRotation(env, chatId, tz) {
-  const roster = await householdRoster(env, chatId);
+  const { roster, aliases } = await householdNames(env, chatId);
   if (!roster.size) return null;
   const { results } = await env.DB.prepare(
     "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_by IS NOT NULL"
@@ -169,8 +169,9 @@ async function pickRotation(env, chatId, tz) {
   for (const row of results || []) {
     for (const p of String(row.done_by).split(CREDIT_SEP)) {
       if (!p.trim()) continue;
-      // "jane" credited by hand is the roster's "@jane"; anyone else is a ghost.
-      const s = stats.get(canonName(roster, p.trim()));
+      // "jane" credited by hand is the roster's "@jane" (or "@janedoe" by first
+      // name); an ambiguous spelling counts for nobody, and anyone else is a ghost.
+      const s = stats.get(canonName(roster, p.trim(), aliases));
       if (!s) continue;
       s.total++;
       if (row.done_at > ws) s.week++;

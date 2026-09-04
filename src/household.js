@@ -70,6 +70,9 @@ export async function householdNames(env, chatId) {
 // A name nobody answers to comes back unchanged, so callers can tell the
 // difference with roster.has(). Callers with no map get the plain roster match.
 export function canonName(roster, name, aliases = null) {
+  // An exact canonical spelling always means that one person, even when its
+  // normalised form is shared — "@brian" typed beside a username-less Brian.
+  if (roster.has(name)) return name;
   if (aliases) {
     const key = norm(name);
     return aliases.has(key) ? aliases.get(key) : name;
