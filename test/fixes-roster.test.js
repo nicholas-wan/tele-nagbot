@@ -58,6 +58,18 @@ const HOUSEHOLD = [
   { username: null, first_name: 'Bob' },
 ];
 
+// The roster spells Jane by her username; nobody types that.
+const USERNAMED = [
+  { username: 'nick', first_name: 'Nick' },
+  { username: 'janedoe', first_name: 'Jane' },
+];
+
+const TWO_JANES = [
+  { username: 'nick', first_name: 'Nick' },
+  { username: 'janedoe', first_name: 'Jane' },
+  { username: 'janesmith', first_name: 'Jane' },
+];
+
 const doneReply = (text) => ({
   message: {
     message_id: 7, chat: { id: 1 }, from: { id: 2, username: 'nick', first_name: 'Nick' },
@@ -123,6 +135,27 @@ describe('household roster comes from members, not from past credits', () => {
     expect(note.body.text).toContain('brian');
     expect(note.body.text).toContain('@jane');
     expect(note.body.text).toContain('Bob');
+  });
+
+  it('credits "@janedoe" when the reply says "done with Jane"', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: USERNAMED, runs }) };
+    await handleUpdate(env, doneReply('done with Jane'));
+    expect(creditOf(runs)).toBe('@nick & @janedoe');
+    expect(calls.some((c) => /Not in this household/.test((c.body && c.body.text) || ''))).toBe(false);
+  });
+
+  it('treats a first name two housemates share as unknown', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: TWO_JANES, runs }) };
+    await handleUpdate(env, doneReply('done with Jane'));
+    // Better to credit nobody than to pick a Jane at random.
+    expect(creditOf(runs)).toBe('@nick');
+    const note = calls.find((c) => c.url.endsWith('/sendMessage') && /Not in this household/.test(c.body.text || ''));
+    expect(note).toBeTruthy();
+    expect(note.body.text).toContain('Jane');
+    expect(note.body.text).toContain('@janedoe');
+    expect(note.body.text).toContain('@janesmith');
   });
 
   it('says nothing extra when every name is recognised', async () => {
@@ -216,22 +249,122 @@ describe('a member DM points back at the group', () => {
     expect(sends[0].body.text).toMatch(/family group/);
   });
 
-  it('routes nothing from a DM callback', async () => {
+  const dmTap = (data) => ({
+    callback_query: {
+      id: 'cb', data, from: { id: 2, username: 'nick' },
+      message: { message_id: 42, chat: { id: 555, type: 'private' }, text: 'nag' },
+    },
+  });
+
+  it('carries no button on the pointer, so there is nothing to leave spinning', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({}) };
+    await handleUpdate(env, dm('hello'));
+    const sent = calls.find((c) => c.url.endsWith('/sendMessage'));
+    expect(sent.body.reply_markup).toBeUndefined();
+  });
+
+  it('answers a DM callback instead of leaving the button spinning', async () => {
     const runs = [];
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ runs }) };
-    await handleUpdate(env, {
-      callback_query: {
-        id: 'cb', data: 'd:5', from: { id: 2, username: 'nick' },
-        message: { message_id: 42, chat: { id: 555, type: 'private' }, text: 'nag' },
-      },
-    });
-    expect(calls).toEqual([]);
+    await handleUpdate(env, dmTap('d:5'));
+    // Nothing is actionable in a DM — but the tap still gets its answer.
+    expect(calls.map((c) => c.url.replace(/.*\//, ''))).toEqual(['answerCallbackQuery']);
     expect(runs).toEqual([]);
+  });
+
+  it('clears the tapped message when a leftover ✅ OK is tapped in a DM', async () => {
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({}) };
+    await handleUpdate(env, dmTap('ok'));
+    const del = calls.find((c) => c.url.endsWith('/deleteMessage'));
+    expect(del).toBeTruthy();
+    expect(del.body).toMatchObject({ chat_id: 555, message_id: 42 });
+    expect(calls.some((c) => c.url.endsWith('/answerCallbackQuery'))).toBe(true);
   });
 
   it('still ignores a stranger silently', async () => {
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ known: false }) };
     await handleUpdate(env, dm('/start'));
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('leaving the group leaves the roster', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const JANE = { id: 4, username: 'janedoe', first_name: 'Jane' };
+  const forgot = (runs) => runs.find((r) => /DELETE FROM members/.test(r.sql));
+  const remembered = (runs) => runs.find((r) => /INSERT INTO members/.test(r.sql));
+
+  const memberUpdate = (status, chatId = 1) => ({
+    chat_member: {
+      chat: { id: chatId, type: 'supergroup' }, date: 1,
+      from: { id: 2, username: 'nick', first_name: 'Nick' },
+      old_chat_member: { user: JANE, status: 'member' },
+      new_chat_member: { user: JANE, status },
+    },
+  });
+
+  it('drops the row on a left_chat_member service message', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+    await handleUpdate(env, {
+      message: {
+        message_id: 8, chat: { id: 1 },
+        from: { id: 4, username: 'janedoe', first_name: 'Jane' }, left_chat_member: JANE,
+      },
+    });
+    expect(forgot(runs).args).toEqual([1, 4]);
+    // The message announcing the departure must not re-learn the leaver.
+    expect(remembered(runs)).toBeUndefined();
+  });
+
+  it('ignores the bot removing itself', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+    await handleUpdate(env, {
+      message: {
+        message_id: 8, chat: { id: 1 }, from: { id: 2, username: 'nick' },
+        left_chat_member: { id: 77, is_bot: true, first_name: 'TwoShotsNagBot' },
+      },
+    });
+    expect(runs).toEqual([]);
+  });
+
+  for (const status of ['left', 'kicked']) {
+    it(`drops the row when a chat_member update says ${status}`, async () => {
+      const runs = [];
+      const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+      await handleUpdate(env, memberUpdate(status));
+      expect(forgot(runs).args).toEqual([1, 4]);
+      expect(remembered(runs)).toBeUndefined();
+    });
+  }
+
+  for (const status of ['member', 'administrator', 'creator', 'restricted']) {
+    it(`keeps the row when a chat_member update says ${status}`, async () => {
+      const runs = [];
+      const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+      await handleUpdate(env, memberUpdate(status));
+      expect(forgot(runs)).toBeUndefined();
+      expect(remembered(runs).args.slice(0, 4)).toEqual([1, 4, 'janedoe', 'Jane']);
+    });
+  }
+
+  it('ignores a chat_member update from a chat outside ALLOWED_CHATS', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+    await handleUpdate(env, memberUpdate('left', -9));
+    expect(runs).toEqual([]);
     expect(calls).toEqual([]);
   });
 });
