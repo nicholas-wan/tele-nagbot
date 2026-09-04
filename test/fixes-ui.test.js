@@ -15,14 +15,15 @@ const CHORE = {
 
 // One D1 fake for the whole file: branches on SQL substrings and records every
 // write so a test can assert on what the bot actually stored.
-function db(reminder = CHORE, { runs = [], dashboardMsgId = 99, firings = [] } = {}) {
+function db(reminder = CHORE, { runs = [], dashboardMsgId = 99, firings = [],
+                                pausedUntil = null } = {}) {
   return {
     prepare(sql) {
       const stmt = (args = []) => ({
         async first() {
           if (sql.includes('dashboard_msg_id')) return { dashboard_msg_id: dashboardMsgId, tz: TZ };
           if (sql.includes('SELECT tz')) return { tz: TZ };
-          if (sql.includes('paused_until')) return null;
+          if (sql.includes('paused_until')) return pausedUntil ? { paused_until: pausedUntil } : null;
           if (sql.includes('FROM firings')) return firings[0] || null;
           if (sql.includes('FROM reminders')) return reminder;
           return null;
@@ -281,12 +282,50 @@ describe('editor, board, and setup fixes', () => {
     expect(all('editMessageText').some((c) => c.body.message_id === 43)).toBe(false);
   });
 
-  // A snoozed card and a nagging card are indistinguishable from the row, so a
-  // snoozed firing is left alone rather than have its snooze notice overwritten.
-  it('leaves a snoozed card alone', async () => {
+  // A snoozed card is a different card, not an absent one. Skipping it left the
+  // 😴 notice wearing a Delete label that contradicted the editor, so it is
+  // re-rendered as a snooze notice — the one thing it must not become is a nag.
+  it('redraws a snoozed card as a snooze notice, not a nag', async () => {
     const firing = nagging({ snoozes_used: 1, next_nag_at: Date.now() + 3600000 });
     await handleUpdate(env(CHORE, { firings: [firing] }), ephemeralTap('e:score:10'));
+    const nag = all('editMessageText').find((c) => c.body.message_id === 77);
+    expect(nag, 'the snoozed card was redrawn').toBeTruthy();
+    expect(nag.body.text.startsWith('😴')).toBe(true);
+    expect(nag.body.text).toContain('Water plants');
+    // Points just went off, and that is carried by the button label.
+    expect(JSON.stringify(nag.body.reply_markup)).toContain('Delete reminder');
+    expect(JSON.stringify(nag.body.reply_markup)).toContain('Change snooze');
+  });
+
+  // A snooze whose time has come back around is just a nag again.
+  it('redraws a lapsed snooze as an ordinary nag', async () => {
+    const firing = nagging({ snoozes_used: 1, next_nag_at: Date.now() - 3600000 });
+    await handleUpdate(env(CHORE, { firings: [firing] }), ephemeralTap('e:score:10'));
+    const nag = all('editMessageText').find((c) => c.body.message_id === 77);
+    expect(nag.body.text).toContain('🐱');
+    expect(JSON.stringify(nag.body.reply_markup)).toContain('😴 Snooze…');
+  });
+
+  // A paused chore's card reads "⏸️ Paused by …" with no buttons. Redrawing it
+  // as a nag revives a chore nobody resumed, Done and Snooze and all.
+  it('leaves a paused chore\'s card alone', async () => {
+    await handleUpdate(env({ ...CHORE, paused: 1 }, { firings: [nagging()] }),
+      ephemeralTap('e:score:10'));
     expect(all('editMessageText').some((c) => c.body.message_id === 77)).toBe(false);
+    // The flag itself still flipped — only the card is off limits.
+    expect(all('editEphemeralMessageText').length).toBeGreaterThan(0);
+  });
+
+  it('leaves the card alone while the household is on vacation', async () => {
+    await handleUpdate(env(CHORE, { firings: [nagging()], pausedUntil: Date.now() + 86400000 }),
+      ephemeralTap('e:score:10'));
+    expect(all('editMessageText').some((c) => c.body.message_id === 77)).toBe(false);
+  });
+
+  it('redraws the card once a lapsed vacation is behind it', async () => {
+    await handleUpdate(env(CHORE, { firings: [nagging()], pausedUntil: Date.now() - 86400000 }),
+      ephemeralTap('e:score:10'));
+    expect(all('editMessageText').some((c) => c.body.message_id === 77)).toBe(true);
   });
 
   it('does nothing extra when the firing has no message on screen', async () => {

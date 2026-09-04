@@ -5,6 +5,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { fireReminder } from '../src/firing.js';
 import { setReminderPaused, fireIfDue, wakeChat } from '../src/chores.js';
+import { renagPending } from '../src/cron.js';
 import { zonedEpoch } from '../src/time.js';
 
 const TZ = 'Asia/Singapore';
@@ -54,6 +55,40 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
         async run() {
           runs.push({ sql, args });
           return { meta: { changes: 1, last_row_id: 99 } };
+        },
+      });
+      return { ...stmt(), bind: (...args) => stmt(args) };
+    },
+  };
+  return { DB, runs, env: { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB } };
+}
+
+// The cron's own fake: renagPending starts from a chat-wide SELECT over every
+// nagging firing rather than one reminder's, and it looks the reminder up per
+// firing — which is exactly the row a missing-reminder test has to withhold.
+function makeCronDb({ firings = [], reminder = null, pausedChats = [] } = {}) {
+  const runs = [];
+  const DB = {
+    prepare(sql) {
+      const stmt = (args = []) => ({
+        async first() {
+          if (sql.includes('SELECT tz FROM settings')) return { tz: TZ };
+          if (sql.includes('FROM settings')) return null;
+          if (sql.includes('SELECT * FROM firings WHERE id')) {
+            return firings.find((f) => f.id === args[0]) || null;
+          }
+          if (sql.includes('FROM reminders')) return reminder;
+          return null;
+        },
+        async all() {
+          if (sql.includes("FROM firings WHERE state = 'nagging'")) return { results: firings };
+          if (sql.includes('FROM settings')) return { results: pausedChats.map((chat_id) => ({ chat_id })) };
+          if (sql.includes('FROM reminders')) return { results: reminder ? [reminder] : [] };
+          return { results: [] };
+        },
+        async run() {
+          runs.push({ sql, args });
+          return { meta: { changes: 1, last_row_id: 1 } };
         },
       });
       return { ...stmt(), bind: (...args) => stmt(args) };
@@ -151,8 +186,10 @@ describe('firing lifecycle fixes', () => {
       id: 5, reminder_id: 10, chat_id: 1, state: 'nagging',
       fired_at: Date.now() - 40 * HOUR, next_nag_at: Date.now() - 30 * HOUR,
       last_message_id: 77, last_message_ephemeral: 0, nag_count: 2, scored: 1,
+      snoozes_used: 0,
     };
     const restamp = (runs) => runs.find((x) => x.sql.includes('UPDATE firings SET fired_at'));
+    const card = () => calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 77);
 
     it('restarts the expiry clock on a live nag whose time has passed', async () => {
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
@@ -200,23 +237,90 @@ describe('firing lifecycle fixes', () => {
       expect(state.next).toBe(r.next_fire_at);
     });
 
+    it('brings the card back as a plain nag when it did restamp', async () => {
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env } = makeDb({ firings: [live], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      expect(card().body.text).toContain('🐱');
+      expect(JSON.stringify(card().body.reply_markup)).toContain('😴 Snooze…');
+    });
+
     // 2b. A snooze and a "📅 Tomorrow" are the household saying when it wants
     // to hear about this again. Resume must not drag either back to now.
+    // snoozes_used is what marks them as chosen — see the quiet-hours case below.
+    const snoozed = () => ({
+      ...live, snoozes_used: 1,
+      fired_at: Date.now() - HOUR, next_nag_at: Date.now() + 2 * HOUR,
+    });
+
     it('keeps a firing that is snoozed into the future', async () => {
-      const snoozed = { ...live, fired_at: Date.now() - HOUR, next_nag_at: Date.now() + 2 * HOUR };
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
-      const { env, runs } = makeDb({ firings: [snoozed], reminder: r });
+      const { env, runs } = makeDb({ firings: [snoozed()], reminder: r });
       await setReminderPaused(env, r, false, TZ, 'Nick');
       expect(restamp(runs)).toBeUndefined();
       expect(runs.some((x) => x.sql.includes('SET paused'))).toBe(true);
     });
 
+    // ... and the card it left parked has to keep reading as parked. Redrawing
+    // it as a plain nag claimed the chore was due now, and the ↩️ Back handler
+    // reads the card's own text to decide which keyboard to restore — so the
+    // wrong text also cost it the "🕐 Change snooze" button.
+    it('redraws the kept firing as the snooze notice it still is', async () => {
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env } = makeDb({ firings: [snoozed()], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      const edited = card();
+      expect(edited, 'the kept card was redrawn').toBeTruthy();
+      expect(edited.body.text.startsWith('😴')).toBe(true);
+      expect(edited.body.text).toContain('clear poop');
+      expect(JSON.stringify(edited.body.reply_markup)).toContain('Change snooze');
+      expect(JSON.stringify(edited.body.reply_markup)).not.toContain('😴 Snooze…');
+    });
+
     it('keeps a firing that was postponed to tomorrow', async () => {
-      const postponed = { ...live, fired_at: Date.now() + 20 * HOUR, next_nag_at: Date.now() + 20 * HOUR };
+      const postponed = {
+        ...live, snoozes_used: 1,
+        fired_at: Date.now() + 20 * HOUR, next_nag_at: Date.now() + 20 * HOUR,
+      };
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
       const { env, runs } = makeDb({ firings: [postponed], reminder: r });
       await setReminderPaused(env, r, false, TZ, 'Nick');
       expect(restamp(runs)).toBeUndefined();
+    });
+
+    // 2c. Not every future next_nag_at is somebody's decision. The cron pushes
+    // one to 08:00 whenever a re-nag comes due in quiet hours, and an ordinary
+    // pending re-nag is always ahead of now. Reading either as a snooze left the
+    // firing on its pre-pause 24h clock — the very expiry the restamp exists to
+    // prevent. snoozes_used = 0 says nobody chose this.
+    it('restamps a firing the cron merely deferred to 8am', async () => {
+      const deferred = {
+        ...live, snoozes_used: 0,
+        fired_at: Date.now() - 20 * HOUR, next_nag_at: Date.now() + 3 * HOUR,
+      };
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [deferred], reminder: r });
+      const before = Date.now();
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      const upd = restamp(runs);
+      expect(upd, 'a quiet-hours deferral is not a snooze').toBeTruthy();
+      expect(upd.args[0]).toBeGreaterThanOrEqual(before);
+      // Still a compare-and-swap on the pair it read, deferred value included.
+      expect(upd.args[3]).toBe(deferred.fired_at);
+      expect(upd.args[4]).toBe(deferred.next_nag_at);
+      // And the revived card is a nag again, not a snooze notice.
+      expect(card().body.text).toContain('🐱');
+    });
+
+    it('restamps a firing whose next re-nag is simply not due yet', async () => {
+      const pending = {
+        ...live, snoozes_used: 0,
+        fired_at: Date.now() - 30 * HOUR, next_nag_at: Date.now() + 10 * 60000,
+      };
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [pending], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      expect(restamp(runs)).toBeTruthy();
     });
 
     it('leaves the clock alone when pausing', async () => {
@@ -372,6 +476,91 @@ describe('firing lifecycle fixes', () => {
 
     it('assigns nobody when the chat has no roster yet', async () => {
       expect(await assigned({ members: [], credits: [credit('brian')] })).toBe(null);
+    });
+  });
+
+  // 5b. The cron is the other half of the expiry story, and the half that had
+  // no test at all: it is where the 24h deadline is actually noticed, and both
+  // of its claims bind the fired_at this tick read. A resume moves that column,
+  // so a tick that made up its mind minutes ago must lose rather than kill a nag
+  // the household has just brought back.
+  describe('the cron expiring an overdue firing', () => {
+    // Noon in Singapore: quiet hours would defer the whole decision to 8am and
+    // nothing below would run.
+    const NOON = zonedEpoch(2026, 3, 10, 12, 0, TZ);
+    const overdue = {
+      id: 5, reminder_id: 10, chat_id: 1, state: 'nagging',
+      fired_at: NOON - 25 * HOUR, next_nag_at: NOON - HOUR,
+      last_message_id: 77, last_message_ephemeral: 0, nag_count: 3,
+      snoozes_used: 0, scored: 1,
+    };
+    const expiry = (runs) => runs.find((x) => /UPDATE firings SET state = 'expired'/.test(x.sql));
+
+    it('claims the expiry on the fired_at it judged', async () => {
+      const { env, runs } = makeCronDb({ firings: [overdue], reminder: { ...CHORE, paused: 0 } });
+      await renagPending(env, NOON);
+      const exp = expiry(runs);
+      expect(exp, 'a 25h-old firing expires').toBeTruthy();
+      expect(exp.sql).toContain("state = 'nagging'");
+      expect(exp.sql).toContain('fired_at = ?');
+      expect(exp.args).toEqual([5, NOON - 25 * HOUR]);
+      // The tombstone is public: accountability is household-wide.
+      expect(sentTo('sendMessage').some((c) => /24 hours/.test(c.body.text || ''))).toBe(true);
+    });
+
+    // Expiry must not wait for the next nag slot to come due — this row is in
+    // the result set on the fired_at clause alone.
+    it('expires even when the next nag is still ahead', async () => {
+      const parked = { ...overdue, next_nag_at: NOON + 2 * HOUR };
+      const { env, runs } = makeCronDb({ firings: [parked], reminder: { ...CHORE, paused: 0 } });
+      await renagPending(env, NOON);
+      expect(expiry(runs).args).toEqual([5, NOON - 25 * HOUR]);
+      // No re-nag was sent: the firing is gone, not escalated.
+      expect(sentTo('sendMessage').some((c) => /humble request|staring at you/.test(c.body.text || '')))
+        .toBe(false);
+    });
+
+    it('leaves a firing inside its 24 hours alone', async () => {
+      const fresh = { ...overdue, fired_at: NOON - 2 * HOUR, next_nag_at: NOON + 2 * HOUR };
+      const { env, runs } = makeCronDb({ firings: [fresh], reminder: { ...CHORE, paused: 0 } });
+      await renagPending(env, NOON);
+      expect(expiry(runs)).toBeUndefined();
+    });
+
+    // A firing whose reminder row has vanished has no card, no tombstone and no
+    // schedule to advance — just a row to close. It still needs both guards, or
+    // the same stale decision kills a resumed nag by the back door.
+    it('carries both guards when the reminder row is gone', async () => {
+      const { env, runs } = makeCronDb({ firings: [overdue], reminder: null });
+      await renagPending(env, NOON);
+      const exp = expiry(runs);
+      expect(exp, 'an orphaned firing is closed').toBeTruthy();
+      expect(exp.sql).toContain("state = 'nagging'");
+      expect(exp.sql).toContain('fired_at = ?');
+      expect(exp.args).toEqual([5, NOON - 25 * HOUR]);
+      // Nothing is announced for a chore nobody can name any more.
+      expect(sentTo('sendMessage').some((c) => /24 hours/.test(c.body.text || ''))).toBe(false);
+    });
+
+    it('closes an orphan even before its 24 hours are up, once its nag is due', async () => {
+      const fresh = { ...overdue, fired_at: NOON - 2 * HOUR, next_nag_at: NOON - 60000 };
+      const { env, runs } = makeCronDb({ firings: [fresh], reminder: null });
+      await renagPending(env, NOON);
+      expect(expiry(runs).args).toEqual([5, NOON - 2 * HOUR]);
+    });
+
+    it('freezes expiry while the household is on vacation', async () => {
+      const { env, runs } = makeCronDb({
+        firings: [overdue], reminder: { ...CHORE, paused: 0 }, pausedChats: [1],
+      });
+      await renagPending(env, NOON);
+      expect(expiry(runs)).toBeUndefined();
+    });
+
+    it('freezes expiry while the chore itself is paused', async () => {
+      const { env, runs } = makeCronDb({ firings: [overdue], reminder: { ...CHORE, paused: 1 } });
+      await renagPending(env, NOON);
+      expect(expiry(runs)).toBeUndefined();
     });
   });
 

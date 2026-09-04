@@ -6,9 +6,9 @@ import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, d
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, senderName, creditTogether, isScored } from './household.js';
-import { completeFiring, editNag, nagHtml, nagButtons } from './nag.js';
+import { completeFiring, editNag, nagHtml, nagButtons, snoozedHtml, snoozedButtons } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
-import { setReminderPaused, deleteReminder, completeEarly } from './chores.js';
+import { setReminderPaused, deleteReminder, completeEarly, chatPaused } from './chores.js';
 
 export function editorText(r, tz) {
   const d = JSON.parse(r.schedule_detail);
@@ -134,16 +134,33 @@ async function applyEditorChoice(env, r, kind, value, tz) {
 // the database alone leaves the card on screen contradicting the editor until
 // the next occurrence. Redraw the live card with the new answer.
 //
-// A snoozed card and a nagging card cannot be told apart from the firing row:
-// both sit in state 'nagging' with a future next_nag_at, and only the message
-// text (which starts "😴") says which is on screen. So a firing that has been
-// snoozed is left alone rather than risk replacing a snooze notice with a nag.
-async function redrawLiveNag(env, r, scored) {
+// What is on screen is not always a nag, though, and the card must come back as
+// whatever it already was:
+//
+// - Paused, per chore or household-wide, and the card reads "⏸️ Paused by …"
+//   with no buttons. Redrawing it as a nag would revive a chore nobody resumed,
+//   complete with Done and Snooze, so a pause of either kind stops us here.
+// - Snoozed (snoozes_used > 0 and the next nag still ahead) and the card is the
+//   "😴 … Snoozed by …" notice. There is no reply-markup-only edit for an
+//   ephemeral message, so the buttons cannot be swapped without re-rendering the
+//   text; we re-render the snooze notice instead of skipping the redraw and
+//   leaving a stale Delete label behind. The snoozer's name is not stored on the
+//   firing, so the notice is re-attributed to "the household" — vaguer than the
+//   original line, but true, and the ↩️ Back handler still reads it as snoozed.
+async function redrawLiveNag(env, r, scored, tz) {
+  if (r.paused || await chatPaused(env, r.chat_id)) return;
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
-  if (!firing || !firing.last_message_id || firing.snoozes_used) return;
+  if (!firing || !firing.last_message_id) return;
   const live = { ...firing, scored };
+  const snoozed = firing.snoozes_used > 0
+    && firing.next_nag_at != null && firing.next_nag_at > Date.now();
+  if (snoozed) {
+    await editNag(env, live, snoozedHtml({ ...r, scored }, firing.next_nag_at, 'the household', tz),
+      snoozedButtons(firing.id, isScored(live)));
+    return;
+  }
   await editNag(env, live, nagHtml({ ...r, scored }, firing.nag_count || 0, firing.cat || 'both'),
     nagButtons(firing.id, isScored(live)));
 }
@@ -193,7 +210,7 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       await env.DB.prepare(
         "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
       ).bind(scored, r.id).run();
-      await redrawLiveNag(env, r, scored);
+      await redrawLiveNag(env, r, scored, tz);
     } else if (action === 'pause') {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }
