@@ -214,7 +214,11 @@ describe('ephemeral interactions', () => {
                   if (sql.includes('dashboard_msg_id')) return { dashboard_msg_id: 99 };
                   return null;
                 },
-                async all() { return { results: [] }; },
+                async all() {
+                  // assigneeUserId reads the members table as rows and matches in JS.
+                  if (sql.includes('FROM members')) return { results: member ? [member] : [] };
+                  return { results: [] };
+                },
                 async run() { return { meta: { changes: 1, last_row_id: 77 } }; },
               };
             },
@@ -231,7 +235,7 @@ describe('ephemeral interactions', () => {
   };
 
   it('nags only the assignee when a chore is assigned', async () => {
-    const env = fireEnv(null, { user_id: 246334575 });
+    const env = fireEnv(null, { user_id: 246334575, username: 'nicholaswan', first_name: 'Nick', last_seen: 1 });
     await fireReminder(env, { ...CHORE, assignee_name: '@nicholaswan', assignee_user_id: null },
       1_600_000_000_000, 'Asia/Singapore');
     const nag = calls.find((c) => c.url.endsWith('/sendMessage') && /clear poop/.test(c.body.text || ''));
