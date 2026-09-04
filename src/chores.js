@@ -5,7 +5,8 @@ import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, RECEIPT_TTL_
 import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
-import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons, completeFiring } from './nag.js';
+import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons,
+         snoozedHtml, snoozedButtons, completeFiring } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
@@ -91,7 +92,10 @@ export async function fireIfDue(env, id, tz) {
   await fireReminder(env, row, Date.now(), tz);
 }
 
-async function chatPaused(env, chatId) {
+// Vacation mode: the whole household said "not now". Exported because three
+// other paths need exactly this predicate and a fourth copy of it would be the
+// one that drifts.
+export async function chatPaused(env, chatId) {
   const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?')
     .bind(chatId).first();
   return Boolean(st && st.paused_until && st.paused_until > Date.now());
@@ -159,20 +163,36 @@ function resumeNextFire(r, now, tz) {
 // that restamped those dragged a chore parked until tomorrow back to right now.
 // Each restamp binds the pair it read, so a Done, a snooze, or a re-nag landing
 // mid-resume simply wins.
+//
+// A *future* next_nag_at is not by itself a choice, though. The cron pushes one
+// to 08:00 whenever a re-nag comes due in quiet hours, and an ordinary pending
+// re-nag is always ahead of now — both are the bot's own scheduling. Only
+// snoozes_used tells the two apart, so a firing nobody snoozed gets the fresh
+// window however far out its next nag sits.
+//
+// Returns a Map of firing id → whether it was restamped, so the caller can tell
+// a revived nag from one that kept the household's own deferral.
 async function restampLiveNags(env, r, now, tz) {
   const { results } = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
   ).bind(r.id).all();
   const intervals = JSON.parse(r.nag_intervals);
   const nextNag = deferQuietHours(now + intervals[0] * 60000, tz);
+  const restamped = new Map();
   for (const f of results || []) {
-    if (f.fired_at > now) continue;
-    if (f.next_nag_at != null && f.next_nag_at > now) continue;
+    const postponed = f.fired_at > now;
+    const snoozed = f.snoozes_used > 0 && f.next_nag_at != null && f.next_nag_at > now;
+    if (postponed || snoozed) {
+      restamped.set(f.id, false);
+      continue;
+    }
     await env.DB.prepare(
       `UPDATE firings SET fired_at = ?, next_nag_at = ?
        WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS ?`
     ).bind(now, nextNag, f.id, f.fired_at, f.next_nag_at != null ? f.next_nag_at : null).run();
+    restamped.set(f.id, true);
   }
+  return restamped;
 }
 
 export async function setReminderPaused(env, r, pause, tz, by) {
@@ -183,11 +203,12 @@ export async function setReminderPaused(env, r, pause, tz, by) {
   // nag away — and to recompute a schedule nobody had frozen.
   if (!pause && !r.paused) return { firing: null, next: r.next_fire_at };
   let next = r.next_fire_at;
+  let restamped = null;
   // Firings first: paused = 0 is what re-arms the cron, so a tick that sees it
   // must already be looking at the restamped clock.
   if (!pause) {
     next = resumeNextFire(r, now, tz);
-    await restampLiveNags(env, r, now, tz);
+    restamped = await restampLiveNags(env, r, now, tz);
   }
   await env.DB.prepare('UPDATE reminders SET paused = ?, next_fire_at = ? WHERE id = ?')
     .bind(pause ? 1 : 0, next, r.id).run();
@@ -198,8 +219,17 @@ export async function setReminderPaused(env, r, pause, tz, by) {
     if (pause) {
       await showPausedCard(env, firing, r, by, tz);
     } else if (firing.last_message_id) {
-      await editNag(env, firing,
-        nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
+      // A firing whose deferral survived the resume must not come back wearing a
+      // plain nag: that would claim the chore is due now, and the ↩️ Back handler
+      // (which reads the card's own text) would then hand it the wrong keyboard.
+      // Redraw the snooze notice it still is.
+      if (restamped && restamped.get(firing.id) === false) {
+        await editNag(env, firing,
+          snoozedHtml(r, firing.next_nag_at, by, tz), snoozedButtons(firing.id, isScored(firing)));
+      } else {
+        await editNag(env, firing,
+          nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
+      }
     }
   }
   await updateDashboard(env, r.chat_id);

@@ -217,7 +217,9 @@ async function fireDueReminders(env, now) {
   }
 }
 
-async function renagPending(env, now) {
+// Exported so the expiry claims below can be pinned directly, without driving
+// eight unrelated cron steps to reach them.
+export async function renagPending(env, now) {
   // Due re-nags, plus anything past the 24h deadline regardless of snoozes —
   // expiry must not wait for the next nag slot to come due.
   const { results } = await env.DB.prepare(
