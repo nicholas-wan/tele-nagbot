@@ -17,13 +17,14 @@ Telegram chore bot that nags until someone marks a chore done. Cloudflare Worker
 
 Schedules: `7pm daily`, `every mon,thu 8am`, `every 8 days`, `every 2 weeks`, `every other saturday`, `every 3 months`, `on the 1st`, `weekdays`, `starting 29 aug`, `tomorrow 9:30am`, `in 20m`, `now`, `noon`, `nag:10m`. Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped). A bare `/chore` or `/remind` — a menu tap — asks what to nag about; the reply is the rest of the command.
 
-Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane`, or `snooze 2h` works, as does a 👍/✅ reaction. Max 3 snoozes. The household roster (Done together, `done with`, the Assignee menu, rotation) is everyone the bot has seen post in the chat (`members`), spelled `@username` or first name; a `done with` name that matches nobody is dropped with a private note rather than becoming a phantom housemate.
+Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane`, or `snooze 2h` works, as does a 👍/✅ reaction. Max 3 snoozes. The household roster (Done together, `done with`, the Assignee menu, rotation) is everyone currently in the chat that the bot has seen (`members`, pruned on `left_chat_member` / `chat_member` updates), spelled `@username` or first name. `done with jane` also matches `@janedoe` by first name unless two members share it; a name that matches nobody is dropped with a private note rather than becoming a phantom housemate. Rotation only counts credits for names on that roster, so an old typo in `done_by` can no longer win a turn.
 
 ## Behavior
 
 - Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. Unclaimed 24h → 🪦 expired.
 - Snooze offers 30m / 1h / 2h / 9pm, all clamped to that 24h expiry, plus **📅 Tomorrow** — a postponement, not a snooze: it carries `fired_at` forward so the expiry window moves with the nag. Both count against the 3-snooze cap. If the schedule's next occurrence arrives before a postponed nag returns, the postponed one is dropped as superseded — it is not counted as expired.
-- `/pause` freezes a live nag: no re-nags, and no expiry either — `/resume` hands it a fresh 24h window. Resume never moves a chore that is still due in the future, and an interval chore advances from its own anchor rather than a full gap from now.
+- `/pause` freezes a live nag: no re-nags, and no expiry either — `/resume` hands it a fresh 24h window, except a nag that was snoozed or postponed to a time still ahead, which keeps that. `/resume` on a chore that isn't paused does nothing. Resume never moves a chore that is still due in the future, and an interval chore advances from its own anchor rather than a full gap from now. Every expiry claim binds the `fired_at` it decided on, so a resume racing the cron wins.
+- Month intervals remember the intended day (`schedule_detail.dom`): "every month starting 31 jan" lands on the 28th in February and back on the 31st in March. Interval roll-forward is arithmetic, not hop-by-hop — a `starting <date>` far in the past costs microseconds, not the Worker's CPU budget.
 - **One confirmation per new chore, never two.** Unassigned: a public "added" line carrying the Undo. Assigned: a private copy only, so the group is not pinged about someone else's chore. (The pinned board still lists it with its assignee — the privacy is about noise, not secrecy.)
 - Doing a chore before it nags still counts: `/done <chore>` (or ✅ Done early in Manage) records the credit and advances the schedule past the upcoming slot; a one-off is spent outright.
 - `/chore` scores, `/remind` does not, and they look identical otherwise — so a reminder is flagged `(reminder — no points)` on its nag and `· reminder` on the board. Chores are the default and stay unmarked. **Done together stays on both**: it records who did the work, points or not.
@@ -32,7 +33,7 @@ Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done togeth
 - Pinned dashboard lists every chore, urgency-ordered, two short lines each so nothing wraps on a phone. Refreshed on every change and each morning.
 - Manage, edit, and delete happen **in place on the pinned message** — only its `reply_markup` changes, never its text. So every button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`); internal numbers never appear in labels.
 - Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins it, as does `POST /admin?board`. A board edit that fails for a transient reason (network, a 429 that outlived the retry) keeps the existing board; only a "message not found" style error recreates it, so a blip no longer pins a duplicate.
-- Toggling 🏆 Points in the editor also updates the chore's live nag, not just future ones.
+- Toggling 🏆 Points in the editor also updates the chore's live nag and redraws it, unless it is currently snoozed — a snoozed card can't be told from a nagging one by its row, so it is left alone until it comes back.
 - The 8am digest speaks only when something was left nagging overnight — the board already carries the day's agenda. Weekly wrap Sunday 8pm. Both silent. Streaks 🔥 for repeat weekly winners.
 - Chore icons come from a keyword table in `dashboard.js`; lead the text with your own emoji to override.
 - Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Latte is the light calico, Mocha the dark tortie, and the nag line names whichever the sticker shows — so a wrong tag reads as the wrong cat. Fix with `/tagsticker N latte|mocha|both`; `/tags` lists them.
@@ -93,7 +94,7 @@ npx wrangler tail
 - Secrets: `BOT_TOKEN` (never handle it — hand the user the command), `WEBHOOK_SECRET` (Telegram's header only), `ADMIN_SECRET`. Keep local copies in `.dev.vars` (gitignored, and what `wrangler dev` reads) rather than `%TEMP%`, which Windows cleans up. `/setup` refuses to register a webhook while `WEBHOOK_SECRET` is unset — a secretless webhook would fail the header check on every delivery.
 - Allowed chats live in `wrangler.toml` `[vars] ALLOWED_CHATS`; missing config fails closed. The bot needs Pin Messages and Delete Messages, and admin status is also what makes ephemeral sends possible.
 - Wrangler is a local `devDependency` locked by `package-lock.json` (the range in `package.json` is a caret) — the floating `npx` release broke once, so always run it through the project.
-- Register webhook + command menu (also after changing the menu):
+- Register webhook + command menu (also after changing the menu, and after any change to `allowed_updates` — `chat_member` is not delivered unless explicitly requested here):
 
 ```powershell
 curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.lattemocha.workers.dev/setup
