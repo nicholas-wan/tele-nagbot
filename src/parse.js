@@ -111,7 +111,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     fromDay = DAY_INDEX[otherDayM[1].slice(0, 3).toLowerCase()];
   }
   const otherM = otherDayM || args.match(/\bevery\s+other\s+(day|week)\b/i);
-  const monthsM = args.match(/\bevery\s+(\d+)\s+months?\b/i);
+  // The count is optional: "every month" is the way people say "every 1
+  // month", and leaving it out used to drop the whole phrase into the chore
+  // text — "rent every month" became a one-off named "rent every month".
+  const monthsM = args.match(/\bevery\s+(?:(\d+)\s+)?months?\b/i);
   const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
   const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
   const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
@@ -128,7 +131,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     detail.days = otherM[1].toLowerCase() === 'day' ? 2 : 14;
     args = args.replace(otherM[0], ' ');
   } else if (monthsM) {
-    const months = +monthsM[1];
+    const months = monthsM[1] ? +monthsM[1] : 1;
     if (months < 1 || months > 24) throw new ParseError('Every how many months? 1–24.');
     kind = 'interval';
     detail.months = months;
@@ -249,6 +252,14 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     const text = cleanText(args);
     if (text) {
       validateText(text);
+      // A months interval re-clamps from a fixed day of the month each hop, and
+      // that day is decided here — not after a time arrives. Handing the wizard
+      // a bare { months: 1 } reintroduced the February drift the moment the
+      // draft became a chore, so the anchor rides along in the partial: the
+      // stated start date's day if there is one, else today's.
+      if (kind === 'interval' && detail.months) {
+        detail.dom = fromDate ? fromDate.dom : localParts(nowMs, tz).d;
+      }
       const err = new NoTimeError('missing time');
       err.partial = { text, assigneeName, assigneeUserId, nagIntervals, kind, detail };
       // A stated date survives a missing time: "13 sep lunch" knows the day,

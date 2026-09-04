@@ -16,7 +16,7 @@ const NAGGING = {
 
 // A DB fake whose `members` rows are the household — the same table
 // rememberMember writes on every update.
-function db({ members = [], runs = [], firing = NAGGING, known = true }) {
+function db({ members = [], runs = [], firing = NAGGING, known = true, reminder = REMINDER }) {
   return {
     runs,
     prepare(sql) {
@@ -32,7 +32,7 @@ function db({ members = [], runs = [], firing = NAGGING, known = true }) {
                 }
                 return firing;
               }
-              if (sql.includes('FROM reminders')) return REMINDER;
+              if (sql.includes('FROM reminders')) return reminder;
               if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
               if (sql.includes('FROM members')) return known ? { x: 1 } : null;
               return null;
@@ -392,5 +392,227 @@ describe('ICS identity and single-line values', () => {
     for (const line of ics.split('\r\n')) expect(line).not.toContain('\n');
     expect(ics).toContain('SUMMARY:bday lunch');
     expect(ics).toContain('LOCATION:Fu Yuan 80 Middle Rd');
+  });
+});
+
+// Two spellings that normalise the same are a coin flip, whichever tables they
+// come from. The roster used to be consulted before the aliases, so a name a
+// roster spelling and someone else's first name both answered to silently went
+// to whichever row the database handed back first.
+describe('a name two housemates answer to credits nobody', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const creditOf = (runs) => {
+    const done = runs.find((r) => r.sql.includes("SET state = 'done'"));
+    return done && done.args[0];
+  };
+  const notedUnknown = () => calls.find((c) => c.url.endsWith('/sendMessage')
+    && /Not in this household/.test((c.body && c.body.text) || ''));
+
+  // @jane is spelled "@jane" on the roster; @janedoe's first name is Jane too.
+  const ALIAS_VS_ROSTER = [
+    { username: 'nick', first_name: 'Nick' },
+    { username: 'jane', first_name: 'Jane' },
+    { username: 'janedoe', first_name: 'Jane' },
+  ];
+
+  // @brian, and a housemate with no username whose first name is Brian — so
+  // the roster itself holds two spellings of "brian".
+  const TWO_BRIANS = [
+    { username: 'nick', first_name: 'Nick' },
+    { username: 'brian', first_name: 'Brian' },
+    { username: null, first_name: 'Brian' },
+  ];
+
+  it('does not hand "jane" to @jane when @janedoe answers to it as well', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: ALIAS_VS_ROSTER, runs }) };
+    await handleUpdate(env, doneReply('done with jane'));
+    expect(creditOf(runs)).toBe('@nick');
+    const note = notedUnknown();
+    expect(note.body.text).toContain('jane');
+    expect(note.body.text).toContain('@janedoe');
+  });
+
+  it('does not fold @brian and a username-less Brian into one person', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: TWO_BRIANS, runs }) };
+    await handleUpdate(env, doneReply('done with brian'));
+    expect(creditOf(runs)).toBe('@nick');
+    expect(notedUnknown()).toBeTruthy();
+  });
+
+  it('still resolves a first name only one housemate answers to', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: USERNAMED, runs }) };
+    await handleUpdate(env, doneReply('done with jane'));
+    expect(creditOf(runs)).toBe('@nick & @janedoe');
+    expect(notedUnknown()).toBeUndefined();
+  });
+
+  it('still resolves an unshared roster spelling', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: ALIAS_VS_ROSTER, runs }) };
+    await handleUpdate(env, doneReply('done with @janedoe'));
+    expect(creditOf(runs)).toBe('@nick & @janedoe');
+    expect(notedUnknown()).toBeUndefined();
+  });
+});
+
+describe('a restricted member is only in the chat while is_member says so', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const JANE = { id: 4, username: 'janedoe', first_name: 'Jane' };
+  const restricted = (isMember) => ({
+    chat_member: {
+      chat: { id: 1, type: 'supergroup' }, date: 1,
+      from: { id: 2, username: 'nick', first_name: 'Nick' },
+      old_chat_member: { user: JANE, status: 'member' },
+      new_chat_member: { user: JANE, status: 'restricted', is_member: isMember },
+    },
+  });
+
+  // ChatMemberRestricted carries is_member: someone restricted who then leaves
+  // arrives as restricted with is_member false, and taking the status at face
+  // value kept them drawing rotations from a chat they had walked out of.
+  it('drops the row for a restricted member who is no longer in the chat', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+    await handleUpdate(env, restricted(false));
+    expect(runs.find((r) => /DELETE FROM members/.test(r.sql)).args).toEqual([1, 4]);
+    expect(runs.some((r) => /INSERT INTO members/.test(r.sql))).toBe(false);
+  });
+
+  it('keeps a restricted member who is still in the chat', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db({ members: HOUSEHOLD, runs }) };
+    await handleUpdate(env, restricted(true));
+    expect(runs.some((r) => /DELETE FROM members/.test(r.sql))).toBe(false);
+    expect(runs.find((r) => /INSERT INTO members/.test(r.sql)).args.slice(0, 4))
+      .toEqual([1, 4, 'janedoe', 'Jane']);
+  });
+});
+
+describe('/resume on a chore that was never paused', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function choreDb(runs, paused) {
+    const r = { ...REMINDER, display_num: 1, paused };
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
+                return null;
+              },
+              async all() {
+                if (sql.includes('SELECT * FROM reminders')) return { results: [r] };
+                return { results: [] };
+              },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 1 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const cmd = (text) => ({
+    message: { message_id: 5, chat: { id: 1 }, from: { id: 2, username: 'nick', first_name: 'Nick' }, text },
+  });
+  // Learning the sender and logging the bot's own message are bookkeeping
+  // every update does; neither is a change to the chore.
+  const choreWrites = (runs) => runs.filter((r) => /reminders|firings|settings/.test(r.sql));
+  const said = () => calls.filter((c) => c.url.endsWith('/sendMessage'))
+    .map((c) => c.body.text).join('\n');
+
+  it('says it is not paused instead of announcing a resume', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: choreDb(runs, 0) }, cmd('/resume poop'));
+    expect(said()).toContain("isn't paused");
+    expect(said()).not.toContain('Resumed');
+    // Nothing was frozen, so nothing is restamped, rescheduled, or redrawn.
+    expect(choreWrites(runs)).toEqual([]);
+  });
+
+  it('says the same about /pause on a chore already paused', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: choreDb(runs, 1) }, cmd('/pause poop'));
+    expect(said()).toContain('already paused');
+    expect(choreWrites(runs)).toEqual([]);
+  });
+
+  it('still announces the real transitions', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: choreDb(runs, 1) }, cmd('/resume poop'));
+    expect(said()).toContain('Resumed');
+    expect(choreWrites(runs).some((r) => /UPDATE reminders SET paused/.test(r.sql))).toBe(true);
+  });
+});
+
+describe('an orphaned firing expires under the same compare-and-swap', () => {
+  const calls = [];
+  beforeEach(() => {
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("guards the expiry on state = 'nagging'", async () => {
+    const runs = [];
+    const env = {
+      BOT_TOKEN: 'token', ALLOWED_CHATS: '1',
+      DB: db({ members: HOUSEHOLD, runs, reminder: null }),
+    };
+    await handleUpdate(env, {
+      callback_query: {
+        id: 'cb', data: 'd:5', from: { id: 2, username: 'nick' },
+        message: { message_id: 42, chat: { id: 1 }, text: 'nag' },
+      },
+    });
+    const expiry = runs.find((r) => /state = 'expired'/.test(r.sql));
+    // Without the guard a cron tick that expired this firing a moment earlier
+    // would be overwritten by the tap — the rule every other state change here
+    // already follows.
+    expect(expiry.sql).toContain("state = 'nagging'");
+    const answered = calls.find((c) => c.url.endsWith('/answerCallbackQuery'));
+    expect(answered.body.text).toBe('That reminder was deleted.');
   });
 });

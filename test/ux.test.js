@@ -850,3 +850,132 @@ describe('telling chores and reminders apart', () => {
     expect(lines.find((l) => l.includes('clear poop'))).not.toContain('<i>reminder</i>');
   });
 });
+
+// A chore whose start date was stated but whose time was not goes through the
+// wizard. Both halves of the anchor used to die there: schedule_detail carried
+// no day of month (the February drift, back again) and the stated date was
+// parsed, then dropped — so "rent every month starting 31 jan" began on
+// whatever day someone happened to tap a time.
+describe('the wizard keeps a stated start date', () => {
+  const calls = [];
+  const TZ = 'Asia/Singapore';
+  // Wed 4 Feb 2026, noon SGT — after the 31 Jan anchor, so it has to roll.
+  const NOW = Date.UTC(2026, 1, 4, 4, 0);
+  const sgt = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(0, 16);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    calls.length = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const DRAFT = {
+    id: 12, chat_id: 1, text: 'rent', scored: 1, schedule_kind: 'interval',
+    schedule_detail: JSON.stringify({ months: 1, dom: 31, startDate: { dom: 31, mon: 0 } }),
+    nag_intervals: '[15,30,60]', wizard_msg_id: 77, wizard_msg_ephemeral: 0,
+    prompt_msg_id: null, ai_json: null, created_at: NOW,
+  };
+
+  function draftDb(runs, draft = DRAFT) {
+    return {
+      prepare(sql) {
+        return {
+          bind(...args) {
+            return {
+              async first() {
+                if (sql.includes('FROM drafts')) return draft;
+                if (sql.includes('SELECT tz')) return { tz: TZ };
+                return null;
+              },
+              async all() { return { results: [] }; },
+              async run() { runs.push({ sql, args }); return { meta: { changes: 1, last_row_id: 30 } }; },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  const tap = (code) => ({
+    callback_query: {
+      id: 'cb', data: `w:12:${code}`, from: { id: 2, username: 'nick', first_name: 'Nick' },
+      message: { message_id: 77, chat: { id: 1 }, text: 'when?' },
+    },
+  });
+
+  const inserted = (runs) => {
+    const row = runs.find((u) => u.sql.includes('INSERT INTO reminders'));
+    expect(row).toBeTruthy();
+    return { detail: JSON.parse(row.args[6]), firstFireAt: row.args[7] };
+  };
+
+  it('anchors the first fire on the stated date at the tapped time', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: draftDb(runs) }, tap('h8'));
+    const { firstFireAt } = inserted(runs);
+    // 31 Jan 8am has gone, so the monthly cadence rolls on from it — to
+    // February's last day, not to "one month after whenever this was tapped".
+    expect(sgt(firstFireAt)).toBe('2026-02-28T08:00');
+  });
+
+  it('starts on the stated date itself when it is still ahead', async () => {
+    const runs = [];
+    const draft = {
+      ...DRAFT,
+      schedule_detail: JSON.stringify({ months: 1, dom: 20, startDate: { dom: 20, mon: 1 } }),
+    };
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: draftDb(runs, draft) }, tap('h19'));
+    expect(sgt(inserted(runs).firstFireAt)).toBe('2026-02-20T19:00');
+  });
+
+  it('never writes the start date into the reminder', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: draftDb(runs) }, tap('h8'));
+    const { detail } = inserted(runs);
+    // startDate is a drafts-only passenger: schedule_detail is read back by
+    // nextOccurrence, which knows nothing about it.
+    expect(detail).toEqual({ months: 1, dom: 31, h: 8, mi: 0 });
+    expect('startDate' in detail).toBe(false);
+  });
+
+  it('honours the anchor for a typed time too', async () => {
+    const runs = [];
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: draftDb(runs) }, {
+      message: {
+        message_id: 6, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '8am',
+        reply_to_message: { message_id: 77, chat: { id: 1 } },
+      },
+    });
+    const { detail, firstFireAt } = inserted(runs);
+    expect(sgt(firstFireAt)).toBe('2026-02-28T08:00');
+    expect(detail).toEqual({ months: 1, dom: 31, h: 8, mi: 0 });
+  });
+
+  it('names the cadence in months, not "every undefined days"', async () => {
+    const runs = [];
+    const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: draftDb(runs, null) };
+    await handleUpdate(env, {
+      message: {
+        message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' },
+        text: '/chore rent every month starting 31 jan',
+      },
+    });
+    const wizard = calls.find((c) => /When should Latte/.test((c.body && c.body.text) || ''));
+    expect(wizard.body.text).toContain('every 1 month');
+    expect(wizard.body.text).not.toContain('undefined');
+    // The draft carries the anchor the wizard will need: the day of month for
+    // the cadence, and the start date for the first fire.
+    const draft = runs.find((u) => u.sql.includes('INSERT INTO drafts'));
+    expect(JSON.parse(draft.args[5])).toEqual({ months: 1, dom: 31, startDate: { dom: 31, mon: 0 } });
+  });
+});
