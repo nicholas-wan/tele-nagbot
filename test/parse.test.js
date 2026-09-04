@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseRemind, ParseError, NoTimeError } from '../src/parse.js';
-import { localParts } from '../src/time.js';
+import { localParts, nextOccurrence } from '../src/time.js';
 
 const TZ = 'Asia/Singapore';
 // Monday 2026-08-10 12:00 SGT.
@@ -198,6 +198,44 @@ describe('fortnightly weekdays and calendar start dates', () => {
     expect(r.kind).toBe('interval');
     expect(r.detail.days).toBe(14);
     expect(sgt(r.firstFireAt)).toBe('2026-09-12T21:00');
+  });
+
+  // The roll-forward used to walk the cadence one hop at a time, capped at 400.
+  // "every other day starting 1 jan" typed in late December cost ~31ms of CPU —
+  // three times a Worker's budget — so the webhook died mid-parse and Telegram
+  // retried the same update for ever.
+  it('rolls an anchor most of a year old without walking it', () => {
+    const dec = Date.UTC(2026, 11, 30, 4, 0); // Wed 30 Dec 2026, noon SGT
+    const s = 'mop every other day starting 1 jan 9am';
+    const t0 = performance.now();
+    const r = parseRemind(s, `/chore ${s}`, [], dec, 'Asia/Singapore');
+    const elapsed = performance.now() - t0;
+    expect(r.text).toBe('mop');
+    expect(r.detail.days).toBe(2);
+    expect(sgt(r.firstFireAt)).toBe('2026-12-31T09:00');
+    expect(elapsed, 'the jump is arithmetic, not 180 hops').toBeLessThan(10);
+  });
+
+  // Month intervals carry the day they were started on, so a chore begun on the
+  // 31st is only clamped for the short months it passes through.
+  it('remembers the intended day of month across a past anchor', () => {
+    const sep = Date.UTC(2026, 8, 4, 4, 0); // Fri 4 Sep 2026, noon SGT
+    const s = 'water filter every 1 month starting 31 jan 9am';
+    const r = parseRemind(s, `/chore ${s}`, [], sep, 'Asia/Singapore');
+    expect(r.text).toBe('water filter');
+    expect(r.kind).toBe('interval');
+    expect(r.detail).toMatchObject({ months: 1, dom: 31, h: 9, mi: 0 });
+    // September has 30 days; the intended 31st clamps to it, once.
+    expect(sgt(r.firstFireAt)).toBe('2026-09-30T09:00');
+    // And it climbs back to the 31st rather than sticking on the 30th.
+    const oct = nextOccurrence('interval', r.detail, r.firstFireAt, 'Asia/Singapore');
+    expect(sgt(oct)).toBe('2026-10-31T09:00');
+  });
+
+  it('takes the intended day from the first fire when there is no start date', () => {
+    const r = p('descale every 2 months 9am'); // now: Fri 14 Aug 2026, noon SGT
+    expect(r.detail).toMatchObject({ months: 2, dom: 15 });
+    expect(sgt(r.firstFireAt)).toBe('2026-08-15T09:00');
   });
 
   it('keeps "every other day" at two days, not a fortnight', () => {

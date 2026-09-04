@@ -62,6 +62,72 @@ describe('advanceOccurrence', () => {
     const next = advanceOccurrence('interval', { months: 3, h: 23, mi: 59 }, scheduled, processed, TZ);
     expect(local(next)).toMatchObject({ y: 2026, mo: 11, d: 11, h: 23, mi: 59 });
   });
+
+  // The gap can be a year of hops — a start date deep in the past, or a chore
+  // that slept through an outage — so the count is arithmetic, not a walk. It
+  // must still land exactly where hopping one at a time would have.
+  it('jumps a day interval anchored 350 days back in one step', () => {
+    const detail = { days: 2, h: 9, mi: 0 };
+    const scheduled = zonedEpoch(2025, 9, 19, 9, 0, TZ);
+    const processed = zonedEpoch(2026, 9, 4, 12, 0, TZ); // 350 days later
+    let hopped = nextOccurrence('interval', detail, scheduled, TZ);
+    while (hopped <= processed) hopped = nextOccurrence('interval', detail, hopped, TZ);
+
+    const next = advanceOccurrence('interval', detail, scheduled, processed, TZ);
+    expect(next).toBe(hopped);
+    expect(next).toBeGreaterThan(processed);
+    expect(local(next)).toMatchObject({ y: 2026, mo: 9, d: 6, h: 9, mi: 0 });
+    // Minimal: the slot before it is not after processedAt.
+    expect(next - 2 * 86400000).toBeLessThanOrEqual(processed);
+  });
+
+  it('jumps a month interval arithmetically and re-clamps the day', () => {
+    const scheduled = zonedEpoch(2026, 1, 31, 9, 0, TZ);
+    const processed = zonedEpoch(2026, 9, 4, 12, 0, TZ);
+    const next = advanceOccurrence('interval', { months: 1, dom: 31, h: 9, mi: 0 },
+      scheduled, processed, TZ);
+    // September has 30 days, but the intended day is still the 31st.
+    expect(local(next)).toMatchObject({ y: 2026, mo: 9, d: 30, h: 9, mi: 0 });
+  });
+
+  it('reads the intended day off the anchor for rows written before detail.dom', () => {
+    const scheduled = zonedEpoch(2026, 1, 31, 9, 0, TZ);
+    const processed = zonedEpoch(2026, 2, 1, 12, 0, TZ);
+    const next = advanceOccurrence('interval', { months: 1, h: 9, mi: 0 }, scheduled, processed, TZ);
+    expect(local(next)).toMatchObject({ y: 2026, mo: 2, d: 28, h: 9 });
+  });
+
+  it('leaves an anchor still in the future exactly one cadence ahead', () => {
+    const scheduled = zonedEpoch(2026, 9, 4, 9, 0, TZ);
+    const processed = scheduled - 3600000;
+    expect(advanceOccurrence('interval', { days: 14, h: 9, mi: 0 }, scheduled, processed, TZ))
+      .toBe(zonedEpoch(2026, 9, 18, 9, 0, TZ));
+    expect(advanceOccurrence('interval', { months: 3, h: 9, mi: 0 }, scheduled, processed, TZ))
+      .toBe(zonedEpoch(2026, 12, 4, 9, 0, TZ));
+  });
+});
+
+// Clamping "the 31st" to February and then carrying the 28th forward walked a
+// monthly chore off the end of the month and left it there for good.
+describe('month intervals keep their intended day', () => {
+  it('runs 31 Jan → 28 Feb → 31 Mar → 30 Apr → 31 May', () => {
+    const detail = { months: 1, dom: 31, h: 9, mi: 0 };
+    let t = zonedEpoch(2026, 1, 31, 9, 0, TZ);
+    const seen = [];
+    for (let i = 0; i < 4; i++) {
+      t = nextOccurrence('interval', detail, t, TZ);
+      seen.push(local(t));
+    }
+    expect(seen).toMatchObject([
+      { mo: 2, d: 28 }, { mo: 3, d: 31 }, { mo: 4, d: 30 }, { mo: 5, d: 31 },
+    ]);
+  });
+
+  it('still drifts nothing for a schedule that started mid-month', () => {
+    const detail = { months: 2, dom: 15, h: 9, mi: 0 };
+    const t = nextOccurrence('interval', detail, zonedEpoch(2026, 1, 15, 9, 0, TZ), TZ);
+    expect(local(t)).toMatchObject({ mo: 3, d: 15 });
+  });
 });
 
 describe('deferQuietHours (11pm–8am)', () => {
