@@ -230,7 +230,11 @@ async function renagPending(env, now) {
       if (paused.has(f.chat_id)) continue; // vacation freezes nags and expiry
       const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
       if (!r) {
-        await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?").bind(f.id).run();
+        // Same conditional claim as expireFiring, for the same reason: this
+        // tick's fired_at is a snapshot, and a resume may have moved it.
+        await env.DB.prepare(
+          "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
+        ).bind(f.id, f.fired_at).run();
         continue;
       }
       // /pause freezes in-flight nags too (no re-nags, no expiry ticking).

@@ -3,7 +3,7 @@
 
 import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
-import { isScored, CREDIT_SEP } from './household.js';
+import { isScored, householdRoster, canonName, CREDIT_SEP } from './household.js';
 import { nagButtons, nagHtml, expireFiring, deleteNag, nagChat } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
@@ -121,7 +121,6 @@ export async function fireReminder(env, r, now, tz) {
   await updateDashboard(env, r.chat_id);
 }
 
-// The assignee's private-chat id, when known and they've opened a DM line
 // The assignee's numeric id, which is what an ephemeral send addresses.
 // Assignment stores a display name (the editor deliberately nulls the id), so
 // the name is resolved back through members. No dm_ok gate any more: the nag
@@ -130,40 +129,53 @@ async function assigneeUserId(env, r) {
   if (!r.assignee_name && !r.assignee_user_id) return null;
   if (r.assignee_user_id) return r.assignee_user_id;
   // Stored names come from senderName: "@handle" for a member who has a
-  // Telegram username, their plain first name for one who has not. Matching
-  // only on username left the second kind unresolved, so their nag went public
-  // with a sticker — the one thing an assigned chore must never do. Match the
-  // column the name actually came from, then try username as a fallback; the
-  // most recently seen member wins when a first name is shared.
+  // Telegram username, their plain first name for one who has not. So match
+  // the column the name actually came from, fall back to username, and let the
+  // most recently seen member win when a first name is shared.
+  //
+  // The comparison happens here rather than in SQL because D1 is plain SQLite,
+  // whose lower() is ASCII-only: lower('Élodie') is still 'Élodie', which never
+  // equalled the JS-lowercased name, so an accented member went unresolved and
+  // their nag went public with a sticker beside it — the one thing an assigned
+  // chore must never do. One pass over the chat's members covers both columns.
   const name = String(r.assignee_name).trim();
   const bare = name.replace(/^@/, '').toLowerCase();
-  const column = name.startsWith('@') ? 'username' : 'first_name';
-  const lookup = (col) => env.DB.prepare(
-    `SELECT user_id FROM members WHERE chat_id = ? AND lower(${col}) = ? ORDER BY last_seen DESC LIMIT 1`
-  ).bind(r.chat_id, bare).first();
-  const row = await lookup(column) || (column === 'username' ? null : await lookup('username'));
+  const { results } = await env.DB.prepare(
+    'SELECT user_id, username, first_name, last_seen FROM members WHERE chat_id = ?'
+  ).bind(r.chat_id).all();
+  const rows = [...(results || [])].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+  const match = (col) => rows.find((m) => String(m[col] || '').trim().toLowerCase() === bare);
+  const row = name.startsWith('@')
+    ? match('username')
+    : match('first_name') || match('username');
   return row ? row.user_id : null;
 }
 
-// Household members = everyone who has ever tapped Done here. Least ✅ this
-// week wins the chore; ties go to the lower all-time count. Combined credits
-// ("nick & jane" from done-together) count for each person.
+// Household members = the chat's roster, so someone who has never tapped Done
+// still takes a turn at 0/0. Least ✅ this week wins the chore; ties go to the
+// lower all-time count, then to the name. Combined credits ("nick & jane" from
+// done-together) count for each person — but only for people still on the
+// roster, so a mistyped "done with brian" cannot draw a rotation for a
+// housemate who does not exist.
 async function pickRotation(env, chatId, tz) {
+  const roster = await householdRoster(env, chatId);
+  if (!roster.size) return null;
   const { results } = await env.DB.prepare(
     "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_by IS NOT NULL"
   ).bind(chatId).all();
   const ws = weekStart(Date.now(), tz);
   const stats = new Map();
-  for (const row of results) {
+  for (const name of roster) stats.set(name, { week: 0, total: 0 });
+  for (const row of results || []) {
     for (const p of String(row.done_by).split(CREDIT_SEP)) {
       if (!p.trim()) continue;
-      const s = stats.get(p) || { week: 0, total: 0 };
+      // "jane" credited by hand is the roster's "@jane"; anyone else is a ghost.
+      const s = stats.get(canonName(roster, p.trim()));
+      if (!s) continue;
       s.total++;
       if (row.done_at > ws) s.week++;
-      stats.set(p, s);
     }
   }
-  if (!stats.size) return null;
   const sorted = [...stats.entries()].sort((a, b) =>
     a[1].week - b[1].week || a[1].total - b[1].total || a[0].localeCompare(b[0]));
   return sorted[0][0];
