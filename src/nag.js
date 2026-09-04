@@ -181,10 +181,14 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   return true;
 }
 
+// The claim binds fired_at as well as state, because fired_at is the clock the
+// caller read to decide this firing was 24h old. A resume restamps it, so
+// without that column in the WHERE a cron tick that had already made up its
+// mind expired a nag the household had just brought back to life.
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
   const res = await env.DB.prepare(
-    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
-  ).bind(firing.id).run();
+    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
+  ).bind(firing.id, firing.fired_at).run();
   if (!res.meta.changes) return false;
   firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
   await silenceOldNag(env, firing, reminder.text, '🙀');

@@ -25,21 +25,14 @@ const INTERVAL = {
 
 // One hand-rolled D1 fake: prepare(sql) branches on SQL substrings, run() is
 // recorded so a test can assert which state transitions were attempted.
-function makeDb({ firings = [], reminder = null, settings = null, members = [], reminders = null } = {}) {
+function makeDb({ firings = [], reminder = null, settings = null, members = [],
+                 reminders = null, credits = [] } = {}) {
   const runs = [];
   const nagging = () => firings.filter((f) => f.state === 'nagging');
-  // Newest member first, so a lookup that forgets ORDER BY last_seen DESC
-  // would still have to pick one — and the tests below name which.
-  const roster = [...members].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
   const DB = {
     prepare(sql) {
       const stmt = (args = []) => ({
         async first() {
-          if (sql.includes('FROM members')) {
-            const col = sql.includes('lower(first_name)') ? 'first_name' : 'username';
-            const hit = roster.find((m) => String(m[col] || '').toLowerCase() === args[1]);
-            return hit ? { user_id: hit.user_id } : null;
-          }
           if (sql.includes('FROM settings')) return settings;
           if (sql.includes('SELECT * FROM firings WHERE id')) {
             return firings.find((f) => f.id === args[0]) || null;
@@ -49,6 +42,10 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [], 
           return null;
         },
         async all() {
+          // Members come back in insertion order, never sorted: picking the
+          // right one among namesakes is the caller's job now, not SQL's.
+          if (sql.includes('FROM members')) return { results: members };
+          if (sql.includes('SELECT done_by')) return { results: credits };
           if (sql.includes("FROM firings WHERE reminder_id")) return { results: nagging() };
           if (sql.includes("FROM firings WHERE chat_id")) return { results: nagging() };
           if (sql.includes('FROM reminders')) return { results: reminders || [] };
@@ -130,6 +127,20 @@ describe('firing lifecycle fixes', () => {
       expect(runs.some((r) => /UPDATE firings SET state = 'expired'/.test(r.sql))).toBe(true);
       expect(runs.some((r) => /DELETE FROM firings/.test(r.sql))).toBe(false);
     });
+
+    // Expiry is decided from a fired_at read minutes earlier — the cron's
+    // 24h test, or the sweep above. A resume restamps that column, so the
+    // claim carries it: a stale decision must lose rather than kill a nag the
+    // household has just brought back to life.
+    it('claims the expiry on the very fired_at it judged', async () => {
+      const stale = { ...postponed, fired_at: NOW - 2 * HOUR, next_nag_at: NOW - HOUR };
+      const { env, runs } = makeDb({ firings: [stale] });
+      await fireReminder(env, { ...CHORE, next_fire_at: NOW }, NOW, TZ);
+      const exp = runs.find((r) => /UPDATE firings SET state = 'expired'/.test(r.sql));
+      expect(exp.sql).toContain("state = 'nagging'");
+      expect(exp.sql).toContain('fired_at = ?');
+      expect(exp.args).toEqual([5, NOW - 2 * HOUR]);
+    });
   });
 
   // 2. A pause froze the nags but not fired_at, so a chore paused for more than
@@ -141,27 +152,78 @@ describe('firing lifecycle fixes', () => {
       fired_at: Date.now() - 40 * HOUR, next_nag_at: Date.now() - 30 * HOUR,
       last_message_id: 77, last_message_ephemeral: 0, nag_count: 2, scored: 1,
     };
+    const restamp = (runs) => runs.find((x) => x.sql.includes('UPDATE firings SET fired_at'));
 
-    it('restarts the expiry clock on every live nag', async () => {
+    it('restarts the expiry clock on a live nag whose time has passed', async () => {
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
       const { env, runs } = makeDb({ firings: [live], reminder: r });
       const before = Date.now();
       await setReminderPaused(env, r, false, TZ, 'Nick');
-      const upd = runs.find((x) => x.sql.includes('UPDATE firings SET fired_at'));
+      const upd = restamp(runs);
       expect(upd).toBeTruthy();
       expect(upd.sql).toContain("state = 'nagging'");
       expect(upd.args[0]).toBeGreaterThanOrEqual(before); // fired_at = now
-      expect(upd.args[2]).toBe(10);                       // every nagging firing of this chore
+      expect(upd.args[2]).toBe(5);                        // this firing, one at a time
       // ... and the next nag is in the future, so the cron does not delete and
       // re-send the card the very minute after resume restored its buttons.
       expect(upd.args[1]).toBeGreaterThan(Date.now());
+      // The restamp is a compare-and-swap on the pair it read, so a Done, a
+      // snooze, or a re-nag landing mid-resume wins instead of being clobbered.
+      expect(upd.sql).toContain('fired_at = ?');
+      expect(upd.sql).toContain('next_nag_at IS ?');
+      expect(upd.args[3]).toBe(live.fired_at);
+      expect(upd.args[4]).toBe(live.next_nag_at);
+    });
+
+    // paused = 0 is what re-arms the cron: a tick that sees it must already be
+    // looking at the new clock, or it expires the nag we just brought back.
+    it('restamps the firings before it clears the paused flag', async () => {
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [live], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      const fired = runs.findIndex((x) => x.sql.includes('UPDATE firings SET fired_at'));
+      const paused = runs.findIndex((x) => x.sql.includes('SET paused'));
+      expect(fired).toBeGreaterThanOrEqual(0);
+      expect(paused).toBeGreaterThan(fired);
+    });
+
+    // 2a. /resume does not check whether the chore was paused, so a stray one
+    // handed a nag that had been up since morning a fresh 24 hours and pushed
+    // its next nag away. Resuming what is already running is not an event.
+    it('touches nothing when the chore was never paused', async () => {
+      const r = { ...CHORE, paused: 0, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [live], reminder: r });
+      const state = await setReminderPaused(env, r, false, TZ, 'Nick');
+      expect(runs).toEqual([]);
+      expect(calls).toEqual([]); // no card redraw, no dashboard rewrite
+      expect(state.firing).toBe(null);
+      expect(state.next).toBe(r.next_fire_at);
+    });
+
+    // 2b. A snooze and a "📅 Tomorrow" are the household saying when it wants
+    // to hear about this again. Resume must not drag either back to now.
+    it('keeps a firing that is snoozed into the future', async () => {
+      const snoozed = { ...live, fired_at: Date.now() - HOUR, next_nag_at: Date.now() + 2 * HOUR };
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [snoozed], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      expect(restamp(runs)).toBeUndefined();
+      expect(runs.some((x) => x.sql.includes('SET paused'))).toBe(true);
+    });
+
+    it('keeps a firing that was postponed to tomorrow', async () => {
+      const postponed = { ...live, fired_at: Date.now() + 20 * HOUR, next_nag_at: Date.now() + 20 * HOUR };
+      const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };
+      const { env, runs } = makeDb({ firings: [postponed], reminder: r });
+      await setReminderPaused(env, r, false, TZ, 'Nick');
+      expect(restamp(runs)).toBeUndefined();
     });
 
     it('leaves the clock alone when pausing', async () => {
       const r = { ...CHORE, paused: 0, next_fire_at: Date.now() + HOUR };
       const { env, runs } = makeDb({ firings: [live], reminder: r });
       await setReminderPaused(env, r, true, TZ, 'Nick');
-      expect(runs.some((x) => x.sql.includes('UPDATE firings SET fired_at'))).toBe(false);
+      expect(restamp(runs)).toBeUndefined();
     });
   });
 
@@ -250,6 +312,66 @@ describe('firing lifecycle fixes', () => {
     it('keeps a nag public when nobody matches', async () => {
       const nag = await fire('Ghost', [{ user_id: 42, username: 'jane', first_name: 'Jane', last_seen: 1 }]);
       expect(nag.body.receiver_user_id).toBeUndefined();
+    });
+
+    // D1 is plain SQLite, whose lower() is ASCII-only: lower('Élodie') is
+    // still 'Élodie', so it never equalled the JS-lowercased name and the
+    // assigned nag went public — with a sticker beside it.
+    it('matches an accented first name', async () => {
+      const nag = await fire('Élodie', [{ user_id: 8, username: null, first_name: 'Élodie', last_seen: 1 }]);
+      expect(nag.body.receiver_user_id).toBe(8);
+      expect(sentTo('sendSticker').length).toBe(0);
+    });
+
+    it('matches an accented name across case', async () => {
+      const nag = await fire('élodie', [{ user_id: 8, username: null, first_name: 'Élodie', last_seen: 1 }]);
+      expect(nag.body.receiver_user_id).toBe(8);
+    });
+  });
+
+  // 5. Rotation counted historical done_by strings, so "brian" — minted by one
+  // mistyped "done with brian" — kept winning turns nobody could do, while a
+  // real member who had never tapped Done was not a candidate at all.
+  describe('rotation draws from the household roster', () => {
+    const NOW = 1_700_000_000_000;
+    const ROTATING = {
+      ...CHORE, next_fire_at: NOW,
+      schedule_detail: JSON.stringify({ h: 21, mi: 0, rotate: true }),
+    };
+    const HOUSE = [
+      { user_id: 1, username: 'nick', first_name: 'Nick', last_seen: 2 },
+      { user_id: 2, username: 'jane', first_name: 'Jane', last_seen: 1 },
+    ];
+    const credit = (who) => ({ done_by: who, done_at: Date.now() });
+    const assigned = async (opts) => {
+      const { env, runs } = makeDb(opts);
+      await fireReminder(env, { ...ROTATING }, NOW, TZ);
+      const upd = runs.find((x) => x.sql.includes('SET assignee_name'));
+      return upd ? upd.args[0] : null;
+    };
+
+    it('gives a member with no credits the turn', async () => {
+      // Alphabetically @jane would win; the whole point is that @nick's empty
+      // record beats her two ✅.
+      expect(await assigned({ members: HOUSE, credits: [credit('@jane'), credit('@jane')] }))
+        .toBe('@nick');
+    });
+
+    it('never picks a phantom, however few credits it has', async () => {
+      expect(await assigned({
+        members: HOUSE,
+        credits: [credit('brian'), credit('@nick'), credit('@nick'),
+                  credit('@jane'), credit('@jane'), credit('@jane')],
+      })).toBe('@nick');
+    });
+
+    it('counts a hand-typed credit against the roster spelling it belongs to', async () => {
+      // "done with jane" is @jane's ✅, so the turn goes to @nick.
+      expect(await assigned({ members: HOUSE, credits: [credit('jane')] })).toBe('@nick');
+    });
+
+    it('assigns nobody when the chat has no roster yet', async () => {
+      expect(await assigned({ members: [], credits: [credit('brian')] })).toBe(null);
     });
   });
 
