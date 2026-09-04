@@ -56,10 +56,17 @@ function chatAllowed(env, chatId) {
 const IN_CHAT = new Set(['member', 'administrator', 'creator', 'restricted']);
 
 async function handleChatMember(env, upd) {
-  const who = upd.new_chat_member && upd.new_chat_member.user;
-  const status = upd.new_chat_member && upd.new_chat_member.status;
+  const member = upd.new_chat_member;
+  const who = member && member.user;
+  const status = member && member.status;
   if (!who || who.is_bot) return;
-  if (status === 'left' || status === 'kicked') return forgetMember(env, upd.chat.id, who.id);
+  // "restricted" alone does not mean present: ChatMemberRestricted carries
+  // is_member, and someone restricted who then leaves arrives as restricted
+  // with is_member false. Taking the status at face value kept them on the
+  // roster, drawing rotations from a chat they had walked out of.
+  const gone = status === 'left' || status === 'kicked'
+    || (status === 'restricted' && member.is_member === false);
+  if (gone) return forgetMember(env, upd.chat.id, who.id);
   if (IN_CHAT.has(status)) return rememberMember(env, upd.chat.id, who);
 }
 
@@ -476,6 +483,15 @@ async function cmdPauseResumeAll(env, ctx, args, tz, pause) {
 async function cmdPauseResume(env, ctx, args, tz, pause, by) {
   if (/^all\b/i.test(String(args).trim())) return cmdPauseResumeAll(env, ctx, args, tz, pause);
   const r = await findReminder(env, ctx.chatId, args, pause ? 'pause' : 'resume');
+  // A no-op is not a transition. setReminderPaused returns early when there is
+  // nothing to resume, and the reply used to announce "▶️ Resumed … — next …"
+  // for a chore whose clock had never stopped.
+  if (pause && r.paused) {
+    return sendPrivate(env, ctx, `😺 <b>${esc(r.text)}</b> is already paused.`);
+  }
+  if (!pause && !r.paused) {
+    return sendPrivate(env, ctx, `😺 <b>${esc(r.text)}</b> isn't paused.`);
+  }
   const state = await setReminderPaused(env, r, pause, tz, by);
   if (state.firing) return;
   if (pause) {
@@ -744,7 +760,11 @@ async function handleCallback(env, cb) {
   }
   const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!reminder) {
-    await env.DB.prepare("UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ?").bind(firing.id).run();
+    // Same compare-and-swap as every other state change: the row was read a
+    // moment ago, and a cron tick or a second tap may have moved it since.
+    await env.DB.prepare(
+      "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
+    ).bind(firing.id).run();
     return answerCallback(env, cb.id, 'That reminder was deleted.');
   }
   const tz = await getTz(env, firing.chat_id);

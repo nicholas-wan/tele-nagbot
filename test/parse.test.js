@@ -238,6 +238,33 @@ describe('fortnightly weekdays and calendar start dates', () => {
     expect(sgt(r.firstFireAt)).toBe('2026-08-15T09:00');
   });
 
+  // The wizard path used to lose both halves of the anchor: detail.dom was
+  // only assigned once a time existed, so "every month starting 31 jan" with
+  // no time became a bare { months: 1 } — the February drift, reintroduced —
+  // and the stated date never left the parser at all.
+  it('carries the month day and the start date into the no-time partial', () => {
+    try {
+      p('rent every month starting 31 jan');
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(NoTimeError);
+      expect(e.partial.text).toBe('rent');
+      expect(e.partial.kind).toBe('interval');
+      expect(e.partial.detail).toMatchObject({ months: 1, dom: 31 });
+      expect(e.partial.date).toEqual({ dom: 31, mon: 0 });
+    }
+  });
+
+  it('falls back to today\'s day of month when no start date is stated', () => {
+    try {
+      p('descale every 3 months'); // now: Fri 14 Aug 2026, noon SGT
+      expect.unreachable();
+    } catch (e) {
+      expect(e.partial.detail).toMatchObject({ months: 3, dom: 14 });
+      expect(e.partial.date).toBeUndefined();
+    }
+  });
+
   it('keeps "every other day" at two days, not a fortnight', () => {
     expect(p('bins every other day 10am').detail.days).toBe(2);
   });

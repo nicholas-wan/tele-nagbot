@@ -4,7 +4,7 @@
 
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
          answerCallback, isPublicMessage } from './tg.js';
-import { nextOccurrence, localParts, zonedEpoch, fmtShort, DAY_NAMES } from './time.js';
+import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, DAY_NAMES } from './time.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName } from './household.js';
@@ -92,13 +92,19 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored) {
       console.log(`ai suggest failed: ${e}`);
     }
   }
+  // A stated start date ("every month starting 31 jan") has to survive the
+  // wizard, and drafts have no column for it — so it travels inside
+  // schedule_detail as startDate and is stripped back out before the reminder
+  // is created. Without it the anchor was simply dropped and the chore began
+  // on whatever day the time was chosen.
+  const detail = partial.date ? { ...partial.detail, startDate: partial.date } : partial.detail;
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
        schedule_detail, nag_intervals, ai_json, created_at, scored)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
-    JSON.stringify(partial.detail), JSON.stringify(partial.nagIntervals),
+    JSON.stringify(detail), JSON.stringify(partial.nagIntervals),
     ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0
   ).run();
   const id = res.meta.last_row_id;
@@ -121,10 +127,15 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored) {
   if (ai) keyboard.unshift([btn(`✨ ${ai.label}`, 'ai')]);
   keyboard.push([btn('✕ Cancel', 'cancel')]);
 
+  // An interval is counted in months or in days; reading only .days rendered
+  // a monthly chore as "every undefined days".
+  const intervalNote = partial.detail.months
+    ? `every ${partial.detail.months} month${partial.detail.months === 1 ? '' : 's'}`
+    : `every ${partial.detail.days} days`;
   const kindNote = partial.kind === 'once' ? '' :
     ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
         partial.kind === 'monthly' ? 'on the ' + partial.detail.dom :
-        partial.kind === 'interval' ? `every ${partial.detail.days} days` : 'daily'})`;
+        partial.kind === 'interval' ? intervalNote : 'daily'})`;
   const sent = await sendPrivate(env, ctx,
     `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
     'Tap an option, or reply with a custom time.',
@@ -143,9 +154,32 @@ function draftRef(draft, field) {
   return id ? { id, ephemeral: Boolean(draft[`${field}_msg_ephemeral`]) } : null;
 }
 
+// The draft's schedule, with the start-date passenger taken off: startDate is
+// how the anchor rides in drafts.schedule_detail, and it must never reach a
+// reminder row.
+function draftSchedule(draft) {
+  const { startDate, ...detail } = JSON.parse(draft.schedule_detail);
+  return { detail, startDate: startDate || null };
+}
+
+// First fire for a draft that named a start date: that date at the chosen
+// time. Already past, and it follows the same rule parse.js does — roll the
+// cadence forward from the anchor rather than jumping a whole year.
+function anchoredFirstFire(startDate, kind, detail, now, tz) {
+  const p = localParts(now, tz);
+  const mi = detail.mi || 0;
+  const at = zonedEpoch(p.y, startDate.mon + 1, startDate.dom, detail.h, mi, tz);
+  if (at > now) return at;
+  if (kind === 'once') return zonedEpoch(p.y + 1, startDate.mon + 1, startDate.dom, detail.h, mi, tz);
+  const next = kind === 'interval'
+    ? advanceOccurrence('interval', detail, at, now, tz)
+    : nextOccurrence(kind, detail, now, tz);
+  return next != null ? next : at;
+}
+
 function scheduleFromCode(code, draft, now, tz) {
   const kind = draft.schedule_kind;
-  const detail = JSON.parse(draft.schedule_detail);
+  const { detail, startDate } = draftSchedule(draft);
   const absolute = code.match(/^a(\d+)$/);
   if (absolute) {
     const firstFireAt = +absolute[1];
@@ -161,10 +195,14 @@ function scheduleFromCode(code, draft, now, tz) {
   const hm = code.match(/^h(\d+)$/);
   if (hm) {
     const d = { ...detail, h: +hm[1], mi: 0 };
-    // Interval first occurrence: the next h:mi slot, not a full gap out.
-    return { kind, detail: d, firstFireAt: kind === 'interval'
-      ? nextOccurrence('daily', { h: d.h, mi: 0 }, now, tz)
-      : nextOccurrence(kind, d, now, tz) };
+    // A stated start date decides the first fire; otherwise an interval takes
+    // the next h:mi slot, not a full gap out.
+    const firstFireAt = startDate
+      ? anchoredFirstFire(startDate, kind, d, now, tz)
+      : kind === 'interval'
+        ? nextOccurrence('daily', { h: d.h, mi: 0 }, now, tz)
+        : nextOccurrence(kind, d, now, tz);
+    return { kind, detail: d, firstFireAt };
   }
   return null;
 }
@@ -221,14 +259,22 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
 
   // The typed reply carries the time; the draft carries everything else.
   let { kind, detail, firstFireAt } = parsed;
+  const { detail: draftDetail, startDate } = draftSchedule(draft);
   if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h != null) {
     kind = draft.schedule_kind;
-    detail = { ...JSON.parse(draft.schedule_detail), h: parsed.detail.h, mi: parsed.detail.mi };
+    detail = { ...draftDetail, h: parsed.detail.h, mi: parsed.detail.mi };
     // Interval first occurrence: the next h:mi slot (the parser's rule) — an
     // interval nextOccurrence would put the FIRST fire a whole gap away.
     firstFireAt = kind === 'interval'
       ? nextOccurrence('daily', { h: detail.h, mi: detail.mi }, now, tz)
       : nextOccurrence(kind, detail, now, tz);
+  }
+  // A draft that named a start date starts on it, once the missing time
+  // arrives — a typed clock time says when, not which day. A relative reply
+  // ("in 30m", "now") carries no time of day and means exactly what it says,
+  // so it keeps its own instant.
+  if (startDate && parsed.detail.h != null) {
+    firstFireAt = anchoredFirstFire(startDate, kind, detail, now, tz);
   }
   const p = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,

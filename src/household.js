@@ -33,40 +33,49 @@ const norm = (s) => String(s).replace(/^@/, '').trim().toLowerCase();
 
 const displayName = (r) => String(r.username ? `@${r.username}` : (r.first_name || '')).trim();
 
-// The roster plus every other spelling its members answer to. Someone the
-// roster spells "@janedoe" is still "Jane" to whoever types "done with Jane",
-// so her first name maps to her canonical spelling. A first name two members
-// share maps to nobody: crediting a coin-flip housemate is worse than saying
-// the name wasn't recognised.
+// The roster plus one normalised lookup covering every spelling its members
+// answer to: their canonical spelling, and — for anyone the roster spells by
+// username — their first name too, since nobody types "@janedoe" for Jane.
+//
+// One map, not two, because the collisions that matter cross the boundary.
+// Checking the roster first and the aliases only afterwards meant "jane" with
+// both @jane and @janedoe in the chat always credited @jane, and @brian beside
+// a username-less Brian folded into whichever row came back first. Any key two
+// different members claim is ambiguous and maps to null — nobody. Crediting a
+// coin-flip housemate is worse than saying the name wasn't recognised.
 export async function householdNames(env, chatId) {
   const { results } = await env.DB.prepare(
     'SELECT username, first_name FROM members WHERE chat_id = ?'
   ).bind(chatId).all();
   const roster = new Set();
   const aliases = new Map();
-  const shared = new Set();
   for (const r of results || []) {
     const name = displayName(r);
     if (!name) continue;
     roster.add(name);
-    const first = norm(r.first_name || '');
-    if (!first || first === norm(name)) continue;
-    if (aliases.has(first) && aliases.get(first) !== name) shared.add(first);
-    aliases.set(first, name);
+    const keys = new Set([norm(name)]);
+    if (r.username) keys.add(norm(r.first_name || ''));
+    keys.delete('');
+    for (const key of keys) {
+      if (!aliases.has(key)) aliases.set(key, name);
+      else if (aliases.get(key) !== name) aliases.set(key, null);
+    }
   }
-  // An ambiguous alias resolves to nobody rather than to whoever was read last.
-  for (const key of shared) aliases.delete(key);
   return { roster, aliases };
 }
 
-// "jane" typed by hand matches the roster's "@jane" spelling; given the alias
-// map from householdNames it also matches "@janedoe", whose first name is Jane.
+// "jane" typed by hand matches the roster's "@jane" spelling; given the lookup
+// from householdNames it also matches "@janedoe", whose first name is Jane —
+// and comes back null when two housemates answer to it, so nobody is credited.
 // A name nobody answers to comes back unchanged, so callers can tell the
-// difference with roster.has().
+// difference with roster.has(). Callers with no map get the plain roster match.
 export function canonName(roster, name, aliases = null) {
+  if (aliases) {
+    const key = norm(name);
+    return aliases.has(key) ? aliases.get(key) : name;
+  }
   for (const r of roster) if (norm(r) === norm(name)) return r;
-  const alias = aliases && aliases.get(norm(name));
-  return alias || name;
+  return name;
 }
 
 // Combined credit: the actor first, then the given others, deduped.
