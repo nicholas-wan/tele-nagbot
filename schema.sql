@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   prompt_msg_ephemeral INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   ai_json TEXT,                         -- validated Workers-AI schedule suggestion, applied only on tap
-  scored INTEGER NOT NULL DEFAULT 1     -- carries the /chore vs /remind choice through the wizard
+  scored INTEGER NOT NULL DEFAULT 1,    -- carries the /chore vs /remind choice through the wizard
+  source_msg_id INTEGER                 -- the public command the chore was typed in, kept until the confirmation's OK
 );
 
 CREATE TABLE IF NOT EXISTS settings (

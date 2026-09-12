@@ -5,11 +5,11 @@
 
 import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc,
          replyCtx, sendPrivate, editRef, deleteRef, callbackRef,
-         isPublicMessage, sendPrivateLong, tg } from './tg.js';
+         isPublicMessage, sendPrivateLong, keepSourceMessage, tg } from './tg.js';
 import { parseRemind, ParseError, NoTimeError } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtClock, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, householdNames, canonName, creditTogether,
-         rememberMember, forgetMember, isMember, CREDIT_SEP } from './household.js';
+         rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
@@ -190,7 +190,9 @@ export async function handleUpdate(env, update) {
     // Legacy clients still post commands as ordinary group messages; tidy those
     // away. An ephemeral command was never public and carries message_id 0, so
     // there is nothing to delete — guard rather than calling deleteMessage(0).
-    if (cmd !== 'start' && cmd !== 'help' && isPublicMessage(msg)) {
+    // A /chore or /remind is the exception: it stays until its confirmation's
+    // ✅ OK, so a misread one can be checked against and copied (cmdRemind).
+    if (cmd !== 'start' && cmd !== 'help' && !KEEP_UNTIL_OK.has(cmd) && isPublicMessage(msg)) {
       await deleteMessage(env, chatId, msg.message_id);
     }
     return result;
@@ -201,14 +203,18 @@ export async function handleUpdate(env, update) {
   }
 }
 
-function helpText(section = 'home') {
+function helpText(section = 'home', nicks = []) {
   if (section === 'schedule') return '⏰ <b>Scheduling examples</b>\n\n' +
     '<code>/remind trash 7pm daily</code>\n' +
     '<code>/remind @jane dishes now</code>\n' +
     '<code>/remind plants every mon,thu 8am</code>\n' +
     '<code>/remind filter every 3 months from friday</code>\n' +
     '<code>/remind plumber in 20m nag:10m</code>\n\n' +
-    'Leave out the time for a guided picker. Add <code>rotate</code> for fair-share assignment.';
+    'Leave out the time for a guided picker. Add <code>rotate</code> for fair-share assignment.' +
+    // Shortcuts are per-household config, so the help only mentions the ones
+    // this deployment actually has.
+    (nicks.length ? `\nAssign with @name or a shortcut: ${nicks.map((n) => `<code>${esc(n)}</code>`).join(', ')}` +
+      ` — e.g. <code>/chore ${esc(nicks[0])} dishes 9pm</code>.` : '');
   if (section === 'more') return '🧰 <b>More controls</b>\n\n' +
     '/edit · /delete · /pause · /resume · /skip — use a chore name or number\n' +
     '/poke — re-send everything outstanding\n' +
@@ -257,8 +263,15 @@ async function helpMarkup(env, chatId, section) {
 async function cmdHelp(env, ctx, args = '') {
   const raw = String(args).trim().toLowerCase();
   const section = ['schedule', 'more', 'stickers'].includes(raw) ? raw : 'home';
-  await sendPrivate(env, ctx, helpText(section), await helpMarkup(env, ctx.chatId, section));
+  await sendPrivate(env, ctx, helpText(section, [...nicknames(env).keys()]),
+    await helpMarkup(env, ctx.chatId, section));
 }
+
+// Commands whose message is kept on show until the confirmation's ✅ OK. The
+// parser can misread a chore, and once the command was deleted the only copy
+// of what was typed went with it — so it now outlives the parse, and goes
+// with OK (or the daily sweep, if nobody taps).
+const KEEP_UNTIL_OK = new Set(['chore', 'remind']);
 
 // /chore scores on the leaderboard; /remind is an unscored utility reminder.
 // Identical behavior otherwise.
@@ -266,16 +279,22 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   const chatId = ctx.chatId;
   const now = Date.now();
   // The "/" autocomplete menu sends the bare command — ask what to nag about
-  // instead of erroring, and treat the reply as the rest of the command.
-  if (!String(args).trim()) return startTextPrompt(env, ctx, msg.from, scored);
+  // instead of erroring, and treat the reply as the rest of the command. A
+  // bare command carries nothing worth keeping, so it goes at once.
+  if (!String(args).trim()) {
+    if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
+    return startTextPrompt(env, ctx, msg.from, scored);
+  }
+  const sourceMsgId = await keepSourceMessage(env, chatId, msg);
   let p;
   try {
-    p = parseRemind(args, msg.text, msg.entities, now, tz);
+    p = parseRemind(args, msg.text, msg.entities, now, tz, nicknames(env));
   } catch (err) {
-    if (err instanceof NoTimeError) return startWizard(env, ctx, err.partial, args, tz, scored);
+    if (err instanceof NoTimeError) return startWizard(env, ctx, err.partial, args, tz, scored, sourceMsgId);
     throw err;
   }
   p.scored = scored;
+  p.sourceMsgId = sourceMsgId;
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   await confirmNewChore(env, ctx, by, p, tz, id, html);
   await fireIfDue(env, id, tz);
@@ -591,7 +610,7 @@ async function handleCallback(env, cb) {
   const help = data.match(/^h:(home|schedule|more|stickers)$/);
   if (help) {
     await editRef(env, ctx, cb.message.chat.id, ref,
-      helpText(help[1]), await helpMarkup(env, cb.message.chat.id, help[1]));
+      helpText(help[1], [...nicknames(env).keys()]), await helpMarkup(env, cb.message.chat.id, help[1]));
     return answerCallback(env, cb.id, '');
   }
 
@@ -668,8 +687,12 @@ async function handleCallback(env, cb) {
   }
 
   // Dismiss a log line. Works on either kind of message, since deleteRef picks
-  // the method from the ref rather than assuming a public message id.
-  if (data === 'ok') {
+  // the method from the ref rather than assuming a public message id. An OK
+  // that names a source message is a chore confirmation: the command it was
+  // typed in was kept on show for exactly this tap, and goes with it.
+  const okm = data.match(/^ok(?::(\d+))?$/);
+  if (okm) {
+    if (okm[1]) await deleteMessage(env, cb.message.chat.id, +okm[1]);
     await deleteRef(env, ctx, cb.message.chat.id, ref);
     return answerCallback(env, cb.id, '');
   }

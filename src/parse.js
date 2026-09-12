@@ -16,9 +16,13 @@ export class ParseError extends Error {}
 // so the bot can offer time-choice buttons instead of failing.
 export class NoTimeError extends ParseError {}
 
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // fullText/entities are the raw Telegram message + entities, used to catch
 // text_mention (users without a public @username, carries their numeric id).
-export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
+// nicknames maps a typed shortcut ("nic") to a roster spelling ("@nicholaswan")
+// so an assignee can be named without an @-mention; see household.nicknames.
+export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = null) {
   let args = ` ${argsRaw.trim()} `;
 
   // Assignee: text_mention entity first (has user id), else plain @username.
@@ -38,6 +42,25 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     if (m) {
       assigneeName = `@${m[2]}`;
       args = args.replace(`@${m[2]}`, ' ');
+    }
+  }
+  // A configured nickname is an assignee too: "nic clear poop 9pm", "clear
+  // poop for yx 9pm". Only a whole word counts (the "nic" in "picnic" is
+  // text), an explicit mention still wins, and the earliest shortcut in the
+  // message is the one meant. A leading "for" goes with it.
+  if (!assigneeName && nicknames && nicknames.size) {
+    let hit = null;
+    for (const [nick, spelling] of nicknames) {
+      const m = args.match(new RegExp(`(^|\\s)((?:for\\s+)?${escapeRe(nick)})(?=\\s|$)`, 'i'));
+      if (m && (!hit || m.index < hit.index)) {
+        hit = { index: m.index + m[1].length, length: m[2].length, spelling };
+      }
+    }
+    if (hit) {
+      assigneeName = hit.spelling;
+      // Splice by position: a plain replace could hit the same letters inside
+      // an earlier word.
+      args = `${args.slice(0, hit.index)} ${args.slice(hit.index + hit.length)}`;
     }
   }
 
@@ -125,6 +148,14 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   const monthlyM = args.match(/\bmonthly\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/i)
     || args.match(/\bon\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s+(?!at\b|nag:)[a-z])/i);
 
+  // A day-of-month can qualify a month interval as well as stand on its own:
+  // "every month on the 1st" is one schedule, not an interval followed by
+  // title text. Validate it before cadence precedence chooses monthsM.
+  const requestedDom = monthlyM ? +monthlyM[1] : null;
+  if (requestedDom != null && (requestedDom < 1 || requestedDom > 31)) {
+    throw new ParseError('Day of month must be 1–31.');
+  }
+
   if (otherM) {
     kind = 'interval';
     // Any weekday form means fortnightly; only "every other day" is 2 days.
@@ -133,9 +164,19 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   } else if (monthsM) {
     const months = monthsM[1] ? +monthsM[1] : 1;
     if (months < 1 || months > 24) throw new ParseError('Every how many months? 1–24.');
-    kind = 'interval';
-    detail.months = months;
+    // A monthly cadence on a named calendar day is the calendar rule itself.
+    // Longer cadences remain anchored month intervals (for example, every
+    // three months on the 2nd).
+    if (months === 1 && requestedDom != null) {
+      kind = 'monthly';
+      detail.dom = requestedDom;
+    } else {
+      kind = 'interval';
+      detail.months = months;
+      if (requestedDom != null) detail.dom = requestedDom;
+    }
     args = args.replace(monthsM[0], ' ');
+    if (monthlyM) args = args.replace(monthlyM[0], ' ');
   } else if (weekdaysM) {
     kind = 'weekly';
     detail.days = /weekend/i.test(weekdaysM[1]) ? [0, 6] : [1, 2, 3, 4, 5];
@@ -161,10 +202,8 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     detail.days = days;
     args = args.replace(weeklyM[0], ' ');
   } else if (monthlyM) {
-    const dom = +monthlyM[1];
-    if (dom < 1 || dom > 31) throw new ParseError('Day of month must be 1–31.');
     kind = 'monthly';
-    detail.dom = dom;
+    detail.dom = requestedDom;
     args = args.replace(monthlyM[0], ' ');
   }
 
@@ -258,7 +297,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
       // draft became a chore, so the anchor rides along in the partial: the
       // stated start date's day if there is one, else today's.
       if (kind === 'interval' && detail.months) {
-        detail.dom = fromDate ? fromDate.dom : localParts(nowMs, tz).d;
+        detail.dom ??= fromDate ? fromDate.dom : localParts(nowMs, tz).d;
       }
       const err = new NoTimeError('missing time');
       err.partial = { text, assigneeName, assigneeUserId, nagIntervals, kind, detail };
@@ -284,7 +323,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   // A month interval re-clamps from this day each hop, so "starting 31 jan"
   // keeps meaning the 31st instead of sliding down to February's 28th and
   // staying there. The anchor's own day wins; otherwise the first fire's.
-  let intendedDom = null;
+  let intendedDom = detail.months ? detail.dom ?? null : null;
   if (fromDate) {
     // A stated calendar date wins over a weekday anchor: "every other saturday
     // starting 29 aug" begins on the 29th and repeats fortnightly from there.
@@ -321,7 +360,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   } else if (kind === 'once') {
     // One-off date: tomorrow / today / a weekday name / default (next slot).
     const p = localParts(nowMs, tz);
-    const tomorrowM = args.match(/\btomorrow\b/i);
+    // "tmr" is ordinary chat shorthand for tomorrow. Consume a directly
+    // attached "this" too, so "train ticket this tmr" does not leave a task
+    // named "train ticket this"; a meaningful "this" elsewhere is untouched.
+    const tomorrowM = args.match(/\b(?:this\s+)?(?:tomorrow|tmr)\b/i);
     const todayM = args.match(/\btoday\b/i);
     // A weekday only counts as a date when marked ("on/next/this fri") or
     // left dangling at the end — "buy sun hat" keeps its sun. The marker is
@@ -347,7 +389,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
   } else {
     // "tomorrow 7pm daily" starts tomorrow; strip the tokens from the text.
     let after = nowMs;
-    const tm = args.match(/\btomorrow\b/i);
+    const tm = args.match(/\b(?:this\s+)?(?:tomorrow|tmr)\b/i);
     if (tm) {
       args = args.replace(tm[0], ' ');
       const p = localParts(nowMs, tz);
@@ -357,7 +399,12 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
     if (td) args = args.replace(td[0], ' ');
     // Interval first occurrence: the next h:mi slot; the N-day gap follows.
     firstFireAt = kind === 'interval'
-      ? nextOccurrence('daily', { h, mi }, after, tz)
+      ? detail.months && intendedDom != null
+        // An explicit "on the Nth" determines the interval's first anchor.
+        // Without one, month intervals retain their existing next-time-slot
+        // behaviour and take that first fire's calendar day as the anchor.
+        ? nextOccurrence('monthly', { dom: intendedDom, h, mi }, after, tz)
+        : nextOccurrence('daily', { h, mi }, after, tz)
       : nextOccurrence(kind, detail, after, tz);
     // A stated "today" is a promise, not a hint: when the schedule's first
     // slot can't land today any more, say so instead of silently starting
@@ -380,10 +427,23 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz) {
 }
 
 function cleanText(args) {
-  return args
+  let text = args
     .replace(/\s+at\s*$/i, ' ')      // dangling "at" left by "call mom at 7pm"
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Chatty command wrappers are not part of the task name. Peel them from the
+  // edges only: "please remind me to buy milk" becomes "buy milk", while a
+  // meaningful word in the middle of a title is left alone. Repeat because
+  // people naturally stack wrappers ("could you please remind me to ...").
+  const leadingFiller = /^(?:(?:please|pls|plz|kindly)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|remind\s+me\s+to\s+|remember\s+to\s+|i\s+(?:need|have|want)\s+to\s+|help\s+me\s+(?:to\s+)?)/i;
+  const trailingFiller = /\s+(?:please|pls|plz|thanks|thank\s+you)[.!]*$/i;
+  let before;
+  do {
+    before = text;
+    text = text.replace(leadingFiller, '').replace(trailingFiller, '').trim();
+  } while (text !== before);
+  return text;
 }
 
 function finish(args, out) {

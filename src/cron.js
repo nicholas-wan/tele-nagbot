@@ -241,6 +241,8 @@ export async function renagPending(env, now) {
       }
       // /pause freezes in-flight nags too (no re-nags, no expiry ticking).
       if (r.paused) continue;
+      // Quiet overdue one-offs remain available on the board and to /done.
+      if (r.schedule_kind === 'once' && f.next_nag_at == null) continue;
 
       const tz = await getTz(env, f.chat_id);
       // Quiet hours: nothing nags (or announces expiry) overnight — anything

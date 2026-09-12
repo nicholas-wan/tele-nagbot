@@ -89,7 +89,7 @@ export function fmtWhen(ms, tz) {
 export function buttonText(r, tz = 'Asia/Singapore') {
   const when = r.paused ? 'paused'
     : r.next_fire_at ? fmtWhen(r.next_fire_at, tz)
-    : 'nagging now';
+    : 'pending';
   return clip(`${[choreEmoji(r.text), r.text].filter(Boolean).join(' ')} · ${when}`);
 }
 
@@ -106,9 +106,11 @@ export async function choreListHtml(env, chatId, tz) {
   ).bind(chatId).all();
   if (!results.length) return null;
   const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
-  const nagging = new Set((await env.DB.prepare(
-    "SELECT reminder_id FROM firings WHERE chat_id = ? AND state = 'nagging'"
-  ).bind(chatId).all()).results.map((f) => f.reminder_id));
+  const live = (await env.DB.prepare(
+    "SELECT reminder_id, next_nag_at FROM firings WHERE chat_id = ? AND state = 'nagging'"
+  ).bind(chatId).all()).results;
+  const nagging = new Set(live.map((f) => f.reminder_id));
+  const overdue = new Set(live.filter((f) => f.next_nag_at === null).map((f) => f.reminder_id));
   const lines = ['🐾 <b>Chores</b>'];
   if (st && st.paused_until && st.paused_until > Date.now()) {
     lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
@@ -124,6 +126,7 @@ export async function choreListHtml(env, chatId, tz) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const lead = r.paused ? '⏸️ paused'
+      : r.schedule_kind === 'once' && overdue.has(r.id) ? '⏰ overdue'
       : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
       : fmtWhen(r.next_fire_at, tz);
     const each = cadence(r);

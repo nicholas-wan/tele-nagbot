@@ -63,11 +63,70 @@ describe('schedule tokens vs chore text', () => {
     expect(parse('pay rent monthly on the 3rd 9am')).toMatchObject({ kind: 'monthly', detail: { dom: 3 } });
   });
 
+  it('combines "every month" with an explicit day of month', () => {
+    const now = Date.UTC(2026, 8, 4, 3, 0); // Fri 4 Sep 2026, 11:00 SGT
+    const s = 'Town Council Bill every month on the 1st at 10am';
+    const r = parseRemind(s, `/chore ${s}`, [], now, TZ);
+
+    expect(r).toMatchObject({
+      text: 'Town Council Bill',
+      kind: 'monthly',
+      detail: { dom: 1, h: 10, mi: 0 },
+    });
+    expect(local(r.firstFireAt)).toMatchObject({ y: 2026, mo: 10, d: 1, h: 10 });
+  });
+
+  it('keeps an explicit day on multi-month intervals', () => {
+    const r = parse('service aircon every 3 months on the 2nd at 9am');
+    expect(r).toMatchObject({
+      text: 'service aircon',
+      kind: 'interval',
+      detail: { months: 3, dom: 2, h: 9, mi: 0 },
+    });
+    expect(local(r.firstFireAt)).toMatchObject({ y: 2026, mo: 9, d: 2, h: 9 });
+  });
+
   it('starts "tomorrow ... daily" tomorrow with clean text', () => {
     const r = parse('trash tomorrow 7pm daily');
     expect(r.kind).toBe('daily');
     expect(r.text).toBe('trash');
     expect(local(r.firstFireAt)).toMatchObject({ d: 11, h: 19 });
+  });
+
+  it('reads "tmr" as tomorrow and removes attached filler', () => {
+    const short = parse('book train ticket tmr 9am');
+    expect(short.text).toBe('book train ticket');
+    expect(local(short.firstFireAt)).toMatchObject({ d: 11, h: 9 });
+
+    const withFiller = parse('train ticket this tmr 10am');
+    expect(withFiller.text).toBe('train ticket');
+    expect(local(withFiller.firstFireAt)).toMatchObject({ d: 11, h: 10 });
+  });
+
+  it('keeps a meaningful "this" in the task text', () => {
+    expect(parse('buy this book tomorrow 9am').text).toBe('buy this book');
+  });
+
+  it('removes conversational filler from task-name edges', () => {
+    expect(parse('please remind me to book train ticket tmr 9am thanks').text)
+      .toBe('book train ticket');
+    expect(parse('could you please cancel grab subscription tomorrow 10am please!').text)
+      .toBe('cancel grab subscription');
+    expect(parse('I need to cut nails 5pm').text).toBe('cut nails');
+  });
+
+  it('also removes filler before handing a task to the time picker', () => {
+    try {
+      parse('kindly remember to wash bowls');
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(NoTimeError);
+      expect(e.partial.text).toBe('wash bowls');
+    }
+  });
+
+  it('does not remove the same words from inside a task name', () => {
+    expect(parse('buy a thank you card tomorrow 9am').text).toBe('buy a thank you card');
   });
 });
 
@@ -312,5 +371,59 @@ describe('weekday phrases with markers', () => {
     expect(r.text).toBe('gift');
     expect(r.kind).toBe('interval');
     expect(sgt(r.firstFireAt)).toBe('2026-08-15T10:00');
+  });
+});
+
+describe('assignee nicknames', () => {
+  const NICKS = new Map([['nic', '@nicholaswan'], ['yx', '@Dodgerblueee']]);
+  const withNicks = (args) => parseRemind(args, args, [], NOW, TZ, NICKS);
+
+  it('reads a leading shortcut as the assignee', () => {
+    const r = withNicks('nic clear poop 9pm');
+    expect(r.assigneeName).toBe('@nicholaswan');
+    expect(r.assigneeUserId).toBeNull();
+    expect(r.text).toBe('clear poop');
+  });
+
+  it('takes "for <shortcut>" anywhere, and the "for" with it', () => {
+    const r = withNicks('cancel grab subscription for yx tomorrow 10am');
+    expect(r.assigneeName).toBe('@Dodgerblueee');
+    expect(r.text).toBe('cancel grab subscription');
+  });
+
+  it('matches case-insensitively and at the end', () => {
+    expect(withNicks('cut nails 5pm YX')).toMatchObject({ assigneeName: '@Dodgerblueee', text: 'cut nails' });
+  });
+
+  it('only counts a whole word', () => {
+    const r = withNicks('book picnic spot 9am');
+    expect(r.assigneeName).toBeNull();
+    expect(r.text).toBe('book picnic spot');
+  });
+
+  it('strips the shortcut even when its letters appear in an earlier word', () => {
+    const r = withNicks('picnic basket nic 9am');
+    expect(r.assigneeName).toBe('@nicholaswan');
+    expect(r.text).toBe('picnic basket');
+  });
+
+  it('lets an explicit mention win over a shortcut in the text', () => {
+    const r = withNicks('@jane call nic 9am');
+    expect(r.assigneeName).toBe('@jane');
+    expect(r.text).toBe('call nic');
+  });
+
+  it('is inert without a map', () => {
+    expect(parse('nic clear poop 9pm')).toMatchObject({ assigneeName: null, text: 'nic clear poop' });
+  });
+
+  it('survives the no-time wizard', () => {
+    try {
+      withNicks('yx water plants');
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(NoTimeError);
+      expect(e.partial).toMatchObject({ assigneeName: '@Dodgerblueee', text: 'water plants' });
+    }
   });
 });

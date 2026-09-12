@@ -1,7 +1,7 @@
 // Chore actions shared by typed commands, dashboard buttons, and the cron:
 // create, find, delete, pause/resume, complete-early, and vacation wake-up.
 
-import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, RECEIPT_TTL_MS } from './tg.js';
+import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, RECEIPT_TTL_MS } from './tg.js';
 import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
@@ -10,11 +10,15 @@ import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons,
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
-// Undo removes the chore that was just made; OK just clears the confirmation.
-export function undoButtons(reminderId) {
+// Undo removes the chore that was just made; OK clears the confirmation — and
+// the command it was typed in, which is kept on show until then so a misread
+// chore can be compared against what was actually typed, and copied back.
+// Undo deliberately leaves the command standing: that is the case where the
+// parse was wrong and the text is about to be needed again.
+export function undoButtons(reminderId, sourceMsgId = null) {
   return { inline_keyboard: [[
     { text: '↩️ Undo', callback_data: `u:${reminderId}` },
-    { text: '✅ OK', callback_data: 'ok' },
+    okButton(sourceMsgId),
   ]] };
 }
 
@@ -73,7 +77,7 @@ export async function createReminder(env, chatId, p, by, tz) {
 // creator's own private copy is the only one. Either way the pinned dashboard
 // lists it, so nothing is lost by keeping this to a single message.
 export async function confirmNewChore(env, ctx, by, p, tz, id, html) {
-  const buttons = undoButtons(id);
+  const buttons = undoButtons(id, p.sourceMsgId);
   if (p.assigneeName || p.assigneeUserId) return sendPrivate(env, ctx, html, buttons);
   return sendMessage(env, ctx.chatId,
     `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`, buttons);
@@ -242,15 +246,20 @@ export async function setReminderPaused(env, r, pause, tz, by) {
 // got there first and nothing else could be completed.
 export async function completeEarly(env, r, credit, tz) {
   const now = Date.now();
-  // Claim the upcoming occurrence with the usual compare-and-swap. Recurring
-  // chores advance past the claimed slot (the /skip rule); a one-off is spent
-  // outright, so its conditional delete is the claim.
+  const detail = JSON.parse(r.schedule_detail);
+  // Day intervals describe the gap between completed chores. When one is done
+  // early, restart that gap from today; advancing from the skipped due slot
+  // would make an every-two-weeks chore due more than two weeks after the work
+  // was actually done. Calendar schedules still advance past their claimed
+  // slot, and a one-off is spent outright.
+  const nextFireAt = r.schedule_kind === 'interval' && detail.days
+    ? nextOccurrence(r.schedule_kind, detail, now, tz)
+    : nextOccurrence(r.schedule_kind, detail, r.next_fire_at, tz);
   const claim = r.schedule_kind === 'once'
     ? await env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
         .bind(r.id, r.next_fire_at).run()
     : await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz),
-          r.id, r.next_fire_at).run();
+        .bind(nextFireAt, r.id, r.next_fire_at).run();
   if (!claim.meta.changes) {
     // The occurrence fired while we looked — complete its live nag instead.
     const firing = await env.DB.prepare(

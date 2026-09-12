@@ -4,7 +4,7 @@
 // mode outranks "/chore … now".
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { fireReminder } from '../src/firing.js';
-import { setReminderPaused, fireIfDue, wakeChat } from '../src/chores.js';
+import { setReminderPaused, fireIfDue, wakeChat, completeEarly } from '../src/chores.js';
 import { renagPending } from '../src/cron.js';
 import { zonedEpoch } from '../src/time.js';
 
@@ -374,6 +374,34 @@ describe('firing lifecycle fixes', () => {
       expect(upd).toBeTruthy();
       expect(upd.args[0]).toBeGreaterThan(Date.now());
       expect((upd.args[0] - anchor) % (8 * DAY)).toBe(0);
+    });
+  });
+
+  describe('an early-completed day interval restarts today', () => {
+    it('puts cat fountain two weeks after the date it was marked done', async () => {
+      const markedAt = zonedEpoch(2026, 9, 4, 10, 30, TZ);
+      const due = zonedEpoch(2026, 9, 11, 19, 0, TZ);
+      const r = {
+        ...INTERVAL,
+        text: 'cat fountain',
+        schedule_detail: JSON.stringify({ days: 14, h: 19, mi: 0 }),
+        next_fire_at: due,
+      };
+      const { env, runs } = makeDb({ reminder: r });
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(markedAt);
+      try {
+        await completeEarly(env, r, 'Nick', TZ);
+      } finally {
+        clock.mockRestore();
+      }
+
+      const claim = runs.find((x) =>
+        x.sql.includes('SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'));
+      expect(claim.args).toEqual([
+        zonedEpoch(2026, 9, 18, 19, 0, TZ),
+        r.id,
+        due,
+      ]);
     });
   });
 

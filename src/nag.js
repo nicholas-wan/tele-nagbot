@@ -186,6 +186,18 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
 // without that column in the WHERE a cron tick that had already made up its
 // mind expired a nag the household had just brought back to life.
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
+  // A one-off has no next occurrence to replace unfinished work. End its
+  // automatic nags, but keep it actionable until someone completes or deletes it.
+  // NULL next_nag_at marks this quiet, overdue state; state stays 'nagging' so
+  // Done, replies, and the pinned manager still act on the same firing.
+  if (reminder.schedule_kind === 'once' && !silent) {
+    const claim = await env.DB.prepare(
+      "UPDATE firings SET next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS NOT NULL"
+    ).bind(firing.id, firing.fired_at).run();
+    if (!claim.meta.changes) return false;
+    await updateDashboard(env, firing.chat_id);
+    return true;
+  }
   const res = await env.DB.prepare(
     "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
   ).bind(firing.id, firing.fired_at).run();
@@ -197,9 +209,6 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
     // The tombstone always lands in the group — accountability is household-wide.
     await sendMessage(env, firing.chat_id,
       `🙀 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`);
-  }
-  if (reminder.schedule_kind === 'once') {
-    await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
   await updateDashboard(env, firing.chat_id);
   return true;

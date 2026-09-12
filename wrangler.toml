@@ -9,6 +9,10 @@ compatibility_date = "2026-08-01"
 # upgraded to when an admin was promoted. The upgrade mints a new id; the old
 # one is a dead husk and is deliberately not listed.
 ALLOWED_CHATS = "-1004418632524"
+# Typed assignee shortcuts: "/chore nic clear poop 9pm" or "... for yx". Each
+# value is the person's roster spelling — "@username", or the bare first name
+# of a member who has no username — which is how a nag finds them.
+NICKNAMES = "nic=@nicholaswan, yx=@Dodgerblueee"
 
 # Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET, and
 # ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.

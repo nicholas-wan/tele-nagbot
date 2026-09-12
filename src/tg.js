@@ -63,8 +63,16 @@ export async function sendLong(env, chatId, html, opts = {}) {
 // so the group can be cleared without hunting for a delete option. Messages
 // with their own keyboard — the pinned board, nags, the wizard — keep theirs.
 // opts.noOk opts out for the rare message that must not be dismissable.
-const OK_ROW = { inline_keyboard: [[{ text: '✅ OK', callback_data: 'ok' }]] };
+const OK_ROW = { inline_keyboard: [[okButton()]] };
 const withOk = (replyMarkup, opts) => replyMarkup || (opts.noOk ? null : OK_ROW);
+
+// The ✅ OK button. Given the id of the public message a chore was typed in,
+// OK removes that command along with the confirmation: the command stays in
+// the group until whoever typed it has seen the parse and agreed with it, so a
+// misread chore can still be copied and retyped instead of typed from memory.
+export function okButton(sourceMsgId = null) {
+  return { text: '✅ OK', callback_data: sourceMsgId ? `ok:${sourceMsgId}` : 'ok' };
+}
 
 // Everything the bot sends is tidied away after a day; only the pinned
 // dashboard is kept (opts.keep). Telegram cannot list a bot's own messages,
@@ -75,22 +83,29 @@ const SENT_TTL_MS = 86400000;
 // other person to glance at the chat; they don't earn the full day.
 export const RECEIPT_TTL_MS = 2 * 3600000;
 
+// Put a message on the daily sweep. Also the backstop for a kept command
+// message (see okButton): if nobody taps OK, it still goes with the day.
+export async function recordForSweep(env, chatId, messageId, { ephemeral = false, receiverUserId = null, ttlMs = SENT_TTL_MS } = {}) {
+  if (!env.DB || !messageId) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO sent_messages (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(chatId, ephemeral ? receiverUserId : null, messageId, ephemeral ? 1 : 0,
+      Date.now() + ttlMs, Date.now()).run();
+  } catch (e) {
+    // A message that outlives its day is a nuisance, not a failure.
+    console.log(`recordForSweep failed: ${e}`);
+  }
+}
+
 export async function recordSentMessage(env, chatId, res, { receiverUserId = null, ttlMs = SENT_TTL_MS } = {}) {
   if (!env.DB || !res || !res.ok || !res.result) return res;
   const r = res.result;
   const ephemeral = Boolean(r.ephemeral_message_id);
   const id = ephemeral ? r.ephemeral_message_id : r.message_id;
   if (!id) return res;
-  try {
-    await env.DB.prepare(
-      `INSERT INTO sent_messages (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(chatId, ephemeral ? receiverUserId : null, id, ephemeral ? 1 : 0,
-      Date.now() + ttlMs, Date.now()).run();
-  } catch (e) {
-    // A message that outlives its day is a nuisance, not a failure.
-    console.log(`recordSentMessage failed: ${e}`);
-  }
+  await recordForSweep(env, chatId, id, { ephemeral, receiverUserId, ttlMs });
   return res;
 }
 
@@ -120,6 +135,15 @@ export async function sendPrivateLong(env, ctx, html) {
 // message_id 0, so a falsy check is the guard — not `!== undefined`.
 export function isPublicMessage(msg) {
   return Boolean(msg && msg.message_id && !msg.ephemeral_message_id);
+}
+
+// The public message a chore was typed in, put on the sweep as the backstop
+// for the ✅ OK that removes it (okButton). Null for an ephemeral command:
+// there is no public copy to keep or remove.
+export async function keepSourceMessage(env, chatId, msg) {
+  if (!isPublicMessage(msg)) return null;
+  await recordForSweep(env, chatId, msg.message_id);
+  return msg.message_id;
 }
 
 export async function sendMessage(env, chatId, html, replyMarkup, opts = {}) {

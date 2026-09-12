@@ -3,11 +3,11 @@
 // Handles the w: callbacks and the typed custom-time replies.
 
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
-         answerCallback, isPublicMessage } from './tg.js';
+         answerCallback, isPublicMessage, keepSourceMessage } from './tg.js';
 import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, DAY_NAMES } from './time.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
-import { getTz, senderName } from './household.js';
+import { getTz, senderName, nicknames } from './household.js';
 import { emptyKeyboard } from './nag.js';
 import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
 
@@ -45,9 +45,12 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
   const now = Date.now();
   const tz = await getTz(env, chatId);
   const scored = Boolean(draft.scored);
+  // The reply is the command here, and is kept like one: it stays until the
+  // confirmation's ✅ OK, so a misread chore can be checked against it.
+  const sourceMsgId = await keepSourceMessage(env, chatId, msg);
   let p;
   try {
-    p = parseRemind(msg.text, msg.text, msg.entities || [], now, tz);
+    p = parseRemind(msg.text, msg.text, msg.entities || [], now, tz, nicknames(env));
   } catch (err) {
     if (err instanceof NoTimeError) {
       // Claim the prompt draft before opening the wizard, so a second reply
@@ -57,8 +60,7 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
       if (!claim.meta.changes) return;
       const promptRef = draftRef(draft, 'prompt');
       if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
-      if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
-      return startWizard(env, ctx, err.partial, msg.text, tz, scored);
+      return startWizard(env, ctx, err.partial, msg.text, tz, scored, sourceMsgId);
     }
     // An unusable reply keeps the draft alive — replying to the prompt again
     // gets another try.
@@ -66,12 +68,12 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
     throw err;
   }
   p.scored = scored;
+  p.sourceMsgId = sourceMsgId;
   const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
     .bind(draft.id, chatId).run();
   if (!claim.meta.changes) return;
   const promptRef = draftRef(draft, 'prompt');
   if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
-  if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
   const by = senderName(msg.from);
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   await confirmNewChore(env, ctx, by, p, tz, id, html);
@@ -81,7 +83,9 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
 // No time given: park the parsed pieces as a draft and offer tap-to-choose
 // times instead of an error. Workers AI gets one shot at guessing the intent;
 // a valid guess becomes the top button — applied only if someone taps it.
-export async function startWizard(env, ctx, partial, rawArgs, tz, scored) {
+// sourceMsgId is the public command the chore was typed in; it rides on the
+// draft so the eventual confirmation's ✅ OK can remove it.
+export async function startWizard(env, ctx, partial, rawArgs, tz, scored, sourceMsgId = null) {
   const chatId = ctx.chatId;
   const now = Date.now();
   let ai = null;
@@ -100,12 +104,12 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored) {
   const detail = partial.date ? { ...partial.detail, startDate: partial.date } : partial.detail;
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, ai_json, created_at, scored)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       schedule_detail, nag_intervals, ai_json, created_at, scored, source_msg_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
     JSON.stringify(detail), JSON.stringify(partial.nagIntervals),
-    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0
+    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0, sourceMsgId
   ).run();
   const id = res.meta.last_row_id;
 
@@ -279,6 +283,7 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   const p = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
     nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt, scored: draft.scored,
+    sourceMsgId: draft.source_msg_id || null,
   };
   // Claim the draft before creating anything. A second reply or wizard tap
   // racing this one loses the conditional delete and cannot create a duplicate.
@@ -294,8 +299,8 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   // The wizard message becomes the confirmation for an assigned chore; an
   // unassigned one is announced instead, so the wizard is cleared away.
   if (p.assigneeName || p.assigneeUserId) {
-    if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id));
-    else await sendPrivate(env, ctx, html, undoButtons(id));
+    if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id, p.sourceMsgId));
+    else await sendPrivate(env, ctx, html, undoButtons(id, p.sourceMsgId));
   } else {
     if (wizardRef) await deleteRef(env, ctx, chatId, wizardRef);
     await confirmNewChore(env, ctx, by, p, tz, id, html);
@@ -370,10 +375,11 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
   const wizP = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
     nagIntervals: JSON.parse(draft.nag_intervals), scored: draft.scored, ...sched,
+    sourceMsgId: draft.source_msg_id || null,
   };
   const { id: newId, html } = await createReminder(env, draft.chat_id, wizP, wizBy, tz);
   if (wizP.assigneeName || wizP.assigneeUserId) {
-    await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId));
+    await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId, wizP.sourceMsgId));
   } else {
     await deleteRef(env, ctx, draft.chat_id, ref);
     await confirmNewChore(env, ctx, wizBy, wizP, tz, newId, html);

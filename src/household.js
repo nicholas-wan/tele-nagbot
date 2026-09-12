@@ -10,6 +10,21 @@ export function senderName(from) {
   return from.username ? `@${from.username}` : from.first_name || 'someone';
 }
 
+// Typed shortcuts for assignees, from the NICKNAMES var: "nic=@nicholaswan,
+// yx=@Dodgerblueee". Each value is the roster spelling senderName would give
+// that person — "@username", or the plain first name of a member without one
+// — so a nag addressed by nickname resolves through members exactly as an
+// @-mention does. Keys are matched case-insensitively; a malformed entry is
+// skipped rather than taking the whole list down with it.
+export function nicknames(env) {
+  const map = new Map();
+  for (const entry of String((env && env.NICKNAMES) || '').split(',')) {
+    const m = entry.trim().match(/^(\S+?)\s*=\s*(\S+)$/);
+    if (m) map.set(m[1].toLowerCase(), m[2]);
+  }
+  return map;
+}
+
 // /chore and /remind differ only in whether they score. Done together stays on
 // both: it records who actually did the thing, which matters even when no
 // points ride on it — dropping it once cost a reminder its shared credit.
