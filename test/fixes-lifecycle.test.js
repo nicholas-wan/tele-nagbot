@@ -247,11 +247,12 @@ describe('firing lifecycle fixes', () => {
 
     // 2b. A snooze and a "📅 Tomorrow" are the household saying when it wants
     // to hear about this again. Resume must not drag either back to now.
-    // snoozes_used is what marks them as chosen — see the quiet-hours case below.
-    const snoozed = () => ({
-      ...live, snoozes_used: 1,
-      fired_at: Date.now() - HOUR, next_nag_at: Date.now() + 2 * HOUR,
-    });
+    // snoozed_until, still equal to next_nag_at, is what marks a snooze as
+    // chosen and still in force — see the quiet-hours cases below.
+    const snoozed = () => {
+      const until = Date.now() + 2 * HOUR;
+      return { ...live, snoozes_used: 1, fired_at: Date.now() - HOUR, next_nag_at: until, snoozed_until: until };
+    };
 
     it('keeps a firing that is snoozed into the future', async () => {
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() + HOUR };

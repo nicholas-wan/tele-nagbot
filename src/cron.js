@@ -37,9 +37,21 @@ export async function runCron(env) {
 // Deletes every recorded bot message whose day is up, each through the method
 // its kind requires. A message someone already dismissed with OK just makes
 // Telegram refuse the delete — same outcome, so the row goes either way.
+//
+// A nag card is recorded with the ordinary day, but three things keep its
+// firing live past that: a pause (which stops the expiry clock), a
+// postponement, and an overdue one-off, which is never re-nagged. Sweeping
+// the card then left the board saying "nagging now" with nothing to tap. So a
+// card that is still some nagging firing's current message is skipped — and
+// its row keeps coming due, so the moment the firing ends or re-nags, the
+// card goes with the next pass. Both id spaces are matched, as everywhere.
 async function sweepSentMessages(env, now) {
   const { results } = await env.DB.prepare(
-    'SELECT * FROM sent_messages WHERE delete_after <= ? ORDER BY delete_after LIMIT 100'
+    `SELECT s.* FROM sent_messages s WHERE s.delete_after <= ?
+       AND NOT EXISTS (SELECT 1 FROM firings f WHERE f.state = 'nagging'
+         AND f.chat_id = s.chat_id AND f.last_message_id = s.message_id
+         AND f.last_message_ephemeral = s.is_ephemeral)
+     ORDER BY s.delete_after LIMIT 100`
   ).bind(now).all();
   for (const row of results) {
     try {

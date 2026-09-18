@@ -1,7 +1,7 @@
 // The pinned dashboard: the chore-list card shared by /list and the pin, and
 // the schedule/emoji text helpers everything renders chores with.
 
-import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage } from './tg.js';
+import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage, messageIsGone } from './tg.js';
 import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './time.js';
 import { isScored } from './household.js';
 
@@ -139,15 +139,6 @@ export async function choreListHtml(env, chatId, tz) {
       (each === 'once' ? '' : ` · <i>${each}</i>`) + kind);
   }
   return lines.join('\n');
-}
-
-// The ways Telegram says "that message no longer exists / can never be
-// edited". Everything else an edit can fail with is worth retrying next time
-// rather than replacing the board over.
-const GONE = /message to edit not found|message to be edited not found|MESSAGE_ID_INVALID|message can['’]?t be edited|message identifier is not specified/i;
-
-function messageIsGone(description) {
-  return GONE.test(String(description || ''));
 }
 
 // One pinned message per chat, silently edited in place: the full chore list

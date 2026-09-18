@@ -18,9 +18,9 @@ import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chore
 export async function startTextPrompt(env, ctx, from, scored) {
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, created_at, scored)
-     VALUES (?, '', NULL, NULL, 'once', '{}', ?, ?, ?)`
-  ).bind(ctx.chatId, JSON.stringify(DEFAULT_NAGS), Date.now(), scored ? 1 : 0).run();
+       schedule_detail, nag_intervals, created_at, scored, user_id)
+     VALUES (?, '', NULL, NULL, 'once', '{}', ?, ?, ?, ?)`
+  ).bind(ctx.chatId, JSON.stringify(DEFAULT_NAGS), Date.now(), scored ? 1 : 0, ctx.userId).run();
   const id = res.meta.last_row_id;
   // selective force_reply only auto-opens the reply box for a mentioned user.
   const mention = from.username
@@ -102,14 +102,17 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
   // is created. Without it the anchor was simply dropped and the chore began
   // on whatever day the time was chosen.
   const detail = partial.date ? { ...partial.detail, startDate: partial.date } : partial.detail;
+  // user_id is whose wizard this is: a bare typed time resolves only the
+  // typer's own draft, and the wizard card (usually ephemeral to them) can
+  // only be edited on their behalf.
   const res = await env.DB.prepare(
     `INSERT INTO drafts (chat_id, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, nag_intervals, ai_json, created_at, scored, source_msg_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       schedule_detail, nag_intervals, ai_json, created_at, scored, source_msg_id, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
     JSON.stringify(detail), JSON.stringify(partial.nagIntervals),
-    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0, sourceMsgId
+    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0, sourceMsgId, ctx.userId
   ).run();
   const id = res.meta.last_row_id;
 
@@ -150,6 +153,17 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
     await env.DB.prepare('UPDATE drafts SET wizard_msg_id = ?, wizard_msg_ephemeral = ? WHERE id = ?')
       .bind(ref.id, ref.ephemeral ? 1 : 0, id).run();
   }
+}
+
+// An assigned chore's confirmation is the wizard card itself, edited in place
+// — the only confirmation it gets, since the group is not told about someone
+// else's chore. If that edit fails (the card was swept, or it is ephemeral to
+// somebody else) the chore used to exist with no confirmation and no Undo
+// anywhere, so a failed edit falls back to a fresh private line.
+async function confirmOnWizard(env, ctx, chatId, wizardRef, html, buttons) {
+  const res = wizardRef ? await editRef(env, ctx, chatId, wizardRef, html, buttons) : null;
+  if (res && res.ok) return res;
+  return sendPrivate(env, ctx, html, buttons);
 }
 
 // Rebuild a stored { id, ephemeral } pair from a drafts row.
@@ -234,14 +248,17 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   if (!draft) {
     // The wizard invites "reply with a custom time", but not every client
     // makes replying obvious — so a message that is PURELY a time also counts
-    // while any wizard or prompt is fresh (the parsed.text check below rejects
-    // ambient chat). Awaiting-text drafts are still excluded: only a direct
-    // reply may resolve them, or any group chat with a time in it would
-    // become a chore with no name.
+    // while the typer's own wizard is fresh (the parsed.text check below
+    // rejects ambient chat). Their own: the newest draft in the chat used to
+    // do, and with two wizards open, whoever typed "10am" next scheduled the
+    // other person's chore, credited to themselves, and the other's card was
+    // edited on the wrong person's behalf. Awaiting-text drafts are still
+    // excluded: only a direct reply may resolve them, or any group chat with
+    // a time in it would become a chore with no name.
     draft = await env.DB.prepare(
-      `SELECT * FROM drafts WHERE chat_id = ? AND text <> ''
+      `SELECT * FROM drafts WHERE chat_id = ? AND user_id = ? AND text <> ''
          AND created_at > ? ORDER BY id DESC LIMIT 1`
-    ).bind(chatId, now - 15 * 60000).first();
+    ).bind(chatId, msg.from ? msg.from.id : null, now - 15 * 60000).first();
     bareTime = true;
   }
   if (!draft) return;
@@ -299,8 +316,7 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   // The wizard message becomes the confirmation for an assigned chore; an
   // unassigned one is announced instead, so the wizard is cleared away.
   if (p.assigneeName || p.assigneeUserId) {
-    if (wizardRef) await editRef(env, ctx, chatId, wizardRef, html, undoButtons(id, p.sourceMsgId));
-    else await sendPrivate(env, ctx, html, undoButtons(id, p.sourceMsgId));
+    await confirmOnWizard(env, ctx, chatId, wizardRef, html, undoButtons(id, p.sourceMsgId));
   } else {
     if (wizardRef) await deleteRef(env, ctx, chatId, wizardRef);
     await confirmNewChore(env, ctx, by, p, tz, id, html);
@@ -379,7 +395,7 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
   };
   const { id: newId, html } = await createReminder(env, draft.chat_id, wizP, wizBy, tz);
   if (wizP.assigneeName || wizP.assigneeUserId) {
-    await editRef(env, ctx, draft.chat_id, ref, html, undoButtons(newId, wizP.sourceMsgId));
+    await confirmOnWizard(env, ctx, draft.chat_id, ref, html, undoButtons(newId, wizP.sourceMsgId));
   } else {
     await deleteRef(env, ctx, draft.chat_id, ref);
     await confirmNewChore(env, ctx, wizBy, wizP, tz, newId, html);

@@ -6,7 +6,8 @@ import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, d
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, senderName, creditTogether, isScored } from './household.js';
-import { completeFiring, editNag, nagHtml, nagButtons, snoozedHtml, snoozedButtons } from './nag.js';
+import { completeFiring, editNag, nagHtml, nagButtons, snoozedHtml, snoozedButtons,
+         isHouseholdDeferred } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
 import { setReminderPaused, deleteReminder, completeEarly, chatPaused } from './chores.js';
 
@@ -140,7 +141,7 @@ async function applyEditorChoice(env, r, kind, value, tz) {
 // - Paused, per chore or household-wide, and the card reads "⏸️ Paused by …"
 //   with no buttons. Redrawing it as a nag would revive a chore nobody resumed,
 //   complete with Done and Snooze, so a pause of either kind stops us here.
-// - Snoozed (snoozes_used > 0 and the next nag still ahead) and the card is the
+// - Snoozed or postponed (isHouseholdDeferred) and the card is the
 //   "😴 … Snoozed by …" notice. There is no reply-markup-only edit for an
 //   ephemeral message, so the buttons cannot be swapped without re-rendering the
 //   text; we re-render the snooze notice instead of skipping the redraw and
@@ -154,9 +155,7 @@ async function redrawLiveNag(env, r, scored, tz) {
   ).bind(r.id).first();
   if (!firing || !firing.last_message_id) return;
   const live = { ...firing, scored };
-  const snoozed = firing.snoozes_used > 0
-    && firing.next_nag_at != null && firing.next_nag_at > Date.now();
-  if (snoozed) {
+  if (isHouseholdDeferred(firing)) {
     await editNag(env, live, snoozedHtml({ ...r, scored }, firing.next_nag_at, 'the household', tz),
       snoozedButtons(firing.id, isScored(live)));
     return;

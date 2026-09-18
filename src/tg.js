@@ -339,6 +339,16 @@ export function deleteEphemeral(env, ctx, ephemeralId) {
   });
 }
 
+// The ways Telegram says "that message no longer exists / can never be
+// edited". Everything else an edit can fail with is transient — a network
+// blip, a 429 that outlived tg()'s one retry — and is worth retrying next time
+// rather than sending a replacement beside a message that is still there.
+const GONE = /message to edit not found|message to be edited not found|MESSAGE_ID_INVALID|message can['’]?t be edited|message identifier is not specified/i;
+
+export function messageIsGone(description) {
+  return GONE.test(String(description || ''));
+}
+
 // Edit/delete a stored message without the caller caring which kind it is.
 export function editRef(env, ctx, chatId, ref, html, replyMarkup) {
   if (!ref) return Promise.resolve({ ok: false, description: 'no message ref' });

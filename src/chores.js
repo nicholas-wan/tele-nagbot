@@ -1,12 +1,13 @@
 // Chore actions shared by typed commands, dashboard buttons, and the cron:
 // create, find, delete, pause/resume, complete-early, and vacation wake-up.
 
-import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, RECEIPT_TTL_MS } from './tg.js';
+import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, messageIsGone,
+         RECEIPT_TTL_MS } from './tg.js';
 import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
-import { deleteNag, nagChat, showPausedCard, editNag, nagHtml, nagButtons,
-         snoozedHtml, snoozedButtons, completeFiring } from './nag.js';
+import { deleteNag, nagChat, showPausedCard, editNag, sendNag, deleteNagRef, nagHtml, nagButtons,
+         snoozedHtml, snoozedButtons, completeFiring, isHouseholdDeferred } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
@@ -170,9 +171,11 @@ function resumeNextFire(r, now, tz) {
 //
 // A *future* next_nag_at is not by itself a choice, though. The cron pushes one
 // to 08:00 whenever a re-nag comes due in quiet hours, and an ordinary pending
-// re-nag is always ahead of now — both are the bot's own scheduling. Only
-// snoozes_used tells the two apart, so a firing nobody snoozed gets the fresh
-// window however far out its next nag sits.
+// re-nag is always ahead of now — both are the bot's own scheduling. Nor is
+// snoozes_used: it is a cap, and stayed set after a snooze had elapsed and the
+// cron had pushed the next nag past the expiry, so a chore the household had
+// just resumed was tombstoned hours later on that stale clock. What tells them
+// apart is isHouseholdDeferred: the snooze's own time, still in force.
 //
 // Returns a Map of firing id → whether it was restamped, so the caller can tell
 // a revived nag from one that kept the household's own deferral.
@@ -184,19 +187,35 @@ async function restampLiveNags(env, r, now, tz) {
   const nextNag = deferQuietHours(now + intervals[0] * 60000, tz);
   const restamped = new Map();
   for (const f of results || []) {
-    const postponed = f.fired_at > now;
-    const snoozed = f.snoozes_used > 0 && f.next_nag_at != null && f.next_nag_at > now;
-    if (postponed || snoozed) {
+    if (isHouseholdDeferred(f, now)) {
       restamped.set(f.id, false);
       continue;
     }
     await env.DB.prepare(
-      `UPDATE firings SET fired_at = ?, next_nag_at = ?
+      `UPDATE firings SET fired_at = ?, next_nag_at = ?, snoozed_until = NULL
        WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS ?`
     ).bind(now, nextNag, f.id, f.fired_at, f.next_nag_at != null ? f.next_nag_at : null).run();
     restamped.set(f.id, true);
   }
   return restamped;
+}
+
+// Put a resumed firing's card back on screen. Normally an edit of the card
+// that has been sitting there reading "⏸️ Paused"; but a card recorded before
+// the sweep learned to spare live nags was deleted a day into the pause, and
+// an edit of a deleted message leaves the board saying "nagging now" with
+// nothing to tap until the next re-nag — or 08:00, if the resume landed in
+// quiet hours. Only a message Telegram says is gone earns a replacement.
+async function redrawResumedNag(env, firing, html, markup) {
+  const res = await editNag(env, firing, html, markup);
+  if (res.ok || String(res.description || '').includes('not modified')) return;
+  if (!messageIsGone(res.description)) return;
+  const ref = await sendNag(env, firing, html, markup, { silent: true });
+  const upd = await env.DB.prepare(
+    `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?
+     WHERE id = ? AND state = 'nagging' AND last_message_id = ?`
+  ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, firing.id, firing.last_message_id).run();
+  if (!upd.meta.changes && ref) await deleteNagRef(env, firing, ref);
 }
 
 export async function setReminderPaused(env, r, pause, tz, by) {
@@ -228,10 +247,10 @@ export async function setReminderPaused(env, r, pause, tz, by) {
       // (which reads the card's own text) would then hand it the wrong keyboard.
       // Redraw the snooze notice it still is.
       if (restamped && restamped.get(firing.id) === false) {
-        await editNag(env, firing,
+        await redrawResumedNag(env, firing,
           snoozedHtml(r, firing.next_nag_at, by, tz), snoozedButtons(firing.id, isScored(firing)));
       } else {
-        await editNag(env, firing,
+        await redrawResumedNag(env, firing,
           nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
       }
     }

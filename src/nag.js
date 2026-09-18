@@ -37,6 +37,19 @@ export function snoozedButtons(firingId, scored = true) {
   ] };
 }
 
+// An overdue one-off keeps Done and Delete but loses Snooze: there is no 24h
+// window left to snooze inside, so a snooze here wrote next_nag_at into the
+// past and promised a time that had already gone by.
+export function overdueButtons(firingId, scored = true) {
+  return { inline_keyboard: [
+    [
+      { text: '✅ Done', callback_data: `d:${firingId}` },
+      { text: '🤝 Done together', callback_data: `b:${firingId}` },
+    ],
+    [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
+  ] };
+}
+
 export function snoozeButtons(firingId, tz) {
   const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
   const nine = nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz);
@@ -89,6 +102,31 @@ export function snoozedHtml(reminder, until, by, tz) {
     ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
     : '';
   return `😴 <b>${esc(reminder.text)}</b>\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${who}`;
+}
+
+export function overdueHtml(reminder) {
+  const who = reminder.assignee_name
+    ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
+    : '';
+  return `⏰ <b>${esc(reminder.text)}</b>\n24 hours and counting — the cats are still waiting.${who}`;
+}
+
+// Past the 24h window. A one-off in this state stays 'nagging' but quiet, so
+// it can still be completed or deleted; nothing else may be scheduled on it.
+export const isOverdue = (firing, now = Date.now()) => now >= firing.fired_at + EXPIRE_AFTER_MS;
+
+// A firing the household itself parked — snoozed or postponed to a time still
+// ahead — as opposed to one the bot is merely holding. The two look alike on
+// next_nag_at alone: the cron pushes a re-nag due in quiet hours out to 08:00,
+// and an ordinary pending re-nag is always ahead of now. snoozes_used cannot
+// tell them apart either — it is a cap, and stays set after the snooze it
+// counted has elapsed and the cron has moved on. So a snooze records the time
+// it chose in snoozed_until, and the choice counts only while next_nag_at
+// still equals it. A postponement carries fired_at into the future instead.
+export function isHouseholdDeferred(firing, now = Date.now()) {
+  if (firing.fired_at > now) return true;
+  return firing.snoozed_until != null && firing.next_nag_at != null
+    && firing.next_nag_at === firing.snoozed_until && firing.next_nag_at > now;
 }
 
 // Every nag now lives in the group; only its visibility differs. Kept as a
@@ -195,6 +233,13 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
       "UPDATE firings SET next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS NOT NULL"
     ).bind(firing.id, firing.fired_at).run();
     if (!claim.meta.changes) return false;
+    // The card must say what the board says. Left as a nag it kept offering
+    // Snooze, and a snooze taken past the window wrote a time already gone.
+    firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
+    if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
+    if (firing.last_message_id) {
+      await editNag(env, firing, overdueHtml(reminder), overdueButtons(firing.id, isScored(firing)));
+    }
     await updateDashboard(env, firing.chat_id);
     return true;
   }

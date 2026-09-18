@@ -36,7 +36,13 @@ CREATE TABLE IF NOT EXISTS firings (
   -- this user can see it. Both are needed for every later edit/delete, because
   -- editEphemeralMessageText requires the receiver alongside the message id.
   nag_user_id INTEGER,                  -- ephemeral recipient; NULL = a public nag
-  last_message_ephemeral INTEGER NOT NULL DEFAULT 0
+  last_message_ephemeral INTEGER NOT NULL DEFAULT 0,
+  -- The time the household itself chose with a snooze or 📅 Tomorrow. The
+  -- choice is in force only while next_nag_at still equals it: once the cron
+  -- has moved next_nag_at on (a re-nag, a quiet-hours push) the choice has
+  -- been honoured and spent. snoozes_used alone cannot say this — it is a cap
+  -- that stays set long after the snooze it counted has elapsed.
+  snoozed_until INTEGER
 );
 
 -- Pending /remind commands that lacked a time; resolved via inline buttons.
@@ -58,7 +64,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   created_at INTEGER NOT NULL,
   ai_json TEXT,                         -- validated Workers-AI schedule suggestion, applied only on tap
   scored INTEGER NOT NULL DEFAULT 1,    -- carries the /chore vs /remind choice through the wizard
-  source_msg_id INTEGER                 -- the public command the chore was typed in, kept until the confirmation's OK
+  source_msg_id INTEGER,                -- the public command the chore was typed in, kept until the confirmation's OK
+  user_id INTEGER                       -- who opened the wizard; a bare typed time resolves only their own draft
 );
 
 CREATE TABLE IF NOT EXISTS settings (

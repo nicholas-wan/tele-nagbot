@@ -286,7 +286,8 @@ describe('editor, board, and setup fixes', () => {
   // 😴 notice wearing a Delete label that contradicted the editor, so it is
   // re-rendered as a snooze notice — the one thing it must not become is a nag.
   it('redraws a snoozed card as a snooze notice, not a nag', async () => {
-    const firing = nagging({ snoozes_used: 1, next_nag_at: Date.now() + 3600000 });
+    const until = Date.now() + 3600000;
+    const firing = nagging({ snoozes_used: 1, next_nag_at: until, snoozed_until: until });
     await handleUpdate(env(CHORE, { firings: [firing] }), ephemeralTap('e:score:10'));
     const nag = all('editMessageText').find((c) => c.body.message_id === 77);
     expect(nag, 'the snoozed card was redrawn').toBeTruthy();

@@ -157,11 +157,16 @@ async function assigneeUserId(env, r) {
 // done-together) count for each person — but only for people still on the
 // roster, so a mistyped "done with brian" cannot draw a rotation for a
 // housemate who does not exist.
+//
+// Every completion counts here, points or not: fairness is about who did the
+// work. Counting only scored ones left a rotating /remind chore at 0/0 for
+// everyone, so the alphabetical tiebreak handed every occurrence to the same
+// person. The leaderboard keeps its own scored filter in stats.js.
 async function pickRotation(env, chatId, tz) {
   const { roster, aliases } = await householdNames(env, chatId);
   if (!roster.size) return null;
   const { results } = await env.DB.prepare(
-    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_by IS NOT NULL"
+    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
   ).bind(chatId).all();
   const ws = weekStart(Date.now(), tz);
   const stats = new Map();
