@@ -4,7 +4,7 @@
 import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
 import { isScored, householdNames, canonName, CREDIT_SEP } from './household.js';
-import { nagButtons, nagHtml, expireFiring, deleteNag, nagChat } from './nag.js';
+import { nagButtons, nagHtml, expireFiring, deleteNag, deleteNagRef, nagChat } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
 
@@ -103,11 +103,20 @@ export async function fireReminder(env, r, now, tz) {
     sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);
   }
-  await env.DB.prepare(
+  // The row was inserted with no message; only a still-nagging row with none
+  // takes this one. A Done (from /done <chore>, or a reply) that landed in the
+  // few ms since the insert has already ended the firing — its receipt was
+  // drawn on no card, so the card just sent would stay live forever.
+  const upd = await env.DB.prepare(
     `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
-       cat = ?, nag_user_id = ? WHERE id = ?`
+       cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL`
   ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
     ref && ref.ephemeral ? who : null, firingId).run();
+  if (!upd.meta.changes) {
+    const orphan = { chat_id: r.chat_id, nag_chat_id: null, nag_user_id: ref && ref.ephemeral ? who : null };
+    if (ref) await deleteNagRef(env, orphan, ref);
+    if (s.messageId) await deleteMessage(env, r.chat_id, s.messageId);
+  }
 
   // Fire completed: a one-off releases its lease and goes dormant. If the
   // lease expired mid-fire and a retry re-fired, the stale sweep above has

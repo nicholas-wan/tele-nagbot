@@ -41,10 +41,12 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const method = String(url).split('/').pop();
     const body = JSON.parse(init.body);
-    calls.push({ method, body });
+    const entry = { method, body };
+    calls.push(entry);
     const description = refuse(method, body);
     if (description) return new Response(JSON.stringify({ ok: false, error_code: 400, description }));
     const id = nextId++;
+    entry.id = id;
     const result = body.receiver_user_id
       ? { message_id: 0, ephemeral_message_id: id }
       : { message_id: id };
@@ -307,5 +309,170 @@ describe('rotation counts unscored completions', () => {
     }
     await fireReminder(env, r, NOW, TZ);
     expect(sql.prepare('SELECT assignee_name FROM reminders WHERE id = 10').get().assignee_name).toBe('@zack');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 2: forged callback data, and the last unconditional writes.
+// ---------------------------------------------------------------------------
+
+// 7. The editor stored whatever value the callback carried. "zz" became a
+// [null] nag pace — a zero interval that re-nagged every minute forever.
+describe('the editor accepts only the values its buttons offer', () => {
+  it.each([
+    ['e:setnag:10:zz', 'nag_intervals', '[15,30,60]', /nag pace/i],
+    ['e:setnag:10:0', 'nag_intervals', '[15,30,60]', /nag pace/i],
+    ['e:settime:10:99', 'schedule_detail', '{"h":21,"mi":0}', /hour/i],
+    ['e:setschedule:10:zz', 'schedule_kind', 'daily', /schedule/i],
+    ['e:setassign:10:99', 'assignee_name', null, /no longer here/i],
+  ])('refuses %s', async (data, column, unchanged, msg) => {
+    reminder();
+    await tap(anne, data);
+    expect(sql.prepare(`SELECT ${column} AS v FROM reminders WHERE id = 10`).get().v).toBe(unchanged);
+    expect(toast()).toMatch(msg);
+  });
+
+  it('still applies the real buttons', async () => {
+    reminder();
+    await tap(anne, 'e:setnag:10:30');
+    expect(sql.prepare('SELECT nag_intervals AS v FROM reminders WHERE id = 10').get().v).toBe('[30]');
+    expect(toast()).toBe('Updated ✓');
+  });
+
+  it('never re-nags faster than once a minute, even from a poisoned row', async () => {
+    reminder({ nag_intervals: '[null]' });
+    nagging({ next_nag_at: NOW - 1000 });
+    await renagPending(env, NOW);
+    expect(firing().next_nag_at).toBeGreaterThanOrEqual(NOW + 60000);
+  });
+});
+
+// 8. ok:<id> deleted whatever id it carried; the bot has Delete Messages.
+describe('OK deletes only a message the bot kept', () => {
+  const deleted = (id) => sent('deleteMessage').some((c) => c.body.message_id === id);
+  it('ignores an id it never recorded', async () => {
+    await tap(anne, 'ok:31337');
+    expect(deleted(31337)).toBe(false);
+    expect(deleted(77)).toBe(true); // the confirmation itself still goes
+  });
+  it('removes the kept command', async () => {
+    await say(anne, '/chore water plants 7pm daily', 5);
+    await tap(anne, 'ok:5');
+    expect(deleted(5)).toBe(true);
+  });
+});
+
+// 9. Nag buttons checked the chat but not the person. An ephemeral nag is one
+// member's, so any other user id on its callback is forged data.
+describe('an ephemeral nag answers only to its recipient', () => {
+  const mine = () => {
+    reminder({ assignee_name: '@anne', assignee_user_id: 2 });
+    nagging({ last_message_ephemeral: 1, nag_user_id: 2 });
+  };
+  const cbMessage = { chat: { id: 1 }, message_id: 0, ephemeral_message_id: 77, text: '🐱 clear poop' };
+
+  it.each(['d:5', 'b:5', 's:5', 'z:5:30', 'x:5'])('refuses %s from someone else', async (data) => {
+    mine();
+    await tap(zack, data, cbMessage);
+    expect(toast()).toMatch(/someone else/);
+    expect(firing()).toMatchObject({ state: 'nagging', snoozes_used: 0 });
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM reminders').get().n).toBe(1);
+  });
+
+  it('lets the recipient act', async () => {
+    mine();
+    await tap(anne, 'd:5', cbMessage);
+    expect(firing().state).toBe('done');
+  });
+
+  it('leaves a public nag open to the household', async () => {
+    reminder();
+    nagging();
+    await tap(zack, 'd:5');
+    expect(firing().state).toBe('done');
+  });
+});
+
+// 10. Every re-send wrote the new message id with no compare-and-swap, so a
+// /poke racing a cron re-nag left the loser's card untracked and live.
+describe('one live nag card per chore under a race', () => {
+  const sends = () => sent('sendMessage');
+  const idOf = (call) => call.id;
+  const nagCards = () => sends()
+    .filter((c) => /clear poop/.test(c.body.text) && /"d:[0-9]+"/.test(JSON.stringify(c.body.reply_markup || {})));
+  const deletedIds = () => new Set(sent('deleteMessage').map((c) => c.body.message_id));
+
+  it('poke racing a re-nag leaves exactly the tracked card', async () => {
+    reminder();
+    nagging({ next_nag_at: NOW - 1000 });
+    await Promise.all([renagPending(env, NOW), say(anne, '/poke')]);
+    const cards = nagCards();
+    expect(cards.length).toBe(2);
+    const surviving = cards.map(idOf).filter((id) => !deletedIds().has(id));
+    expect(surviving).toEqual([firing().last_message_id]);
+  });
+
+  it('a Done landing as the first nag is sent removes that card', async () => {
+    const r = reminder({ next_fire_at: NOW });
+    refuse = (method, body) => {
+      if (method === 'sendMessage' && /clear poop/.test(body.text)) {
+        sql.prepare("UPDATE firings SET state = 'done', done_by = '@anne', done_at = ? WHERE state = 'nagging'").run(NOW);
+      }
+      return null;
+    };
+    await fireReminder(env, r, NOW, TZ);
+    const card = nagCards()[0];
+    expect(card).toBeTruthy();
+    expect(deletedIds().has(idOf(card))).toBe(true);
+    expect(sql.prepare('SELECT last_message_id AS v FROM firings').get().v).toBeNull();
+  });
+});
+
+// 11. /skip and the editor wrote next_fire_at unconditionally. Read just before
+// the cron's claim, a skip wrote the value the cron had already written and
+// reported a skip that changed nothing; the editor could resurrect a consumed
+// slot.
+describe('moving next_fire_at is a compare-and-swap', () => {
+  it('skip either wins cleanly or says the chore just fired', async () => {
+    reminder({ next_fire_at: NOW - 1000 });
+    await Promise.all([runCron(env), say(anne, '/skip clear poop')]);
+    const fired = sql.prepare('SELECT COUNT(*) AS n FROM firings').get().n === 1;
+    const refused = sent('sendMessage').some((c) => /just fired/.test(c.body.text));
+    const skipped = sent('sendMessage').some((c) => /Skipping next/.test(c.body.text));
+    expect(refused).toBe(fired);
+    expect(skipped).toBe(!fired);
+  });
+
+  it('the editor says so when its read is stale', async () => {
+    reminder({ next_fire_at: NOW + HOUR });
+    // Move the slot between the tap's reminder read and its write: the tz
+    // lookup is the first query after the read, so hook it.
+    const realPrepare = env.DB.prepare;
+    let moved = false;
+    env.DB.prepare = (query) => {
+      if (!moved && query.includes('SELECT tz FROM settings')) {
+        moved = true;
+        sql.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = 10').run(NOW + 2 * HOUR);
+      }
+      return realPrepare(query);
+    };
+    await tap(anne, 'e:settime:10:8');
+    expect(toast()).toMatch(/just fired/);
+    expect(sql.prepare('SELECT next_fire_at AS v FROM reminders WHERE id = 10').get().v).toBe(NOW + 2 * HOUR);
+  });
+});
+
+// 12. Assignee buttons carried a list position, and the roster re-sorts as
+// people come and go — the menu sits on the shared board for hours.
+describe('assignee buttons name a person, not a position', () => {
+  it('carries the user id and survives a roster change', async () => {
+    reminder();
+    await tap(anne, 'e:assign:10');
+    const menu = sent('editMessageText').at(-1).body.reply_markup.inline_keyboard.flat();
+    expect(menu.find((b) => b.text === '@zack').callback_data).toBe('e:setassign:10:3');
+    sql.prepare('DELETE FROM members WHERE user_id = 2').run(); // Anne leaves before the tap
+    await tap(anne, 'e:setassign:10:3');
+    expect(sql.prepare('SELECT assignee_name, assignee_user_id FROM reminders WHERE id = 10').get())
+      .toEqual({ assignee_name: '@zack', assignee_user_id: 3 });
   });
 });

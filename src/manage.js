@@ -5,7 +5,7 @@
 import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
-import { getTz, householdRoster, senderName, creditTogether, isScored } from './household.js';
+import { getTz, householdRoster, householdMembers, senderName, creditTogether, isScored } from './household.js';
 import { completeFiring, editNag, nagHtml, nagButtons, snoozedHtml, snoozedButtons,
          isHouseholdDeferred } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
@@ -45,7 +45,11 @@ export async function editorButtons(env, r) {
   return { inline_keyboard: rows };
 }
 
-function editorSubmenu(kind, r, roster = []) {
+// `members` is the household as [{ userId, name }]; the assignee buttons carry
+// the user_id, so a tap means the same person however the roster has changed
+// since the menu was drawn — this menu sits on the shared pinned board and
+// can be hours old. A list position shifted whenever anyone joined or left.
+function editorSubmenu(kind, r, members = []) {
   const b = (text, value) => ({ text, callback_data: `e:set${kind}:${r.id}:${value}` });
   let rows;
   if (kind === 'time') rows = [
@@ -61,7 +65,7 @@ function editorSubmenu(kind, r, roster = []) {
   ];
   else {
     rows = [[b('Anyone', '0')]];
-    roster.slice(0, 8).forEach((name, i) => rows.push([b(name, String(i + 1))]));
+    members.slice(0, 8).forEach((m) => rows.push([b(m.name, String(m.userId))]));
   }
   rows.push([{ text: '← Edit chore', callback_data: `e:menu:${r.id}` }]);
   return { inline_keyboard: rows };
@@ -88,9 +92,23 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
   return editRef(env, ctx, r.chat_id, ref, editorText(r, tz), markup);
 }
 
+// Applies one e:set… tap. Returns null on success, or the toast to show
+// instead. Every value is checked against what the buttons actually offer:
+// callback data is not bound to the button it came from, and an unchecked
+// nag pace of "zz" was stored as [null] — a zero interval that re-nagged the
+// chore every minute, on every occurrence, until it was deleted.
+//
+// The writes to next_fire_at are compare-and-swaps on the value the editor
+// read, like every other move of that column: the cron's fire claim moves it
+// too, and an unconditional write here either resurrected a slot the cron had
+// just consumed (a second fire the same evening) or cancelled a fire in
+// flight. Losing the swap just means "that one just fired".
+const JUST_FIRED = 'That one just fired — see its nag.';
 async function applyEditorChoice(env, r, kind, value, tz) {
   if (kind === 'time') {
-    const detail = { ...JSON.parse(r.schedule_detail), h: +value, mi: 0 };
+    const hour = Number(value);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) return 'Not a valid hour.';
+    const detail = { ...JSON.parse(r.schedule_detail), h: hour, mi: 0 };
     let next;
     if (r.schedule_kind === 'once' || (r.schedule_kind === 'interval' && r.next_fire_at)) {
       // Anchored to a date rather than to a calendar rule: a one-off set for
@@ -98,36 +116,44 @@ async function applyEditorChoice(env, r, kind, value, tz) {
       // a whole gap out. Keep the date (today, for a one-off with no date
       // left); if the new time has already passed on it, take the next slot.
       const f = localParts(r.next_fire_at || Date.now(), tz);
-      next = zonedEpoch(f.y, f.mo, f.d, +value, 0, tz);
-      if (next <= Date.now()) next = nextOccurrence('daily', { h: +value, mi: 0 }, Date.now(), tz);
+      next = zonedEpoch(f.y, f.mo, f.d, hour, 0, tz);
+      if (next <= Date.now()) next = nextOccurrence('daily', { h: hour, mi: 0 }, Date.now(), tz);
     } else {
       // daily / weekly / monthly regenerate their own next slot from the rule.
       next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
     }
-    await env.DB.prepare('UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ?')
-      .bind(JSON.stringify(detail), next, r.id).run();
+    const res = await env.DB.prepare(
+      'UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ? AND next_fire_at IS ?'
+    ).bind(JSON.stringify(detail), next, r.id, r.next_fire_at).run();
+    if (!res.meta.changes) return JUST_FIRED;
   } else if (kind === 'schedule') {
+    if (!['daily', 'weekdays', 'weekends'].includes(value)) return 'Not a schedule the editor offers.';
     const old = JSON.parse(r.schedule_detail);
     const base = { h: old.h ?? 9, mi: old.mi ?? 0, ...(old.rotate ? { rotate: true } : {}) };
     const schedule = value === 'daily'
       ? { kind: 'daily', detail: base }
       : { kind: 'weekly', detail: { ...base, days: value === 'weekdays' ? [1, 2, 3, 4, 5] : [0, 6] } };
     const next = nextOccurrence(schedule.kind, schedule.detail, Date.now(), tz);
-    await env.DB.prepare(
-      'UPDATE reminders SET schedule_kind = ?, schedule_detail = ?, next_fire_at = ? WHERE id = ?'
-    ).bind(schedule.kind, JSON.stringify(schedule.detail), next, r.id).run();
+    const res = await env.DB.prepare(
+      'UPDATE reminders SET schedule_kind = ?, schedule_detail = ?, next_fire_at = ? WHERE id = ? AND next_fire_at IS ?'
+    ).bind(schedule.kind, JSON.stringify(schedule.detail), next, r.id, r.next_fire_at).run();
+    if (!res.meta.changes) return JUST_FIRED;
   } else if (kind === 'nag') {
-    const intervals = value === 'default' ? DEFAULT_NAGS : [+value];
+    const minutes = Number(value);
+    if (value !== 'default' && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) {
+      return 'Not a nag pace the editor offers.';
+    }
+    const intervals = value === 'default' ? DEFAULT_NAGS : [minutes];
     await env.DB.prepare('UPDATE reminders SET nag_intervals = ? WHERE id = ?')
       .bind(JSON.stringify(intervals), r.id).run();
   } else if (kind === 'assign') {
-    const roster = [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b));
-    const name = value === '0' ? null : roster[+value - 1];
-    if (value !== '0' && !name) return false;
-    await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
-      .bind(name, r.id).run();
+    const member = value === '0' ? null
+      : (await householdMembers(env, r.chat_id)).find((m) => String(m.userId) === value);
+    if (value !== '0' && !member) return 'That household member is no longer here.';
+    await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = ? WHERE id = ?')
+      .bind(member ? member.name : null, member ? member.userId : null, r.id).run();
   }
-  return true;
+  return null;
 }
 
 // The points flag is written into the nag itself — the "(reminder — no points)"
@@ -188,9 +214,8 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       return answerCallback(env, cb.id, '');
     }
     if (['time', 'schedule', 'nag', 'assign'].includes(action)) {
-      const roster = action === 'assign'
-        ? [...await householdRoster(env, r.chat_id)].sort((a, b) => a.localeCompare(b)) : [];
-      await refreshEditor(env, cb, ctx, ref, r, tz, editorSubmenu(action, r, roster));
+      const members = action === 'assign' ? await householdMembers(env, r.chat_id) : [];
+      await refreshEditor(env, cb, ctx, ref, r, tz, editorSubmenu(action, r, members));
       return answerCallback(env, cb.id, '');
     }
     if (action === 'rotate') {
@@ -214,8 +239,8 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }
   } else {
-    const ok = await applyEditorChoice(env, r, editSet[1], editSet[3], tz);
-    if (!ok) return answerCallback(env, cb.id, 'That household member is no longer available.');
+    const problem = await applyEditorChoice(env, r, editSet[1], editSet[3], tz);
+    if (problem) return answerCallback(env, cb.id, problem);
   }
 
   r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
@@ -336,7 +361,12 @@ export async function handleManageCallback(env, cb) {
       return answerCallback(env, cb.id, 'One-off chores cannot be skipped.');
     }
     const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
-    await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+    // Compare-and-swap against the cron's fire claim: a skip that read the slot
+    // just before it fired used to write the value the cron had already
+    // written and report a skip that changed nothing.
+    const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+      .bind(next, r.id, r.next_fire_at).run();
+    if (!res.meta.changes) return answerCallback(env, cb.id, JUST_FIRED);
     await updateDashboard(env, r.chat_id);
     return answerCallback(env, cb.id, `Next: ${fmtLocal(next, tz)}`);
   }

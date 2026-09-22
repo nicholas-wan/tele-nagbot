@@ -142,6 +142,13 @@ const nagRef = (firing) => (firing.last_message_id
 const nagCtx = (env, firing) => replyCtx(env, nagChat(firing), firing.nag_user_id);
 export const isEphemeralNag = (firing) => Boolean(firing.last_message_ephemeral);
 
+// An ephemeral nag is one person's: only they can see it, so only they can
+// tap it. A callback for it from anyone else is forged data, not a tap — and
+// acting on it let one member Done or snooze another's private chore and take
+// the credit. Public nags are the household's and stay open to everyone.
+export const nagBelongsTo = (firing, from) =>
+  !isEphemeralNag(firing) || !firing.nag_user_id || Boolean(from && from.id === firing.nag_user_id);
+
 export function editNag(env, firing, html, markup) {
   return editRef(env, nagCtx(env, firing), nagChat(firing), nagRef(firing), html, markup);
 }

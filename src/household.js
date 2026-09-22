@@ -42,6 +42,19 @@ export async function householdRoster(env, chatId) {
   return (await householdNames(env, chatId)).roster;
 }
 
+// The roster with its stable keys: a button that names a housemate carries
+// their user_id, not their position in a list that re-sorts as people come
+// and go. Sorted by display name, which is the order the buttons show.
+export async function householdMembers(env, chatId) {
+  const { results } = await env.DB.prepare(
+    'SELECT user_id, username, first_name FROM members WHERE chat_id = ?'
+  ).bind(chatId).all();
+  return (results || [])
+    .map((r) => ({ userId: r.user_id, name: displayName(r) }))
+    .filter((m) => m.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // The spelling of a name with nothing that distinguishes one from another:
 // case and a leading '@' are how people type, not who they are.
 const norm = (s) => String(s).replace(/^@/, '').trim().toLowerCase();

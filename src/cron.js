@@ -278,7 +278,9 @@ export async function renagPending(env, now) {
 
       const intervals = JSON.parse(r.nag_intervals);
       const nagCount = f.nag_count + 1;
-      const interval = intervals[Math.min(nagCount, intervals.length - 1)];
+      // Never below a minute: a row poisoned with [null] or [0] (the editor
+      // once stored any value it was handed) re-nagged every tick forever.
+      const interval = Math.max(1, Number(intervals[Math.min(nagCount, intervals.length - 1)]) || 15);
       // Claim this re-nag before any sends: an overlapping cron tick loses the
       // compare-and-swap, and a Done/snooze landing mid-send isn't clobbered.
       const claim = await env.DB.prepare(
@@ -295,11 +297,16 @@ export async function renagPending(env, now) {
       // sendNag keeps an assigned chore's re-nag as private as its first nag.
       const ref = await sendNag(env, f, nagHtml(r, nagCount, f.cat || 'both'),
         nagButtons(f.id, isScored(f)), { silent: nagCount === 1 });
+      // Bound to the message id this tick read as well as the state: a /poke
+      // re-sending in the same second is the other writer, and two
+      // unconditional writes left one of the two cards untracked with live
+      // buttons that nothing would ever clean up.
       const upd = await env.DB.prepare(
         `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
-         WHERE id = ? AND state = 'nagging'`
-      ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id).run();
-      // Done/expired won the race while we were sending — remove the orphan nag.
+         WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
+      ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id).run();
+      // Done/expired (or the other writer) won the race while we were sending
+      // — remove the orphan nag.
       if (!upd.meta.changes && ref) await deleteNagRef(env, f, ref);
       // Self-heal: recreate the dashboard if it is missing (e.g. deleted by hand
       // or the nag predates the dashboard feature).

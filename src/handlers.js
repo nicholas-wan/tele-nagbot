@@ -12,7 +12,7 @@ import { getTz, senderName, isScored, householdRoster, householdNames, canonName
          rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
-         isHouseholdDeferred, isOverdue,
+         isHouseholdDeferred, isOverdue, nagBelongsTo,
          completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
 import { updateDashboard, choreListHtml } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
@@ -25,6 +25,8 @@ import { cmdInvite } from './invite.js';
 
 // Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
 let botUsername = null;
+
+const NOT_YOUR_NAG = 'That nag is someone else\'s 🙈';
 
 // New members (or the bot itself) joining get a short intro.
 async function handleNewMembers(env, msg) {
@@ -541,7 +543,14 @@ async function cmdSkip(env, ctx, args, tz) {
     throw new ParseError(`"${r.text}" is a one-off — use /delete ${r.text} instead.`);
   }
   const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
-  await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
+  // Compare-and-swap against the cron's fire claim, like every other move of
+  // next_fire_at: a skip that read the slot just before it fired used to write
+  // the value the cron had already written and report a skip that did nothing.
+  const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+    .bind(next, r.id, r.next_fire_at).run();
+  if (!res.meta.changes) {
+    return sendPrivate(env, ctx, `😼 <b>${esc(r.text)}</b> just fired — it is nagging now, so there is nothing to skip.`);
+  }
   await updateDashboard(env, chatId);
   await sendPrivate(env, ctx, `⏭️ Skipping next <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
 }
@@ -592,10 +601,13 @@ async function cmdPoke(env, ctx) {
     if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
     const ref = await sendNag(env, f, nagHtml(r, f.nag_count, f.cat || 'both'), nagButtons(f.id, isScored(f)));
+    // Bound to the message id this poke read: a cron re-nag landing in the
+    // same second also re-sends, and two unconditional writes left one card
+    // untracked — live buttons on a nag nothing would ever clean up.
     const upd = await env.DB.prepare(
       `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
-       WHERE id = ? AND state = 'nagging'`
-    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id).run();
+       WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
+    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id).run();
     if (!upd.meta.changes && ref) await deleteNagRef(env, f, ref);
   }
 }
@@ -702,7 +714,15 @@ async function handleCallback(env, cb) {
   // typed in was kept on show for exactly this tap, and goes with it.
   const okm = data.match(/^ok(?::(\d+))?$/);
   if (okm) {
-    if (okm[1]) await deleteMessage(env, cb.message.chat.id, +okm[1]);
+    // Only a message the bot itself kept for this (keepSourceMessage puts it
+    // on the sweep) may go. The id is callback data, and the bot has Delete
+    // Messages — taken at face value it would remove any message in the group.
+    if (okm[1]) {
+      const kept = await env.DB.prepare(
+        'SELECT 1 AS kept FROM sent_messages WHERE chat_id = ? AND message_id = ? AND is_ephemeral = 0'
+      ).bind(cb.message.chat.id, +okm[1]).first();
+      if (kept) await deleteMessage(env, cb.message.chat.id, +okm[1]);
+    }
     await deleteRef(env, ctx, cb.message.chat.id, ref);
     return answerCallback(env, cb.id, '');
   }
@@ -714,6 +734,7 @@ async function handleCallback(env, cb) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
       .bind(+xm[1], cb.message.chat.id).first();
     if (!firing) return answerCallback(env, cb.id, 'Already gone.');
+    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
       .bind(firing.reminder_id, firing.chat_id).first();
     if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
@@ -728,6 +749,7 @@ async function handleCallback(env, cb) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
       .bind(+zm[1], cb.message.chat.id).first();
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
+    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
     if (zm[2] === 'b') {
       const wasSnoozed = String(cb.message.text || '').startsWith('😴');
       const buttons = wasSnoozed ? snoozedButtons(firing.id, isScored(firing)) : nagButtons(firing.id, isScored(firing));
@@ -797,6 +819,7 @@ async function handleCallback(env, cb) {
   if (!firing || firing.state !== 'nagging') {
     return answerCallback(env, cb.id, 'Already handled 👍');
   }
+  if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
   const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!reminder) {
     // Same compare-and-swap as every other state change: the row was read a
