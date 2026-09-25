@@ -757,8 +757,8 @@ describe('chore confirmation buttons', () => {
     });
     const confirmation = calls.find((c) => c.url.endsWith('/sendMessage')
       && c.body.reply_markup && JSON.stringify(c.body.reply_markup).includes('u:'));
-    expect(confirmation.body.reply_markup.inline_keyboard[0].map((b) => b.text))
-      .toEqual(['↩️ Undo', '✅ OK']);
+    expect(confirmation.body.reply_markup.inline_keyboard.map((row) => row.map((b) => b.text)))
+      .toEqual([['✅ Done'], ['↩️ Undo', '✅ OK']]);
   });
 });
 

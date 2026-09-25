@@ -3,7 +3,7 @@
 // feature — editor/manage in manage.js, wizard in wizard.js — and the nag
 // lifecycle, dashboard, chore actions, and stats each have their own module.
 
-import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc,
+import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc, okButton,
          replyCtx, sendPrivate, editRef, deleteRef, callbackRef,
          isPublicMessage, sendPrivateLong, keepSourceMessage, tg } from './tg.js';
 import { parseRemind, ParseError, NoTimeError } from './parse.js';
@@ -654,6 +654,31 @@ async function handleCallback(env, cb) {
     await editRef(env, ctx, r.chat_id, ref, `↩️ Undone — <s>${esc(r.text)}</s>`);
     await updateDashboard(env, r.chat_id);
     return answerCallback(env, cb.id, 'Undone');
+  }
+
+  // Done from a creation confirmation. Completes whatever the chore is up to:
+  // the live nag if it has fired, otherwise the upcoming occurrence (done
+  // early), exactly as the board's Manage → Done does. Scoped to the chat the
+  // tap came from like every other lookup here. The receipt replaces the
+  // confirmation and keeps its OK, so the kept command still goes with it.
+  const cm = data.match(/^c:([0-9]+)(?::([0-9]+))?$/);
+  if (cm) {
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
+      .bind(+cm[1], cb.message.chat.id).first();
+    if (!r) return answerCallback(env, cb.id, 'Already gone.');
+    const tz = await getTz(env, r.chat_id);
+    const credit = senderName(cb.from);
+    const firing = await env.DB.prepare(
+      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+    ).bind(r.id).first();
+    let won;
+    if (firing) won = await completeFiring(env, firing, r, credit, tz);
+    else if (r.paused || r.next_fire_at == null) return answerCallback(env, cb.id, 'This chore is not nagging now.');
+    else won = await completeEarly(env, r, credit, tz);
+    if (!won) return answerCallback(env, cb.id, 'Already handled 👍');
+    await editRef(env, ctx, r.chat_id, ref, `😻 <s>${esc(r.text)}</s> — done by ${esc(credit)}`,
+      { inline_keyboard: [[okButton(cm[2] ? +cm[2] : null)]] });
+    return answerCallback(env, cb.id, 'Purrs 😻');
   }
 
   // Undo a /delete: restore the stashed reminder row.

@@ -11,16 +11,24 @@ import { deleteNag, nagChat, showPausedCard, editNag, sendNag, deleteNagRef, nag
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
-// Undo removes the chore that was just made; OK clears the confirmation — and
-// the command it was typed in, which is kept on show until then so a misread
-// chore can be compared against what was actually typed, and copied back.
-// Undo deliberately leaves the command standing: that is the case where the
-// parse was wrong and the text is about to be needed again.
+// Done completes the chore from its confirmation: an assigned chore's private
+// copy is the only message its owner sees until the nag, and a private nag
+// sent while they are offline may never be seen at all — so the one message
+// that reliably reached them must be able to finish the job (see c: in
+// handlers.js). Undo removes the chore that was just made; OK clears the
+// confirmation — and the command it was typed in, which is kept on show until
+// then so a misread chore can be compared against what was actually typed, and
+// copied back. Undo deliberately leaves the command standing: that is the case
+// where the parse was wrong and the text is about to be needed again. Done
+// carries the command id too, so its receipt's OK still removes the command.
 export function undoButtons(reminderId, sourceMsgId = null) {
-  return { inline_keyboard: [[
-    { text: '↩️ Undo', callback_data: `u:${reminderId}` },
-    okButton(sourceMsgId),
-  ]] };
+  return { inline_keyboard: [
+    [{ text: '✅ Done', callback_data: sourceMsgId ? `c:${reminderId}:${sourceMsgId}` : `c:${reminderId}` }],
+    [
+      { text: '↩️ Undo', callback_data: `u:${reminderId}` },
+      okButton(sourceMsgId),
+    ],
+  ] };
 }
 
 // Chores are addressed by name ("/done nails"); bare numbers still work as

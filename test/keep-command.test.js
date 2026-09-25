@@ -119,6 +119,79 @@ describe('a chore command outlives its parse', () => {
   });
 });
 
+// The confirmation is the one message a chore's owner is sure to have seen:
+// an assigned chore's nag is private, and a private nag sent while they were
+// offline may never reach them. So the confirmation itself can finish the job.
+describe('Done on the creation confirmation', () => {
+  const doneData = () => calls
+    .filter((c) => /sendMessage|editMessageText/.test(c.url) && c.body.reply_markup)
+    .flatMap((c) => c.body.reply_markup.inline_keyboard.flat())
+    .find((b) => b.text === '✅ Done');
+  const tapFrom = (data, who) => handleUpdate(env, { callback_query: {
+    id: 'tap', data, from: who, message: { chat: { id: 1 }, message_id: 99 },
+  } });
+
+  it('carries Done beside Undo and OK, bound to the chore and its command', async () => {
+    await say(5, '/remind nic singlife tmr 10am');
+    const { id } = sql.prepare('SELECT id FROM reminders').get();
+    expect(doneData().callback_data).toBe(`c:${id}:5`);
+    expect(okData().callback_data).toBe('ok:5');
+  });
+
+  it('completes a chore that has not nagged yet, and keeps the OK for the command', async () => {
+    await say(5, '/remind nic singlife tmr 10am');
+    const { id } = sql.prepare('SELECT id FROM reminders').get();
+    calls.length = 0;
+    await tapFrom(`c:${id}:5`, from);
+    // A one-off done early is spent; its completion is on the record, unscored.
+    expect(count('reminders')).toBe(0);
+    expect(sql.prepare('SELECT state, done_by, scored FROM firings').get())
+      .toMatchObject({ state: 'done', done_by: '@nicholaswan', scored: 0 });
+    const receipt = calls.find((c) => c.url.endsWith('/editMessageText'));
+    expect(receipt.body.text).toContain('singlife');
+    expect(receipt.body.text).toContain('done by @nicholaswan');
+    expect(receipt.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data)).toEqual(['ok:5']);
+    expect(deleted(5)).toBe(false);
+    const toast = calls.find((c) => c.url.endsWith('/answerCallbackQuery'));
+    expect(toast.body.text).toBe('Purrs 😻');
+  });
+
+  it('completes the live nag once the chore has fired', async () => {
+    await say(5, '/chore water plants 7pm daily');
+    const { id } = sql.prepare('SELECT id FROM reminders').get();
+    sql.prepare(
+      "INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, scored) VALUES (?, 1, 'water plants', ?, 'nagging', 1)"
+    ).run(id, Date.now());
+    calls.length = 0;
+    await tapFrom(`c:${id}:5`, from);
+    expect(sql.prepare('SELECT state, done_by FROM firings').get())
+      .toMatchObject({ state: 'done', done_by: '@nicholaswan' });
+    // The schedule lives on; only the occurrence is finished.
+    expect(count('reminders')).toBe(1);
+  });
+
+  it('answers a second tap without completing anything twice', async () => {
+    await say(5, '/remind nic singlife tmr 10am');
+    const { id } = sql.prepare('SELECT id FROM reminders').get();
+    await tapFrom(`c:${id}:5`, from);
+    calls.length = 0;
+    await tapFrom(`c:${id}:5`, from);
+    expect(count('firings')).toBe(1);
+    expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toBe('Already gone.');
+  });
+
+  it('ignores a Done forged from another chat', async () => {
+    await say(5, '/remind nic singlife tmr 10am');
+    const { id } = sql.prepare('SELECT id FROM reminders').get();
+    calls.length = 0;
+    await handleUpdate(env, { callback_query: {
+      id: 'tap', data: `c:${id}:5`, from, message: { chat: { id: 2 }, message_id: 99 },
+    } });
+    expect(count('reminders')).toBe(1);
+    expect(count('firings')).toBe(0);
+  });
+});
+
 describe('assignee shortcuts', () => {
   it('parses the NICKNAMES var, skipping a malformed entry', () => {
     expect([...nicknames({ NICKNAMES: 'Nic=@nicholaswan, yx = @Dodgerblueee, junk, =x' })])
