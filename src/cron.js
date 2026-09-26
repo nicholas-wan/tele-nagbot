@@ -1,7 +1,7 @@
 // Runs every minute: fire due reminders, re-send unacknowledged nags,
 // expire firings older than 24h.
 
-import { sendMessage, sendLong, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
+import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
 import { getTz, isScored } from './household.js';
 import { nagButtons, nagHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './nag.js';
 import { updateDashboard } from './dashboard.js';
@@ -170,9 +170,35 @@ async function sendWeeklyRecap(env, now) {
   }
 }
 
+// The digest's text and buttons for a given set of firings: one line and one
+// ✅ button per chore still nagging, so the message that says "this is still
+// hanging over you" is also the place to say it no longer is. The 8am send
+// and every redraw after a tap go through here, with the ids the digest's
+// buttons still carry, so a chore that fires later in the day never joins a
+// digest about yesterday. Firings finished by any route since simply drop
+// off; scoped to the chat like every firing lookup.
+const DIGEST_BUTTONS = 25;
+export async function digestView(env, chatId, firingIds) {
+  const ids = [...new Set(firingIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  const nagging = ids.length ? (await env.DB.prepare(
+    `SELECT f.id, r.text, r.assignee_name, r.assignee_user_id FROM firings f JOIN reminders r ON r.id = f.reminder_id
+     WHERE f.chat_id = ? AND f.state = 'nagging' AND f.id IN (${ids.map(() => '?').join(',')}) ORDER BY f.id`
+  ).bind(chatId, ...ids).all()).results : [];
+  if (!nagging.length) {
+    return { html: '☀️ All caught up — nothing left hanging over from yesterday. The cats approve 😻', markup: null };
+  }
+  const who = (r) => r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
+  const lines = ['☀️ Mrow. Still hanging over you from yesterday:'];
+  for (const r of nagging) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
+  const label = (text) => `✅ ${text.length > 28 ? `${text.slice(0, 27)}…` : text}`;
+  const rows = nagging.slice(0, DIGEST_BUTTONS).map((r) => [{ text: label(r.text), callback_data: `dg:${r.id}` }]);
+  if (nagging.length > DIGEST_BUTTONS) lines.push('<i>The rest can be finished from the pinned board.</i>');
+  return { html: lines.join('\n'), markup: { inline_keyboard: rows } };
+}
+
 // 8am local: one summary of the day's chores per chat. Skipped when there is
 // nothing due today and nothing still nagging.
-async function sendDigests(env, now) {
+export async function sendDigests(env, now) {
   const paused = await pausedChats(env, now);
   const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all();
   for (const { chat_id } of results) {
@@ -198,14 +224,11 @@ async function sendDigests(env, now) {
       // today's agenda, so a routine bulletin would only repeat it. The digest
       // speaks only when something was left hanging overnight.
       const nagging = await env.DB.prepare(
-        "SELECT r.text, r.assignee_name, r.assignee_user_id FROM firings f JOIN reminders r ON r.id = f.reminder_id WHERE f.chat_id = ? AND f.state = 'nagging'"
+        "SELECT id FROM firings WHERE chat_id = ? AND state = 'nagging'"
       ).bind(chat_id).all();
       if (!nagging.results.length) continue;
-
-      const who = (r) => r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
-      const lines = ['☀️ Mrow. Still hanging over you from yesterday:'];
-      for (const r of nagging.results) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
-      await sendLong(env, chat_id, lines.join('\n'), { silent: true });
+      const view = await digestView(env, chat_id, nagging.results.map((f) => f.id));
+      await sendMessage(env, chat_id, view.html, view.markup, { silent: true });
     } catch (e) {
       console.log(`digest for chat ${chat_id} failed: ${e.stack || e}`);
     }

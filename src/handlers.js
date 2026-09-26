@@ -22,6 +22,7 @@ import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from
 import { cmdStats, handleStatsCallback } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
+import { digestView } from './cron.js';
 
 // Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
 let botUsername = null;
@@ -679,6 +680,34 @@ async function handleCallback(env, cb) {
     await editRef(env, ctx, r.chat_id, ref, `😻 <s>${esc(r.text)}</s> — done by ${esc(credit)}`,
       { inline_keyboard: [[okButton(cm[2] ? +cm[2] : null)]] });
     return answerCallback(env, cb.id, 'Purrs 😻');
+  }
+
+  // Done from the 8am digest. The digest names what was left hanging, and the
+  // person it names is the one reading it, so the line that told them must
+  // let them answer — it used to carry only OK. Completes the firing the way
+  // the nag card's Done does (so the card, receipt and board all follow),
+  // then redraws the digest from the ids its buttons still carry, so the
+  // other lines stay put and the finished one drops off. Anyone in the
+  // household may finish anyone's chore here, as on the board's Manage.
+  const dg = data.match(/^dg:([0-9]+)$/);
+  if (dg) {
+    const chatId = cb.message.chat.id;
+    const firing = await env.DB.prepare(
+      "SELECT * FROM firings WHERE id = ? AND chat_id = ? AND state = 'nagging'"
+    ).bind(+dg[1], chatId).first();
+    let toast = 'Already handled 👍';
+    if (firing) {
+      const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+      if (!r) return answerCallback(env, cb.id, 'That one is gone.');
+      const won = await completeFiring(env, firing, r, senderName(cb.from), await getTz(env, chatId));
+      if (won) toast = 'Purrs 😻';
+    }
+    const rows = (cb.message.reply_markup && cb.message.reply_markup.inline_keyboard) || [];
+    const carried = rows.flat().map((b) => String(b.callback_data || '').match(/^dg:([0-9]+)$/))
+      .filter(Boolean).map((m) => +m[1]);
+    const view = await digestView(env, chatId, carried.length ? carried : [+dg[1]]);
+    await editRef(env, ctx, chatId, ref, view.html, view.markup || { inline_keyboard: [[okButton()]] });
+    return answerCallback(env, cb.id, toast);
   }
 
   // Undo a /delete: restore the stashed reminder row.
