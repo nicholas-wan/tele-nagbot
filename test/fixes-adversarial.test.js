@@ -272,4 +272,10 @@ describe('durable webhook deduplication', () => {
     expect(count('webhook_updates')).toBe(0);
     expect(count('members')).toBe(0);
   });
+  it('still logs the rejected group, so a supergroup upgrade shows its new chat id', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const upgraded = update(); upgraded.message.chat = { id: -1009999, type: 'supergroup', title: 'Home' };
+    await deliver(upgraded);
+    expect(log.mock.calls.flat().some((line) => String(line).includes('rejected chat -1009999 (supergroup) "Home"'))).toBe(true);
+  });
 });

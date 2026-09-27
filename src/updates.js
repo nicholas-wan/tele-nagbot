@@ -9,6 +9,11 @@ export async function enqueueUpdate(env, update) {
     || update.message_reaction?.chat || update.chat_member?.chat;
   const from = update.message?.from || update.callback_query?.from || update.message_reaction?.user;
   if (!chatAllowed(env, chat?.id)) {
+    // Rejected group traffic is logged here, since it now stops before
+    // handleUpdate ever sees it: the usual cause is a group upgraded to a
+    // supergroup, whose new chat id ALLOWED_CHATS doesn't name yet, and this
+    // line is how `wrangler tail` shows it. DMs stay unlogged.
+    if (chat && chat.id < 0) console.log(`rejected chat ${chat.id} (${chat.type}) "${chat.title || ''}"`);
     // Preserve the household boundary before storing any update payload.
     if (!chat || chat.id < 0 || !from || from.is_bot || !await isMember(env, from.id)) return false;
   }
