@@ -6,9 +6,9 @@ import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, d
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, householdMembers, senderName, creditTogether, isScored } from './household.js';
-import { completeFiring, editNag, firingCard } from './nag.js';
+import { completeFiring, editNag, firingCard, deleteNag, nagChat } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
-import { setReminderPaused, deleteReminder, completeEarly, chatPaused } from './chores.js';
+import { setReminderPaused, deleteReminder, completeEarly, chatPaused, redrawNag } from './chores.js';
 
 export function editorText(r, tz) {
   const d = JSON.parse(r.schedule_detail);
@@ -151,8 +151,38 @@ async function applyEditorChoice(env, r, kind, value, tz) {
     if (value !== '0' && !member) return 'That household member is no longer here.';
     await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = ? WHERE id = ?')
       .bind(member ? member.name : null, member ? member.userId : null, r.id).run();
+    await moveAssignedNag(env, { ...r, assignee_name: member ? member.name : null,
+      assignee_user_id: member ? member.userId : null }, tz);
   }
   return null;
+}
+
+// Move the active occurrence too. Clearing its old reference first invalidates
+// any cron/poke writer holding the previous recipient and message snapshot.
+async function moveAssignedNag(env, r, tz) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const f = await env.DB.prepare(
+      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+    ).bind(r.id).first();
+    if (!f || (f.nag_user_id ?? null) === r.assignee_user_id) return;
+    const claimed = await env.DB.prepare(
+      `UPDATE firings SET nag_user_id = ?, nag_chat_id = NULL,
+         last_message_id = NULL, last_message_ephemeral = 0, last_sticker_id = NULL
+       WHERE id = ? AND state = 'nagging' AND last_message_id IS ? AND nag_user_id IS ?
+         AND EXISTS (SELECT 1 FROM reminders WHERE id = ? AND assignee_user_id IS ?)`
+    ).bind(r.assignee_user_id, f.id, f.last_message_id, f.nag_user_id ?? null, r.id, r.assignee_user_id).run();
+    if (!claimed.meta.changes) continue;
+    if (f.last_message_id) await deleteNag(env, f);
+    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+    const moved = { ...f, nag_user_id: r.assignee_user_id, nag_chat_id: null,
+      last_message_id: null, last_message_ephemeral: 0, last_sticker_id: null };
+    const paused = r.paused || await chatPaused(env, r.chat_id);
+    const [html, markup] = paused
+      ? [`⏸️ <b>${esc(r.text)}</b>\nPaused.`, { inline_keyboard: [] }]
+      : firingCard(r, moved, tz);
+    await redrawNag(env, moved, html, markup);
+    return;
+  }
 }
 
 // The points flag is written into the nag itself — the "(reminder — no points)"

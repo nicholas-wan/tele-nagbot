@@ -2,7 +2,7 @@
 //  - fetch: Telegram webhook (validated with the secret token header)
 //  - scheduled: every-minute cron that fires reminders and re-nags
 
-import { handleUpdate } from './handlers.js';
+import { enqueueUpdate, processUpdate } from './updates.js';
 import { updateDashboard } from './dashboard.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
@@ -32,8 +32,22 @@ export default {
       } catch {
         return new Response('bad request', { status: 400 });
       }
-      // Always 200 so Telegram doesn't retry a poison update forever.
-      const handling = handleUpdate(env, update).catch(async (e) => {
+      if (!update || !Number.isSafeInteger(update.update_id)) {
+        return new Response('bad update', { status: 400 });
+      }
+      try {
+        if (!await enqueueUpdate(env, update)) return new Response('ok');
+      } catch (e) {
+        console.log(`could not persist update: ${e}`);
+        return new Response('temporarily unavailable', { status: 503 });
+      }
+      // Once durable, cron can recover a delivery that never starts. Started
+      // updates are claimed once, including when Telegram repeats the POST.
+      const handling = processUpdate(env, update).then(async (processed) => {
+        if (!processed && update.callback_query?.id) {
+          await answerCallback(env, update.callback_query.id, 'Already received 👍');
+        }
+      }).catch(async (e) => {
         console.log(`update failed: ${e.stack || e}`);
         // A tap must never die silently: an unanswered callback leaves the
         // button spinning, which reads as a dead bot. Answering twice is

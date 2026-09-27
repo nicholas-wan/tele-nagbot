@@ -288,6 +288,25 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   }
   if (h === null && defaultH != null) h = defaultH;
   if (h === null) {
+    // Date constraints must be extracted even when the clock time is absent.
+    // Relative dates become calendar dates now, not when tomorrow's reply lands.
+    let startDay = fromDay;
+    let onDate = null;
+    const relativeDay = args.match(/\b(?:this\s+)?(tomorrow|tmr|today)\b/i);
+    if (relativeDay) {
+      const p = localParts(nowMs, tz);
+      const date = new Date(Date.UTC(p.y, p.mo - 1, p.d + (/today/i.test(relativeDay[1]) ? 0 : 1)));
+      onDate = { y: date.getUTCFullYear(), mo: date.getUTCMonth() + 1, d: date.getUTCDate() };
+      args = args.replace(relativeDay[0], ' ');
+    }
+    if (kind === 'once' && startDay == null && !fromDate && !onDate) {
+      const weekday = args.match(new RegExp(`\\b(?:on|next|this)\\s+(${DAY_WORD})\\b`, 'i'))
+        || args.match(new RegExp(`\\b(${DAY_WORD})\\s*$`, 'i'));
+      if (weekday) {
+        startDay = DAY_INDEX[weekday[1].slice(0, 3).toLowerCase()];
+        args = args.replace(weekday[0], ' ');
+      }
+    }
     const text = cleanText(args);
     if (text) {
       validateText(text);
@@ -308,6 +327,8 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
       // A stated date survives a missing time: "13 sep lunch" knows the day,
       // which is enough for an all-day event even though it can't nag.
       if (fromDate) err.partial.date = fromDate;
+      if (startDay != null) err.partial.startDay = startDay;
+      if (onDate) err.partial.onDate = onDate;
       throw err;
     }
     throw new ParseError(

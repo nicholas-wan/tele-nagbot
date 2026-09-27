@@ -61,21 +61,19 @@ export async function findReminder(env, chatId, args, cmd = 'delete') {
   throw new ParseError(`"${raw}" matches: ${names.join(', ')} — ${twins ? 'use the number' : 'be more specific'}.`);
 }
 
-export async function createReminder(env, chatId, p, by, tz) {
-  // Smallest unused per-chat number, so numbering starts at 1 and fills gaps.
-  const { results } = await env.DB.prepare(
-    'SELECT display_num FROM reminders WHERE chat_id = ?'
-  ).bind(chatId).all();
-  const used = new Set(results.map((r) => r.display_num));
-  let num = 1;
-  while (used.has(num)) num++;
+// Allocate inside the INSERT: concurrent requests cannot read the same gap.
+const FREE_NUMBER = `(SELECT MIN(candidate) FROM (
+  SELECT 1 AS candidate UNION ALL
+  SELECT display_num + 1 FROM reminders WHERE chat_id = ? AND display_num > 0
+) WHERE NOT EXISTS (SELECT 1 FROM reminders WHERE chat_id = ? AND display_num = candidate))`;
 
+export async function createReminder(env, chatId, p, by, tz) {
   const res = await env.DB.prepare(
     `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
        schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ${FREE_NUMBER}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    chatId, num, p.text, p.assigneeName, p.assigneeUserId, p.kind,
+    chatId, chatId, chatId, p.text, p.assigneeName, p.assigneeUserId, p.kind,
     JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now(),
     p.scored != null ? (p.scored ? 1 : 0) : 1
   ).run();
@@ -164,18 +162,17 @@ export async function removeReminder(env, r) {
 // so a plain restore makes it due now and it nags again; an undone Done wants
 // the firing it already has, not a second one.
 export async function restoreReminder(env, r, { nextFireAt } = {}) {
-  const { results } = await env.DB.prepare('SELECT display_num FROM reminders WHERE chat_id = ?').bind(r.chat_id).all();
-  const used = new Set(results.map((x) => x.display_num));
-  let num = r.display_num;
-  if (used.has(num)) { num = 1; while (used.has(num)) num++; }
   const slot = nextFireAt !== undefined ? nextFireAt
     : r.next_fire_at != null ? r.next_fire_at : Date.now();
   await env.DB.prepare(
     `INSERT INTO reminders (id, chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
        schedule_detail, next_fire_at, nag_intervals, paused, created_by, created_at, scored)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, CASE WHEN ? > 0 AND NOT EXISTS
+       (SELECT 1 FROM reminders WHERE chat_id = ? AND display_num = ?)
+       THEN ? ELSE ${FREE_NUMBER} END, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    r.id, r.chat_id, num, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
+    r.id, r.chat_id, r.display_num ?? null, r.chat_id, r.display_num ?? null,
+    r.display_num ?? null, r.chat_id, r.chat_id, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
     r.schedule_detail, slot, r.nag_intervals,
     r.paused ? 1 : 0, r.created_by, r.created_at, r.scored != null ? r.scored : 1
   ).run();
@@ -213,10 +210,12 @@ export async function undoCompletion(env, firing, by, tz) {
   const intervals = JSON.parse(r.nag_intervals);
   const nextNag = firing.fired_at > now ? firing.fired_at
     : r.schedule_kind === 'once' && isOverdue(firing, now) ? null
+    : firing.snoozed_until > now ? firing.snoozed_until
     : deferQuietHours(now + intervals[0] * 60000, tz);
   const claim = await env.DB.prepare(
     `UPDATE firings SET state = 'nagging', done_by = NULL, done_at = NULL, next_nag_at = ?
-     WHERE id = ? AND state = 'done' AND done_at = ?`
+     WHERE id = ? AND state = 'done' AND done_at = ?
+       AND NOT EXISTS (SELECT 1 FROM firings newer WHERE newer.reminder_id = firings.reminder_id AND newer.id > firings.id)`
   ).bind(nextNag, firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
   if (trashed) {
@@ -332,8 +331,9 @@ export async function redrawNag(env, firing, html, markup) {
   const ref = await sendNag(env, firing, html, markup, { silent: true });
   const upd = await env.DB.prepare(
     `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?
-     WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
-  ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, firing.id, firing.last_message_id).run();
+     WHERE id = ? AND state = 'nagging' AND last_message_id IS ? AND nag_user_id IS ?`
+  ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, firing.id, firing.last_message_id,
+    firing.nag_user_id ?? null).run();
   if (!upd.meta.changes && ref) await deleteNagRef(env, firing, ref);
 }
 
@@ -396,11 +396,24 @@ export async function completeEarly(env, r, credit, tz) {
   const nextFireAt = r.schedule_kind === 'interval' && detail.days
     ? nextOccurrence(r.schedule_kind, detail, now, tz)
     : nextOccurrence(r.schedule_kind, detail, r.next_fire_at, tz);
-  const claim = r.schedule_kind === 'once'
-    ? await env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
-        .bind(r.id, r.next_fire_at).run()
-    : await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(nextFireAt, r.id, r.next_fire_at).run();
+  // D1 batches are transactions. Each dependent statement is gated by the
+  // preceding write, so a lost slot is a no-op and any error rolls it all back.
+  const consume = r.schedule_kind === 'once'
+    ? env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
+        .bind(r.id, r.next_fire_at)
+    : env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+        .bind(nextFireAt, r.id, r.next_fire_at);
+  const [claim, ins] = await env.DB.batch([
+    consume,
+    env.DB.prepare(
+      `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
+       SELECT ?, ?, ?, ?, 'done', ?, ?, ? WHERE changes() = 1`
+    ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1),
+    env.DB.prepare(
+      `INSERT INTO trash (chat_id, payload, created_at)
+       SELECT ?, json_set(?, '$._firing', last_insert_rowid()), ? WHERE changes() = 1`
+    ).bind(r.chat_id, JSON.stringify(r), now),
+  ]);
   if (!claim.meta.changes) {
     // The occurrence fired while we looked — complete its live nag instead.
     const firing = await env.DB.prepare(
@@ -408,16 +421,7 @@ export async function completeEarly(env, r, credit, tz) {
     ).bind(r.id).first();
     return Boolean(firing && await completeFiring(env, firing, r, credit, tz)) && firing.id;
   }
-  const ins = await env.DB.prepare(
-    `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
-     VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
-  ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
   const firingId = ins.meta.last_row_id;
-  // The row as it was before the slot moved, kept for a day under the done
-  // row it belongs to: ↩️ Not done on the receipt puts that slot back
-  // (undoEarly), and a finished one-off comes back from here whole. Every
-  // other completion could be taken back; this was the one that could not.
-  await stashReminder(env, r, firingId);
   // The receipt is the shared record — there is no nag message to edit.
   const next = r.schedule_kind === 'once' ? null
     : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();

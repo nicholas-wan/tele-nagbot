@@ -223,6 +223,7 @@ describe('chat UX', () => {
     };
     const runs = [];
     const db = {
+      async batch(statements) { const results = []; for (const stmt of statements) results.push(await stmt.run()); return results; },
       prepare(sql) {
         return {
           bind(...args) {
@@ -916,7 +917,7 @@ describe('the wizard keeps a stated start date', () => {
   const inserted = (runs) => {
     const row = runs.find((u) => u.sql.includes('INSERT INTO reminders'));
     expect(row).toBeTruthy();
-    return { detail: JSON.parse(row.args[6]), firstFireAt: row.args[7] };
+    return { detail: JSON.parse(row.args[7]), firstFireAt: row.args[8] };
   };
 
   it('anchors the first fire on the stated date at the tapped time', async () => {

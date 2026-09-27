@@ -31,6 +31,7 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
   const runs = [];
   const nagging = () => firings.filter((f) => f.state === 'nagging');
   const DB = {
+    async batch(statements) { const results = []; for (const stmt of statements) results.push(await stmt.run()); return results; },
     prepare(sql) {
       const stmt = (args = []) => ({
         async first() {

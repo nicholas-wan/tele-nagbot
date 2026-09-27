@@ -1,3 +1,4 @@
+import { d1 } from './d1.js';
 // Regression tests for the 27 Sep 2026 review: ↩️ Not done bringing back a
 // chore deleted since (a recurring one with nothing scheduled), vacation wake
 // deleting one-offs outright, rotation lost in the time wizard, an exact chore
@@ -24,23 +25,7 @@ beforeEach(() => {
   sql.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
   sql.exec('INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (1, 99)');
   failOn = null;
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: {
-    prepare(query) {
-      // A D1 error on demand, for the statements a test names.
-      if (failOn && failOn.test(query)) throw new Error('D1_ERROR: simulated');
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => {
-          const r = stmt.run(...args);
-          return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } };
-        },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: d1(sql, (query) => { if (failOn && failOn.test(query)) throw new Error('D1_ERROR: simulated'); }) };
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) });

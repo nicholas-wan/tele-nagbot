@@ -103,7 +103,11 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
   // schedule_detail as startDate and is stripped back out before the reminder
   // is created. Without it the anchor was simply dropped and the chore began
   // on whatever day the time was chosen.
-  const detail = partial.date ? { ...partial.detail, startDate: partial.date } : partial.detail;
+  const detail = { ...partial.detail,
+    ...(partial.date ? { startDate: partial.date } : {}),
+    ...(partial.startDay != null ? { startDay: partial.startDay } : {}),
+    ...(partial.onDate ? { onDate: partial.onDate } : {}),
+  };
   // user_id is whose wizard this is: a bare typed time resolves only the
   // typer's own draft, and the wizard card (usually ephemeral to them) can
   // only be edited on their behalf.
@@ -123,7 +127,7 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
   const p = localParts(now, tz);
   const endOfToday = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
   const tomorrowNine = nextOccurrence('daily', { h: 9, mi: 0 }, endOfToday, tz);
-  const keyboard = partial.kind === 'once'
+  const keyboard = partial.kind === 'once' && !hasDateConstraint(detail)
     ? [
         [btn('In 15 min', 'r15'), btn('In 1 hour', 'r60')],
         [btn(fmtShort(seven, tz), `a${seven}`), btn(fmtShort(tomorrowNine, tz), `a${tomorrowNine}`)],
@@ -178,8 +182,26 @@ function draftRef(draft, field) {
 // how the anchor rides in drafts.schedule_detail, and it must never reach a
 // reminder row.
 function draftSchedule(draft) {
-  const { startDate, ...detail } = JSON.parse(draft.schedule_detail);
-  return { detail, startDate: startDate || null };
+  const { startDate, startDay, onDate, ...detail } = JSON.parse(draft.schedule_detail);
+  return { detail, startDate: startDate || null, startDay, onDate };
+}
+
+function hasDateConstraint(detail) {
+  return Boolean(detail.startDate || detail.onDate || detail.startDay != null);
+}
+
+function constrainedFirstFire(draft, kind, detail, now, tz) {
+  const { startDate, startDay, onDate } = draftSchedule(draft);
+  if (startDate) return anchoredFirstFire(startDate, kind, detail, now, tz);
+  if (onDate) {
+    const midnight = zonedEpoch(onDate.y, onDate.mo, onDate.d, 0, 0, tz);
+    const at = kind === 'once' || kind === 'interval'
+      ? zonedEpoch(onDate.y, onDate.mo, onDate.d, detail.h, detail.mi, tz)
+      : nextOccurrence(kind, detail, midnight - 1, tz);
+    return at > now ? at : null;
+  }
+  if (startDay != null) return nextOccurrence('weekly', { ...detail, days: [startDay] }, now, tz);
+  return nextOccurrence(kind === 'interval' || kind === 'once' ? 'daily' : kind, detail, now, tz);
 }
 
 // First fire for a draft that named a start date: that date at the chosen
@@ -203,7 +225,7 @@ const keepRotate = (detail, draftDetail) => (draftDetail.rotate ? { ...detail, r
 
 function scheduleFromCode(code, draft, now, tz) {
   const kind = draft.schedule_kind;
-  const { detail, startDate } = draftSchedule(draft);
+  const { detail } = draftSchedule(draft);
   const absolute = code.match(/^a(\d+)$/);
   if (absolute) {
     const firstFireAt = +absolute[1];
@@ -221,12 +243,8 @@ function scheduleFromCode(code, draft, now, tz) {
     const d = { ...detail, h: +hm[1], mi: 0 };
     // A stated start date decides the first fire; otherwise an interval takes
     // the next h:mi slot, not a full gap out.
-    const firstFireAt = startDate
-      ? anchoredFirstFire(startDate, kind, d, now, tz)
-      : kind === 'interval'
-        ? nextOccurrence('daily', { h: d.h, mi: 0 }, now, tz)
-        : nextOccurrence(kind, d, now, tz);
-    return { kind, detail: d, firstFireAt };
+    const firstFireAt = constrainedFirstFire(draft, kind, d, now, tz);
+    return firstFireAt == null ? null : { kind, detail: d, firstFireAt };
   }
   return null;
 }
@@ -241,7 +259,9 @@ const WIZARD_HOURS = [8, 12, 19, 21];
 // keyboard has relative, absolute and the daily-7pm shortcut; the recurring
 // keyboard has the hour presets. Everything else is answered, not applied.
 function codeOffered(code, draft) {
-  if (draft.schedule_kind === 'once') return /^(r15|r60|d19|a\d+)$/.test(code);
+  if (draft.schedule_kind === 'once' && !hasDateConstraint(JSON.parse(draft.schedule_detail))) {
+    return /^(r15|r60|d19|a\d+)$/.test(code);
+  }
   const hm = code.match(/^h(\d+)$/);
   return Boolean(hm) && WIZARD_HOURS.includes(+hm[1]);
 }
@@ -301,7 +321,7 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
 
   // The typed reply carries the time; the draft carries everything else.
   let { kind, detail, firstFireAt } = parsed;
-  const { detail: draftDetail, startDate } = draftSchedule(draft);
+  const { detail: draftDetail } = draftSchedule(draft);
   // A recurring draft needs a time of day to repeat at. "in 30m" or "now"
   // names an instant, not a clock time, and used to turn the chore into a
   // one-off at that instant — the weekly rule the person typed silently gone.
@@ -322,8 +342,11 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   // arrives — a typed clock time says when, not which day. A relative reply
   // ("in 30m", "now") carries no time of day and means exactly what it says,
   // so it keeps its own instant.
-  if (startDate && parsed.detail.h != null) {
-    firstFireAt = anchoredFirstFire(startDate, kind, detail, now, tz);
+  if (hasDateConstraint(JSON.parse(draft.schedule_detail)) && parsed.detail.h != null) {
+    firstFireAt = constrainedFirstFire(draft, kind, detail, now, tz);
+    if (firstFireAt == null) {
+      return sendPrivate(env, ctx, '😿 That time has passed on the requested date. Choose a later time or cancel and start again.');
+    }
   }
   detail = keepRotate(detail, draftDetail);
   const p = {

@@ -124,3 +124,16 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (next_fire_at) WHERE p
 CREATE INDEX IF NOT EXISTS idx_firings_nag ON firings (next_nag_at) WHERE state = 'nagging';
 -- Stats, dashboard, digest, and recap all filter firings by chat + state.
 CREATE INDEX IF NOT EXISTS idx_firings_chat ON firings (chat_id, state);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_chat_number ON reminders (chat_id, display_num);
+
+-- Durable delivery deduplication. Pending deliveries can be recovered by cron;
+-- processing deliveries are never blindly replayed after partial mutations.
+CREATE TABLE IF NOT EXISTS webhook_updates (
+  update_id INTEGER PRIMARY KEY,
+  payload TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  received_at INTEGER NOT NULL,
+  started_at INTEGER,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_updates_state ON webhook_updates (state, received_at);

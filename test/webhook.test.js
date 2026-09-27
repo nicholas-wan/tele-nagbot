@@ -14,11 +14,11 @@ describe('webhook answers', () => {
     WEBHOOK_SECRET: 'hook-secret',
     ALLOWED_CHATS: '-123456789',
     DB: {
-      prepare() {
+      prepare(query) {
         return { bind() { return {
           async first() { return null; },
           async all() { return { results: [] }; },
-          async run() { return { meta: { changes: 0 } }; },
+          async run() { return { meta: { changes: query.includes('webhook_updates') ? 1 : 0 } }; },
         }; } };
       },
     },
@@ -27,7 +27,7 @@ describe('webhook answers', () => {
   const webhookRequest = (update) => new Request('https://worker.example/webhook', {
     method: 'POST',
     headers: { 'X-Telegram-Bot-Api-Secret-Token': 'hook-secret' },
-    body: JSON.stringify(update),
+    body: JSON.stringify({ update_id: 42, ...update }),
   });
 
   it('sends the tap answer back on the webhook response itself', async () => {
@@ -76,7 +76,7 @@ describe('webhook answers', () => {
         from: { id: 7, first_name: 'Nick' },
         message: { message_id: 55, chat: { id: -123456789 } },
       },
-    }), env({ DB: { prepare() { throw new Error('D1 is down'); } } }),
+    }), env({ DB: { prepare(query) { if (!query.includes('webhook_updates')) throw new Error('D1 is down'); return { bind() { return { run: async () => ({ meta: { changes: 1 } }) }; } }; } } }),
     { waitUntil: (task) => tasks.push(task) });
     const body = JSON.parse(await response.text());
     expect(body.method).toBe('answerCallbackQuery');

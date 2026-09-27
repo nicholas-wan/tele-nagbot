@@ -52,7 +52,7 @@ async function handleNewMembers(env, msg) {
 // are served; everything else — stranger DMs included — is dropped silently.
 // Missing configuration fails closed: a deploy must explicitly name every
 // chat the bot is allowed to serve.
-function chatAllowed(env, chatId) {
+export function chatAllowed(env, chatId) {
   const allowed = String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean);
   return allowed.length > 0 && chatId != null && allowed.includes(String(chatId));
 }
@@ -665,8 +665,9 @@ async function cmdPoke(env, ctx) {
     // untracked — live buttons on a nag nothing would ever clean up.
     const upd = await env.DB.prepare(
       `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
-       WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
-    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id).run();
+        WHERE id = ? AND state = 'nagging' AND last_message_id IS ? AND nag_user_id IS ?`
+    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id,
+      f.nag_user_id ?? null).run();
     if (!upd.meta.changes && ref) await deleteNagRef(env, f, ref);
   }
 }

@@ -97,6 +97,7 @@ Concurrency rule: every state transition is a conditional `UPDATE … WHERE stat
 
 ```powershell
 npm test
+npm run db:migrate
 npx wrangler deploy
 npx wrangler tail
 ```
@@ -112,7 +113,9 @@ curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.latte
 
 - Other admin actions, same bearer token: `?info` (webhook + registered commands, read back from Telegram), `?diag[=<chat>][&user=<id>]` (membership, admin rights, whether the chat id changed), `?board` (rebuild and re-pin the dashboard), `?stickers&chat=<id>` and `?stickerimg=N&chat=<id>` (list tags, fetch one image).
 - `?board` walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pinned message a human *authored* (`pinned_message.from` is the author, not whoever pinned it — a bot message a human pinned is treated as the bot's). Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
-- Migrations: `npx wrangler d1 execute nagbot-eu --remote --command "ALTER …"`, one statement at a time, mirrored into `schema.sql`. The live schema matches `schema.sql` as of 27 Sep 2026 (`firings.snoozed_by` added that day); nothing is pending.
+- Migrations live in `migrations/`, with the resulting schema mirrored in `schema.sql`. **Before deploying this revision to an existing database, run `npm run db:migrate`.** `0001_adversarial_review.sql` repairs duplicate per-chat chore numbers (preserving the first owner), enforces uniqueness, and creates the webhook inbox. This repository change does not apply the migration to the live database.
+- Webhooks are persisted before acknowledgement and claimed once by `update_id`. Cron recovers pending deliveries that never started. A handler interrupted after starting is marked failed after 15 minutes and the requester is told to check `/list` before retrying; it is not replayed automatically because some mutations may have completed. Finished/failed inbox payloads are retained seven days for diagnosis. A database outage before persistence returns HTTP 503 so Telegram can retry.
+- Early completion uses a D1 transaction for consuming the slot, recording credit, and stashing Undo. Chore numbers are allocated inside their INSERT, including restores. Assignment edits move the active card and future re-nags to the new recipient without changing the snooze or schedule.
 - Tests: `test/fixes-*.test.js` are regression tests for specific past bugs (ephemeral editor, duplicate boards, postpone/pause accounting, roster); keep them when refactoring.
 - Deploys take ~30s to propagate — re-run before concluding a change didn't work. Debug with `wrangler tail`, or by querying `firings` / `reminders` / `settings` in `nagbot-eu`; they explain almost every "the bot didn't do X" report.
 - A group upgraded to a supergroup gets a **new chat id** and loses its pin. Rejected group chats are logged, so `wrangler tail` shows the new id immediately; update `ALLOWED_CHATS`, migrate the D1 rows, then `?board`.

@@ -244,7 +244,9 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // Only the winner of this state transition performs the side effects: a
   // concurrent cron expiry or second Done tap loses here and returns false.
   const res = await env.DB.prepare(
-    "UPDATE firings SET state = 'done', done_by = ?, done_at = ?, next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
+    `UPDATE firings SET state = 'done', done_by = ?, done_at = ?,
+       snoozed_until = CASE WHEN next_nag_at = snoozed_until THEN snoozed_until ELSE NULL END,
+       next_nag_at = NULL WHERE id = ? AND state = 'nagging'`
   ).bind(byName, now, firing.id).run();
   if (!res.meta.changes) return false;
   // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.

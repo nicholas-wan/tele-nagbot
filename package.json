@@ -6,12 +6,13 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute nagbot-eu --remote --file=schema.sql",
+    "db:migrate": "wrangler d1 migrations apply nagbot-eu --remote",
     "logs": "wrangler tail",
     "test": "vitest run"
   },
   "devDependencies": {
-    "vitest": "^4.1.10",
-    "wrangler": "^4.121.0"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.141.0"
   },
   "dependencies": {
     "chrono-node": "^2.10.1"

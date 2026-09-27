@@ -112,7 +112,8 @@ export async function fireReminder(env, r, now, tz) {
   // drawn on no card, so the card just sent would stay live forever.
   const upd = await env.DB.prepare(
     `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
-       cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL`
+       cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL
+       AND nag_user_id IS NULL`
   ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
     ref && ref.ephemeral ? who : null, firingId).run();
   if (!upd.meta.changes) {

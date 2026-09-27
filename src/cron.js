@@ -9,11 +9,13 @@ import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
+import { recoverUpdates } from './updates.js';
 
 export async function runCron(env) {
   const now = Date.now();
   // Each step isolated: one failing must not starve the ones after it.
   const steps = {
+    updates: () => recoverUpdates(env, now),
     wake: () => wakeLapsedPauses(env, now),
     digests: () => sendDigests(env, now),
     weekly: () => sendWeeklyRecap(env, now),
@@ -252,10 +254,11 @@ export async function sendDigests(env, now) {
       // was not even due got marked done by mistake.
       const nagging = await env.DB.prepare(
         `SELECT f.id FROM firings f JOIN reminders r ON r.id = f.reminder_id
-         WHERE f.chat_id = ? AND f.state = 'nagging'
+         WHERE f.chat_id = ? AND f.state = 'nagging' AND r.paused = 0
            AND (r.schedule_kind = 'once' OR f.fired_at > ?)
            AND f.fired_at <= ?
-           AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)`
+           AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at IS NOT NULL
+                    AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)`
       ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now).all();
       if (!nagging.results.length) continue;
       const view = await digestView(env, chat_id, nagging.results.map((f) => f.id));
@@ -363,8 +366,9 @@ export async function renagPending(env, now) {
       // buttons that nothing would ever clean up.
       const upd = await env.DB.prepare(
         `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = NULL
-         WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
-      ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id).run();
+          WHERE id = ? AND state = 'nagging' AND last_message_id IS ? AND nag_user_id IS ?`
+      ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, f.id, f.last_message_id,
+        f.nag_user_id ?? null).run();
       // Done/expired (or the other writer) won the race while we were sending
       // — remove the orphan nag.
       if (!upd.meta.changes && ref) await deleteNagRef(env, f, ref);

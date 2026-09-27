@@ -1,3 +1,4 @@
+import { d1 } from './d1.js';
 // A /chore or /remind stays in the group until its confirmation's ✅ OK, so a
 // misread chore can be checked against what was typed and copied back after
 // Undo. Real SQLite behind the D1 shim, so drafts and the sweep table are live.
@@ -12,18 +13,7 @@ beforeEach(() => {
   sql = new DatabaseSync(':memory:');
   sql.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
   sql.exec('INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (1, 99)');
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', NICKNAMES: 'nic=@nicholaswan, yx=@Dodgerblueee', DB: {
-    prepare(query) {
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => { const r = stmt.run(...args); return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } }; },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', NICKNAMES: 'nic=@nicholaswan, yx=@Dodgerblueee', DB: d1(sql) };
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const body = JSON.parse(init.body);
