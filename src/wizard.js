@@ -4,7 +4,7 @@
 
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
          answerCallback, isPublicMessage, keepSourceMessage } from './tg.js';
-import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, DAY_NAMES } from './time.js';
+import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, fmtTime, DAY_NAMES } from './time.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName, nicknames } from './household.js';
@@ -128,7 +128,7 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
         [btn('Every day 7pm', 'd19'), btn('✏️ Type a time', 'custom')],
       ]
     : [
-        [btn('8am', 'h8'), btn('12pm', 'h12'), btn('7pm', 'h19'), btn('9pm', 'h21')],
+        WIZARD_HOURS.map((h) => btn(fmtTime(h, 0), `h${h}`)),
         [btn('✏️ Type a time', 'custom')],
       ];
   if (ai) keyboard.unshift([btn(`✨ ${ai.label}`, 'ai')]);
@@ -225,6 +225,21 @@ function scheduleFromCode(code, draft, now, tz) {
   return null;
 }
 
+// The hour presets a recurring draft's wizard offers. Also what a tapped
+// `h<N>` is checked against: callback data is not bound to the button it came
+// from, and an unchecked code took any hour (h25 rolled into the next day)
+// and applied a recurring preset to a one-off draft, which then never fired.
+const WIZARD_HOURS = [8, 12, 19, 21];
+
+// Whether a wizard code is one the draft's own keyboard offers. The once
+// keyboard has relative, absolute and the daily-7pm shortcut; the recurring
+// keyboard has the hour presets. Everything else is answered, not applied.
+function codeOffered(code, draft) {
+  if (draft.schedule_kind === 'once') return /^(r15|r60|d19|a\d+)$/.test(code);
+  const hm = code.match(/^h(\d+)$/);
+  return Boolean(hm) && WIZARD_HOURS.includes(+hm[1]);
+}
+
 // A plain-text message resolving a pending draft: a reply to the wizard or
 // prompt message, or (after "✏️ Type a time") a message that is purely a time.
 export async function tryDraftTime(env, msg, ctx, replyRef) {
@@ -281,6 +296,13 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   // The typed reply carries the time; the draft carries everything else.
   let { kind, detail, firstFireAt } = parsed;
   const { detail: draftDetail, startDate } = draftSchedule(draft);
+  // A recurring draft needs a time of day to repeat at. "in 30m" or "now"
+  // names an instant, not a clock time, and used to turn the chore into a
+  // one-off at that instant — the weekly rule the person typed silently gone.
+  if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h == null) {
+    return sendPrivate(env, ctx,
+      `😿 <b>${esc(draft.text)}</b> repeats, so it needs a time of day — try <code>10am</code> or <code>7:30pm</code>.`);
+  }
   if (kind === 'once' && draft.schedule_kind !== 'once' && parsed.detail.h != null) {
     kind = draft.schedule_kind;
     detail = { ...draftDetail, h: parsed.detail.h, mi: parsed.detail.mi };
@@ -379,6 +401,7 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
         : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
     sched = { kind: ai.kind, detail: ai.detail, firstFireAt };
   } else {
+    if (!codeOffered(wiz[2], draft)) return answerCallback(env, cb.id, 'That option is not on this menu.');
     sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
   }
   if (!sched) return answerCallback(env, cb.id, 'That time has passed — choose another.');

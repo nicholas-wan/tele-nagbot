@@ -2,12 +2,12 @@
 // create, find, delete, pause/resume, complete-early, and vacation wake-up.
 
 import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, messageIsGone,
-         RECEIPT_TTL_MS } from './tg.js';
+         retimeSentMessage, RECEIPT_TTL_MS, SENT_TTL_MS } from './tg.js';
 import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
-import { deleteNag, nagChat, showPausedCard, editNag, sendNag, deleteNagRef, nagHtml, nagButtons,
-         snoozedHtml, snoozedButtons, completeFiring, isHouseholdDeferred } from './nag.js';
+import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
+         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashReminder } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
@@ -72,10 +72,21 @@ export async function createReminder(env, chatId, p, by, tz) {
   ).run();
   const id = res.meta.last_row_id;
   await updateDashboard(env, chatId);
+  return { id, html: confirmHtml(by, p, tz) };
+}
+
+// The one confirmation shape, public or private: who added what, for whom,
+// whether it scores, and when it first fires with its cadence. The public
+// line used to say only the time, and neither said chore or reminder — so
+// /chore x 7pm and /remind x 7pm confirmed identically. The marker is the
+// board's: a chore is the default, the reminder is the thing worth flagging.
+function confirmHtml(by, p, tz) {
   const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
-  const html = `📝 <b>${esc(p.text)}</b>${forWho}\nFirst reminder: ${fmtLocal(p.firstFireAt, tz)}` +
-    (p.kind !== 'once' ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '');
-  return { id, html };
+  const kind = isScored({ scored: p.scored }) ? '' : ' · <i>reminder</i>';
+  const cadence = p.kind !== 'once'
+    ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '';
+  return `📝 ${esc(by)} added <b>${esc(p.text)}</b>${forWho}${kind}\n` +
+    `First reminder: ${fmtLocal(p.firstFireAt, tz)}${cadence}`;
 }
 
 // Exactly one confirmation per new chore, never two saying the same thing.
@@ -84,12 +95,12 @@ export async function createReminder(env, chatId, p, by, tz) {
 // confirmation and carries the Undo. An assigned one is deliberately not
 // announced — that would hand the group what its private nag hides — so the
 // creator's own private copy is the only one. Either way the pinned dashboard
-// lists it, so nothing is lost by keeping this to a single message.
+// lists it, so nothing is lost by keeping this to a single message. The public
+// one is silent: the group just watched the command being typed.
 export async function confirmNewChore(env, ctx, by, p, tz, id, html) {
   const buttons = undoButtons(id, p.sourceMsgId);
   if (p.assigneeName || p.assigneeUserId) return sendPrivate(env, ctx, html, buttons);
-  return sendMessage(env, ctx.chatId,
-    `📝 ${esc(by)} added <b>${esc(p.text)}</b> — ${fmtLocal(p.firstFireAt, tz)}`, buttons);
+  return sendMessage(env, ctx.chatId, html, buttons, { silent: true });
 }
 
 // "now" reminders fire on the spot instead of waiting for the next cron tick.
@@ -117,10 +128,13 @@ export async function chatPaused(env, chatId) {
 // `by` names the person in the log line. A deletion removes the chore for
 // everyone, so when it is triggered from a nag the log goes to the group even
 // though the nag itself may have been private — both of you need to see it.
-export async function deleteReminder(env, r, ctx = null, by = null) {
-  const chatId = r.chat_id;
-  // Like Undo: remove live nag messages and hard-delete the nagging firings,
-  // so an intentional delete never counts as "expired unclaimed" in stats.
+// Removes a chore and every live nag it has, and stashes the row in trash for
+// a day so a `t:` button can bring it back. Returns the trash id. Shared by
+// /delete and the confirmation's Undo: the nagging firings are hard-deleted,
+// not expired, so an intentional removal never counts as "expired unclaimed"
+// in stats — and both removals are reversible, since the Undo button sits on
+// a confirmation for up to a day and the chore may have fired since.
+export async function removeReminder(env, r) {
   const firings = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
   ).bind(r.id).all();
@@ -130,13 +144,92 @@ export async function deleteReminder(env, r, ctx = null, by = null) {
   }
   await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
   await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-  // Stash the row for a day so the Undo button can bring it back.
-  const stash = await env.DB.prepare(
-    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
-  ).bind(chatId, JSON.stringify(r), Date.now()).run();
+  return stashReminder(env, r);
+}
+
+// Puts a trashed reminder row back, under its old id: AUTOINCREMENT never
+// reuses one, so it is free, and the firings that still point at it — the
+// done history, and a firing being un-done — line up again. The number is
+// reclaimed if still free, else the smallest unused. `nextFireAt` overrides
+// the stored slot: a one-off with nothing scheduled was nagging when it went,
+// so a plain restore makes it due now and it nags again; an undone Done wants
+// the firing it already has, not a second one.
+export async function restoreReminder(env, r, { nextFireAt } = {}) {
+  const { results } = await env.DB.prepare('SELECT display_num FROM reminders WHERE chat_id = ?').bind(r.chat_id).all();
+  const used = new Set(results.map((x) => x.display_num));
+  let num = r.display_num;
+  if (used.has(num)) { num = 1; while (used.has(num)) num++; }
+  const slot = nextFireAt !== undefined ? nextFireAt
+    : r.next_fire_at != null ? r.next_fire_at : Date.now();
+  await env.DB.prepare(
+    `INSERT INTO reminders (id, chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
+       schedule_detail, next_fire_at, nag_intervals, paused, created_by, created_at, scored)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    r.id, r.chat_id, num, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
+    r.schedule_detail, slot, r.nag_intervals,
+    r.paused ? 1 : 0, r.created_by, r.created_at, r.scored != null ? r.scored : 1
+  ).run();
+  return r.id;
+}
+
+// How long a Done can be taken back. The trash that holds a finished one-off
+// is pruned after a day, so that is the bound for every kind.
+export const UNDO_WINDOW_MS = 86400000;
+
+// Takes back a Done: the firing returns to nagging with its credit removed,
+// a finished one-off comes back from the trash (with nothing scheduled — the
+// firing it already has is the occurrence), and the card is redrawn as what
+// it should be showing. A postponed firing (fired_at ahead) simply waits for
+// the time the household chose; an overdue one-off goes back to quiet.
+// Every step is bound to the done row that was read, so a second tap loses.
+// Returns { ok } or { ok: false, why: 'late' | 'gone' }.
+export async function undoCompletion(env, firing, by, tz) {
+  const now = Date.now();
+  if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
+    return { ok: false, why: 'late' };
+  }
+  let r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  let trashed = null;
+  if (!r) {
+    trashed = await env.DB.prepare(
+      "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$.id') = ? ORDER BY id DESC LIMIT 1"
+    ).bind(firing.chat_id, firing.reminder_id).first();
+    if (!trashed) return { ok: false, why: 'gone' };
+    r = JSON.parse(trashed.payload);
+  }
+  const intervals = JSON.parse(r.nag_intervals);
+  const nextNag = firing.fired_at > now ? firing.fired_at
+    : r.schedule_kind === 'once' && isOverdue(firing, now) ? null
+    : deferQuietHours(now + intervals[0] * 60000, tz);
+  const claim = await env.DB.prepare(
+    `UPDATE firings SET state = 'nagging', done_by = NULL, done_at = NULL, next_nag_at = ?
+     WHERE id = ? AND state = 'done' AND done_at = ?`
+  ).bind(nextNag, firing.id, firing.done_at).run();
+  if (!claim.meta.changes) return { ok: false, why: 'late' };
+  if (trashed) {
+    await restoreReminder(env, r, { nextFireAt: null });
+    await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(trashed.id).run();
+  }
+  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
+  const [html, markup] = firingCard(r, firing, tz, now);
+  await redrawNag(env, firing, html, markup);
+  // The receipt had been given two hours; as a nag again it gets its day back.
+  if (firing.last_message_id) await retimeSentMessage(env, nagChat(firing), nagRef(firing), SENT_TTL_MS);
+  // Accountability is household-wide: the group hears the credit was withdrawn.
+  await sendMessage(env, firing.chat_id,
+    `↩️ <b>${esc(r.text)}</b> — not done after all, says ${esc(by)}.`, null,
+    { silent: true, ttl: RECEIPT_TTL_MS });
+  await updateDashboard(env, firing.chat_id);
+  return { ok: true };
+}
+
+export async function deleteReminder(env, r, ctx = null, by = null) {
+  const chatId = r.chat_id;
+  const trashId = await removeReminder(env, r);
   // OK dismisses the log once everyone has seen it; Undo restores the chore.
   const undo = { inline_keyboard: [[
-    { text: '↩️ Undo', callback_data: `t:${stash.meta.last_row_id}` },
+    { text: '↩️ Undo', callback_data: `t:${trashId}` },
     { text: '✅ OK', callback_data: 'ok' },
   ]] };
   const html = by
@@ -185,8 +278,9 @@ function resumeNextFire(r, now, tz) {
 // just resumed was tombstoned hours later on that stale clock. What tells them
 // apart is isHouseholdDeferred: the snooze's own time, still in force.
 //
-// Returns a Map of firing id → whether it was restamped, so the caller can tell
-// a revived nag from one that kept the household's own deferral.
+// Returns a Map of firing id → the columns the restamp wrote (so the caller
+// can draw the card from the clock it just set), or false for a firing that
+// kept the household's own deferral or whose swap was lost.
 async function restampLiveNags(env, r, now, tz) {
   const { results } = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
@@ -199,29 +293,34 @@ async function restampLiveNags(env, r, now, tz) {
       restamped.set(f.id, false);
       continue;
     }
-    await env.DB.prepare(
-      `UPDATE firings SET fired_at = ?, next_nag_at = ?, snoozed_until = NULL
+    const upd = await env.DB.prepare(
+      `UPDATE firings SET fired_at = ?, next_nag_at = ?, snoozed_until = NULL, snoozed_by = NULL
        WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS ?`
     ).bind(now, nextNag, f.id, f.fired_at, f.next_nag_at != null ? f.next_nag_at : null).run();
-    restamped.set(f.id, true);
+    restamped.set(f.id, upd.meta.changes
+      ? { fired_at: now, next_nag_at: nextNag, snoozed_until: null, snoozed_by: null }
+      : false);
   }
   return restamped;
 }
 
-// Put a resumed firing's card back on screen. Normally an edit of the card
-// that has been sitting there reading "⏸️ Paused"; but a card recorded before
-// the sweep learned to spare live nags was deleted a day into the pause, and
-// an edit of a deleted message leaves the board saying "nagging now" with
-// nothing to tap until the next re-nag — or 08:00, if the resume landed in
-// quiet hours. Only a message Telegram says is gone earns a replacement.
-async function redrawResumedNag(env, firing, html, markup) {
-  const res = await editNag(env, firing, html, markup);
-  if (res.ok || String(res.description || '').includes('not modified')) return;
-  if (!messageIsGone(res.description)) return;
+// Put a live firing's card back on screen. Normally an edit of the card that
+// is already there — reading "⏸️ Paused", or a receipt whose Done was taken
+// back; but a card recorded before the sweep learned to spare live nags was
+// deleted a day into the pause, and an edit of a deleted message leaves the
+// board saying "nagging now" with nothing to tap until the next re-nag — or
+// 08:00, if the resume landed in quiet hours. Only a message Telegram says is
+// gone (or a firing with no card at all) earns a replacement.
+export async function redrawNag(env, firing, html, markup) {
+  if (firing.last_message_id) {
+    const res = await editNag(env, firing, html, markup);
+    if (res.ok || String(res.description || '').includes('not modified')) return;
+    if (!messageIsGone(res.description)) return;
+  }
   const ref = await sendNag(env, firing, html, markup, { silent: true });
   const upd = await env.DB.prepare(
     `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?
-     WHERE id = ? AND state = 'nagging' AND last_message_id = ?`
+     WHERE id = ? AND state = 'nagging' AND last_message_id IS ?`
   ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, firing.id, firing.last_message_id).run();
   if (!upd.meta.changes && ref) await deleteNagRef(env, firing, ref);
 }
@@ -235,14 +334,19 @@ export async function setReminderPaused(env, r, pause, tz, by) {
   if (!pause && !r.paused) return { firing: null, next: r.next_fire_at };
   let next = r.next_fire_at;
   let restamped = null;
-  // Firings first: paused = 0 is what re-arms the cron, so a tick that sees it
-  // must already be looking at the restamped clock.
-  if (!pause) {
+  if (pause) {
+    // Only the flag. Writing next_fire_at back as well was the one move of
+    // that column with no compare-and-swap: a fire claimed between the read
+    // and this write had its consumed slot put back, to fire again on resume.
+    await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
+  } else {
+    // Firings first: paused = 0 is what re-arms the cron, so a tick that sees
+    // it must already be looking at the restamped clock.
     next = resumeNextFire(r, now, tz);
     restamped = await restampLiveNags(env, r, now, tz);
+    await env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?')
+      .bind(next, r.id).run();
   }
-  await env.DB.prepare('UPDATE reminders SET paused = ?, next_fire_at = ? WHERE id = ?')
-    .bind(pause ? 1 : 0, next, r.id).run();
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
@@ -250,17 +354,15 @@ export async function setReminderPaused(env, r, pause, tz, by) {
     if (pause) {
       await showPausedCard(env, firing, r, by, tz);
     } else if (firing.last_message_id) {
-      // A firing whose deferral survived the resume must not come back wearing a
-      // plain nag: that would claim the chore is due now, and the ↩️ Back handler
-      // (which reads the card's own text) would then hand it the wrong keyboard.
-      // Redraw the snooze notice it still is.
-      if (restamped && restamped.get(firing.id) === false) {
-        await redrawResumedNag(env, firing,
-          snoozedHtml(r, firing.next_nag_at, by, tz), snoozedButtons(firing.id, isScored(firing)));
-      } else {
-        await redrawResumedNag(env, firing,
-          nagHtml(r, firing.nag_count, firing.cat || 'both'), nagButtons(firing.id, isScored(firing)));
-      }
+      // The card comes back as what the firing now is — a nag with a fresh
+      // clock, or the 😴 notice of a deferral that survived the resume, in
+      // the snoozer's name. This path used to draw its own cards and named
+      // the resumer as the snoozer. The clock the restamp wrote is laid over
+      // the row, so the card is drawn from what was just decided rather than
+      // from whatever a re-read happens to return.
+      const patch = restamped && restamped.get(firing.id);
+      const [html, markup] = firingCard(r, patch ? { ...firing, ...patch } : firing, tz, now);
+      await redrawNag(env, firing, html, markup);
     }
   }
   await updateDashboard(env, r.chat_id);
@@ -292,34 +394,89 @@ export async function completeEarly(env, r, credit, tz) {
     const firing = await env.DB.prepare(
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
     ).bind(r.id).first();
-    return Boolean(firing && await completeFiring(env, firing, r, credit, tz));
+    return Boolean(firing && await completeFiring(env, firing, r, credit, tz)) && firing.id;
   }
+  // The row as it was before the slot moved, kept for a day: ↩️ Not done on
+  // the receipt puts that slot back (undoEarly), and a finished one-off
+  // comes back from here whole. Every other completion could be taken back;
+  // this was the one that could not.
+  await stashReminder(env, r);
   const ins = await env.DB.prepare(
     `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
      VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
   ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
-  // The receipt is the shared record — there is no nag message to edit. A solo
-  // credit carries a fix-up button, because tapping Done early when the work
-  // was actually shared shouldn't need an admin to repair.
+  const firingId = ins.meta.last_row_id;
+  // The receipt is the shared record — there is no nag message to edit.
   const next = r.schedule_kind === 'once' ? null
     : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
-  const markup = credit.includes(CREDIT_SEP) ? null : { inline_keyboard: [[
-    { text: '🤝 Together too', callback_data: `g:${ins.meta.last_row_id}` },
-    { text: '✅ OK', callback_data: 'ok' },
-  ]] };
-  await sendMessage(env, r.chat_id,
-    `😻 <s>${esc(r.text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
-    (next && next.next_fire_at ? `\nNext: ${fmtLocal(next.next_fire_at, tz)}` : ''),
-    markup, { silent: true, ttl: RECEIPT_TTL_MS });
+  const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId);
+  await sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS });
   await updateDashboard(env, r.chat_id);
-  return true;
+  return firingId;
+}
+
+// The done-early receipt, shared with 🤝 Together too, which redraws it with
+// the wider credit. A solo credit carries the fix-up button, because tapping
+// Done early when the work was actually shared shouldn't need an admin to
+// repair; every credit carries ↩️ Not done, like every other receipt.
+export function earlyReceipt(text, credit, nextFireAt, tz, firingId) {
+  const html = `😻 <s>${esc(text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
+    (nextFireAt ? `\nNext: ${fmtLocal(nextFireAt, tz)}` : '');
+  const together = credit.includes(CREDIT_SEP) ? []
+    : [{ text: '🤝 Together too', callback_data: `g:${firingId}` }];
+  return { html, markup: { inline_keyboard: [[
+    ...together,
+    { text: '↩️ Not done', callback_data: `ne:${firingId}` },
+    okButton(),
+  ]] } };
+}
+
+// Takes back a Done early: the done row goes (it was never an occurrence),
+// and the slot it consumed comes back from the stash — the reminder's old
+// next_fire_at, or the whole one-off. Refused once a later occurrence has
+// fired, since the slot would then be history, and after a day like every
+// undo. The firing claim comes first, so a second tap has nothing to take.
+export async function undoEarly(env, firing, by, tz) {
+  const now = Date.now();
+  if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
+    return { ok: false, why: 'late' };
+  }
+  const trashed = await env.DB.prepare(
+    "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$.id') = ? ORDER BY id DESC LIMIT 1"
+  ).bind(firing.chat_id, firing.reminder_id).first();
+  if (!trashed) return { ok: false, why: 'gone' };
+  const before = JSON.parse(trashed.payload);
+  const later = await env.DB.prepare('SELECT 1 AS x FROM firings WHERE reminder_id = ? AND id > ?')
+    .bind(firing.reminder_id, firing.id).first();
+  if (later) return { ok: false, why: 'late' };
+  const claim = await env.DB.prepare(
+    "DELETE FROM firings WHERE id = ? AND state = 'done' AND done_at = ?"
+  ).bind(firing.id, firing.done_at).run();
+  if (!claim.meta.changes) return { ok: false, why: 'late' };
+  const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  if (r) {
+    await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at IS ?')
+      .bind(before.next_fire_at, r.id, r.next_fire_at).run();
+  } else {
+    await restoreReminder(env, before);
+  }
+  await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(trashed.id).run();
+  await sendMessage(env, firing.chat_id,
+    `↩️ <b>${esc(before.text)}</b> — not done after all, says ${esc(by)}.`, null,
+    { silent: true, ttl: RECEIPT_TTL_MS });
+  await updateDashboard(env, firing.chat_id);
+  return { ok: true };
 }
 
 // Ends vacation mode: clears the flag, removes stale pre-vacation nags (and
 // their spent one-off reminders), rolls recurring schedules past the gap.
 export async function wakeChat(env, chatId, tz) {
   const now = Date.now();
-  await env.DB.prepare('UPDATE settings SET paused_until = NULL WHERE chat_id = ?').bind(chatId).run();
+  // The flag comes off LAST. Every reminder that came due during the holiday
+  // is still sitting at its old slot until the roll below, and paused_until is
+  // the only thing keeping the cron's fire loop off them — a /resume all from
+  // the webhook that cleared it first, with a cron tick landing in between,
+  // fired the whole backlog in one burst.
   const firings = await env.DB.prepare(
     "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
   ).bind(chatId).all();
@@ -347,6 +504,7 @@ export async function wakeChat(env, chatId, tz) {
     );
     await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').bind(next, r.id).run();
   }
+  await env.DB.prepare('UPDATE settings SET paused_until = NULL WHERE chat_id = ?').bind(chatId).run();
   await updateDashboard(env, chatId);
   await sendMessage(env, chatId, '😺 The cats are back on duty — chores resume. /list to see what\'s up.');
 }

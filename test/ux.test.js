@@ -147,7 +147,7 @@ describe('chat UX', () => {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/pause 10pm meds' },
     });
     const upd = updates.find((u) => u.sql.includes('SET paused'));
-    expect(upd.args[2]).toBe(21); // "10pm meds" — not "Water plants" via display #10
+    expect(upd.args[0]).toBe(21); // "10pm meds" — not "Water plants" via display #10
   });
 
   // Harness for replies to a live nag: message 77 is the nag, firing 5 owns it.

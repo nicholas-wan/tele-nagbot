@@ -1,12 +1,12 @@
 // Runs every minute: fire due reminders, re-send unacknowledged nags,
 // expire firings older than 24h.
 
-import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral } from './tg.js';
+import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral, okButton } from './tg.js';
 import { getTz, isScored } from './household.js';
 import { nagButtons, nagHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { choreStats, winnerStreak } from './stats.js';
-import { wakeChat } from './chores.js';
+import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
 
@@ -172,28 +172,42 @@ async function sendWeeklyRecap(env, now) {
 
 // The digest's text and buttons for a given set of firings: one line and one
 // ✅ button per chore still nagging, so the message that says "this is still
-// hanging over you" is also the place to say it no longer is. The 8am send
-// and every redraw after a tap go through here, with the ids the digest's
-// buttons still carry, so a chore that fires later in the day never joins a
-// digest about yesterday. Firings finished by any route since simply drop
-// off; scoped to the chat like every firing lookup.
+// hanging over you" is also the place to say it no longer is — and, for a
+// chore finished from this digest within the undo window, a struck line with
+// ↩️ Not done, because that ✅ sits right under the thumb and a slip used to
+// be final. The 8am send and every redraw after a tap go through here, with
+// the ids the digest's buttons still carry, so a chore that fires later in
+// the day never joins a digest about yesterday. Firings finished by another
+// route drop off; scoped to the chat like every firing lookup. Always ends
+// with OK: a digest with only ✅ buttons could not be put away without
+// finishing something.
 const DIGEST_BUTTONS = 25;
-export async function digestView(env, chatId, firingIds) {
+export async function digestView(env, chatId, firingIds, now = Date.now()) {
   const ids = [...new Set(firingIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
-  const nagging = ids.length ? (await env.DB.prepare(
-    `SELECT f.id, r.text, r.assignee_name, r.assignee_user_id FROM firings f JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'nagging' AND f.id IN (${ids.map(() => '?').join(',')}) ORDER BY f.id`
+  const rows = ids.length ? (await env.DB.prepare(
+    `SELECT f.id, f.state, f.done_at, f.done_by, COALESCE(r.text, f.reminder_text, '?') AS text,
+            r.assignee_name, r.assignee_user_id
+     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
+     WHERE f.chat_id = ? AND f.state IN ('nagging', 'done') AND f.id IN (${ids.map(() => '?').join(',')})
+     ORDER BY f.id`
   ).bind(chatId, ...ids).all()).results : [];
+  const nagging = rows.filter((r) => r.state === 'nagging');
+  const undone = rows.filter((r) => r.state === 'done' && r.done_at != null && now - r.done_at <= UNDO_WINDOW_MS);
+  const label = (text) => (text.length > 28 ? `${text.slice(0, 27)}…` : text);
+  const buttons = undone.map((r) => [{ text: `↩️ Not done · ${label(r.text)}`, callback_data: `nd:${r.id}` }]);
+  buttons.push([okButton()]);
   if (!nagging.length) {
-    return { html: '☀️ All caught up — nothing left hanging over from yesterday. The cats approve 😻', markup: null };
+    const lines = ['☀️ All caught up — nothing left hanging over from yesterday. The cats approve 😻'];
+    for (const r of undone) lines.push(`😻 <s>${esc(r.text)}</s> — done by ${esc(r.done_by || 'someone')}`);
+    return { html: lines.join('\n'), markup: { inline_keyboard: buttons } };
   }
   const who = (r) => r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
   const lines = ['☀️ Mrow. Still hanging over you from yesterday:'];
   for (const r of nagging) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
-  const label = (text) => `✅ ${text.length > 28 ? `${text.slice(0, 27)}…` : text}`;
-  const rows = nagging.slice(0, DIGEST_BUTTONS).map((r) => [{ text: label(r.text), callback_data: `dg:${r.id}` }]);
+  for (const r of undone) lines.push(`😻 <s>${esc(r.text)}</s> — done by ${esc(r.done_by || 'someone')}`);
+  const rows2 = nagging.slice(0, DIGEST_BUTTONS).map((r) => [{ text: `✅ ${label(r.text)}`, callback_data: `dg:${r.id}` }]);
   if (nagging.length > DIGEST_BUTTONS) lines.push('<i>The rest can be finished from the pinned board.</i>');
-  return { html: lines.join('\n'), markup: { inline_keyboard: rows } };
+  return { html: lines.join('\n'), markup: { inline_keyboard: [...rows2, ...buttons] } };
 }
 
 // 8am local: one summary of the day's chores per chat. Skipped when there is
@@ -223,9 +237,26 @@ export async function sendDigests(env, now) {
       // The pinned board is refreshed this same minute and already carries
       // today's agenda, so a routine bulletin would only repeat it. The digest
       // speaks only when something was left hanging overnight.
+      //
+      // A recurring firing past its 24h is not "still hanging": quiet hours
+      // held its expiry back to 08:00, and the renag step of this very tick
+      // tombstones it seconds after the digest goes out — so the digest used
+      // to hand out a ✅ for a chore that was already gone by the time anyone
+      // read it. The tombstone says what happened to it. An overdue one-off
+      // stays: it is never expired, and Done here still counts.
+      //
+      // Nor is a chore the household parked "hanging": one postponed with
+      // 📅 Tomorrow (fired_at ahead of now) or snoozed to a time still to
+      // come (isHouseholdDeferred, in SQL) is due when they said, not this
+      // morning — listing it with a ✅ under the thumb is how a chore that
+      // was not even due got marked done by mistake.
       const nagging = await env.DB.prepare(
-        "SELECT id FROM firings WHERE chat_id = ? AND state = 'nagging'"
-      ).bind(chat_id).all();
+        `SELECT f.id FROM firings f JOIN reminders r ON r.id = f.reminder_id
+         WHERE f.chat_id = ? AND f.state = 'nagging'
+           AND (r.schedule_kind = 'once' OR f.fired_at > ?)
+           AND f.fired_at <= ?
+           AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)`
+      ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now).all();
       if (!nagging.results.length) continue;
       const view = await digestView(env, chat_id, nagging.results.map((f) => f.id));
       await sendMessage(env, chat_id, view.html, view.markup, { silent: true });
@@ -268,10 +299,16 @@ export async function renagPending(env, now) {
       const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
       if (!r) {
         // Same conditional claim as expireFiring, for the same reason: this
-        // tick's fired_at is a snapshot, and a resume may have moved it.
-        await env.DB.prepare(
+        // tick's fired_at is a snapshot, and a resume may have moved it. The
+        // winner also takes the card down — it kept live buttons for a chore
+        // that no longer existed until the sweep reached it a day later.
+        const claim = await env.DB.prepare(
           "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
         ).bind(f.id, f.fired_at).run();
+        if (claim.meta.changes) {
+          if (f.last_message_id) await deleteNag(env, f);
+          if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+        }
         continue;
       }
       // /pause freezes in-flight nags too (no re-nags, no expiry ticking).

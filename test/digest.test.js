@@ -56,7 +56,7 @@ describe('the 8am digest', () => {
     expect(d.body.disable_notification).toBe(true);
     expect(d.body.text).toContain('<b>singlife</b> (@nicholaswan)');
     expect(d.body.text).toContain('<b>clear poop</b>');
-    expect(buttons(d.body.reply_markup)).toEqual([['✅ singlife', 'dg:5'], ['✅ clear poop', 'dg:6']]);
+    expect(buttons(d.body.reply_markup)).toEqual([['✅ singlife', 'dg:5'], ['✅ clear poop', 'dg:6'], ['✅ OK', 'ok']]);
   });
 
   it('says nothing when nothing is nagging', async () => {
@@ -76,10 +76,13 @@ describe('the 8am digest', () => {
     expect(sql.prepare('SELECT id FROM reminders WHERE id = 10').get()).toBeUndefined();
     expect(calls.some((c) => c.url.endsWith('/editEphemeralMessageText') && c.body.ephemeral_message_id === 777)).toBe(true);
     const redraw = calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 99);
-    expect(redraw.body.text).toContain('clear poop');
-    expect(redraw.body.text).not.toContain('singlife');
-    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ clear poop', 'dg:6']]);
-    expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toBe('Purrs 😻');
+    expect(redraw.body.text).toContain('<b>clear poop</b>');
+    // The finished one stays on as a struck line with its way back.
+    expect(redraw.body.text).toContain('<s>singlife</s> — done by @nicholaswan');
+    expect(buttons(redraw.body.reply_markup)).toEqual([
+      ['✅ clear poop', 'dg:6'], ['↩️ Not done · singlife', 'nd:5'], ['✅ OK', 'ok'],
+    ]);
+    expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toContain('Purrs 😻');
   });
 
   it('closes out with an OK once the last chore is done', async () => {
@@ -91,7 +94,7 @@ describe('the 8am digest', () => {
     expect(firing(6)).toMatchObject({ state: 'done' });
     const redraw = calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 99);
     expect(redraw.body.text).toContain('All caught up');
-    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ OK', 'ok']]);
+    expect(buttons(redraw.body.reply_markup)).toEqual([['↩️ Not done · clear poop', 'nd:6'], ['✅ OK', 'ok']]);
   });
 
   it('answers a stale tap without touching anything, and redraws', async () => {
@@ -103,7 +106,7 @@ describe('the 8am digest', () => {
     expect(firing(5)).toMatchObject({ done_by: 'yx' });
     expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toBe('Already handled 👍');
     const redraw = calls.find((c) => c.url.endsWith('/editMessageText'));
-    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ clear poop', 'dg:6']]);
+    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ clear poop', 'dg:6'], ['✅ OK', 'ok']]);
   });
 
   it('ignores a Done forged from another chat', async () => {

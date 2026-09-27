@@ -3,7 +3,7 @@
 
 import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
          editRef, deleteRef, msgRef, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
-import { nextOccurrence, fmtLocal, fmtShort } from './time.js';
+import { nextOccurrence, fmtLocal, fmtShort, fmtClock } from './time.js';
 import { sendCelebrationSticker } from './stickers.js';
 import { isScored } from './household.js';
 import { updateDashboard } from './dashboard.js';
@@ -50,6 +50,39 @@ export function overdueButtons(firingId, scored = true) {
   ] };
 }
 
+// A Done can be a slip — the digest's ✅ sits right under the thumb — so every
+// receipt can take itself back. Anyone in the household may, as anyone may
+// tap Done; undoCompletion (chores.js) decides whether it is still possible.
+export function receiptButtons(firingId) {
+  return { inline_keyboard: [[
+    { text: '↩️ Not done', callback_data: `nd:${firingId}` },
+    { text: '✅ OK', callback_data: 'ok' },
+  ]] };
+}
+
+// The card a live firing should be showing right now: the ⏰ card past its
+// 24h, the 😴 notice while a snooze or postponement is in force, else the nag.
+// One place for the choice, so /poke, resume, the points toggle, ↩️ Back and
+// an undone Done all draw the same thing. Rows snoozed before snoozed_by
+// existed name the household.
+export function firingCard(reminder, firing, tz, now = Date.now()) {
+  if (isOverdue(firing, now)) return [overdueHtml(reminder), overdueButtons(firing.id, isScored(firing))];
+  if (isHouseholdDeferred(firing, now)) {
+    return [snoozedHtml(reminder, firing.next_nag_at, firing.snoozed_by || 'the household', tz),
+      snoozedButtons(firing.id, isScored(firing))];
+  }
+  return [nagHtml(reminder, firing.nag_count || 0, firing.cat || 'both'), nagButtons(firing.id, isScored(firing))];
+}
+
+// Keeps a reminder row for a day so a `t:` button, or an undone Done on a
+// one-off, can bring it back. Returns the trash id.
+export async function stashReminder(env, r) {
+  const stash = await env.DB.prepare(
+    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
+  ).bind(r.chat_id, JSON.stringify(r), Date.now()).run();
+  return stash.meta.last_row_id;
+}
+
 export function snoozeButtons(firingId, tz) {
   const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
   const nine = nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz);
@@ -85,12 +118,22 @@ const NAG_LINES = {
   ],
 };
 
+// The title line every card leads with. A /remind looks exactly like a
+// /chore, so the one that never reaches the leaderboard is the one marked —
+// and marked on every card state, not just the nag: the 😴 and ⏰ cards used
+// to drop it, so the flag vanished the moment the card changed.
+const titleHtml = (emoji, reminder) =>
+  `${emoji} <b>${esc(reminder.text)}</b>${isScored(reminder) ? '' : ' <i>(reminder — no points)</i>'}`;
+
+const assignedLine = (reminder) => (reminder.assignee_name
+  ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
+  : '');
+
 export function nagHtml(reminder, nagCount, cat = 'both') {
-  // Whether this counts is decided here, at the moment someone taps Done.
-  const kind = isScored(reminder) ? '' : ' <i>(reminder — no points)</i>';
-  const head = `🐱 <b>${esc(reminder.text)}</b>${kind}${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
+  const head = `${titleHtml('🐱', reminder)}${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
   const lines = NAG_LINES[cat] || NAG_LINES.both;
   const line = lines[Math.min(nagCount, lines.length - 1)];
+  // The nag itself leads with the mention, so the person is pinged.
   const who = reminder.assignee_name
     ? `${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)} — `
     : '';
@@ -98,17 +141,11 @@ export function nagHtml(reminder, nagCount, cat = 'both') {
 }
 
 export function snoozedHtml(reminder, until, by, tz) {
-  const who = reminder.assignee_name
-    ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
-    : '';
-  return `😴 <b>${esc(reminder.text)}</b>\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${who}`;
+  return `${titleHtml('😴', reminder)}\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${assignedLine(reminder)}`;
 }
 
 export function overdueHtml(reminder) {
-  const who = reminder.assignee_name
-    ? `\nAssigned to ${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)}.`
-    : '';
-  return `⏰ <b>${esc(reminder.text)}</b>\n24 hours and counting — the cats are still waiting.${who}`;
+  return `${titleHtml('⏰', reminder)}\n24 hours and counting — the cats are still waiting.${assignedLine(reminder)}`;
 }
 
 // Past the 24h window. A one-off in this state stays 'nagging' but quiet, so
@@ -136,7 +173,7 @@ export const nagChat = (firing) => firing.nag_chat_id || firing.chat_id;
 // A nag is public or ephemeral, and the two use different id spaces and
 // different edit/delete methods. These three keep that distinction in one
 // place so the lifecycle below never has to care which kind it is holding.
-const nagRef = (firing) => (firing.last_message_id
+export const nagRef = (firing) => (firing.last_message_id
   ? { id: firing.last_message_id, ephemeral: Boolean(firing.last_message_ephemeral) }
   : null);
 const nagCtx = (env, firing) => replyCtx(env, nagChat(firing), firing.nag_user_id);
@@ -206,9 +243,10 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
     : 'The cats purr approvingly.';
   if (firing.last_message_id) {
+    // A receipt lives two hours; the clock time is all it needs.
     await editNag(env, firing,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtLocal(now, tz)}. ${purr}`,
-      emptyKeyboard());
+      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtClock(now, tz)}. ${purr}`,
+      receiptButtons(firing.id));
     // The nag earned a day; its receipt only needs to be glanced at.
     await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
   }
@@ -216,10 +254,13 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // gets to see the chore was done, just not that it was pending.
   if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id) {
     await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, null,
+      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, receiptButtons(firing.id),
       { silent: true, ttl: RECEIPT_TTL_MS });
   }
+  // A finished one-off goes to the trash rather than straight out, so that
+  // ↩️ Not done can bring it back for as long as the trash keeps it.
   if (reminder.schedule_kind === 'once') {
+    await stashReminder(env, reminder);
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
   await updateDashboard(env, firing.chat_id);

@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS firings (
   -- has moved next_nag_at on (a re-nag, a quiet-hours push) the choice has
   -- been honoured and spent. snoozes_used alone cannot say this — it is a cap
   -- that stays set long after the snooze it counted has elapsed.
-  snoozed_until INTEGER
+  snoozed_until INTEGER,
+  snoozed_by TEXT                       -- who chose it, so a redrawn 😴 card can say so
 );
 
 -- Pending /remind commands that lacked a time; resolved via inline buttons.

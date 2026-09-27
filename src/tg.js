@@ -78,7 +78,7 @@ export function okButton(sourceMsgId = null) {
 // dashboard is kept (opts.keep). Telegram cannot list a bot's own messages,
 // so each one is recorded at send time and a cron sweep deletes what is due.
 // OK just gets there sooner; the sweep is the backstop nobody has to tap.
-const SENT_TTL_MS = 86400000;
+export const SENT_TTL_MS = 86400000;
 // Receipts and celebrations have a useful life of about the time it takes the
 // other person to glance at the chat; they don't earn the full day.
 export const RECEIPT_TTL_MS = 2 * 3600000;

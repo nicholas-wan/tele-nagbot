@@ -138,7 +138,7 @@ describe('Done on the creation confirmation', () => {
     expect(okData().callback_data).toBe('ok:5');
   });
 
-  it('completes a chore that has not nagged yet, and keeps the OK for the command', async () => {
+  it('completes a chore that has not nagged yet, leaving one receipt, and clears the command', async () => {
     await say(5, '/remind nic singlife tmr 10am');
     const { id } = sql.prepare('SELECT id FROM reminders').get();
     calls.length = 0;
@@ -147,11 +147,17 @@ describe('Done on the creation confirmation', () => {
     expect(count('reminders')).toBe(0);
     expect(sql.prepare('SELECT state, done_by, scored FROM firings').get())
       .toMatchObject({ state: 'done', done_by: '@nicholaswan', scored: 0 });
-    const receipt = calls.find((c) => c.url.endsWith('/editMessageText'));
-    expect(receipt.body.text).toContain('singlife');
-    expect(receipt.body.text).toContain('done by @nicholaswan');
-    expect(receipt.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data)).toEqual(['ok:5']);
-    expect(deleted(5)).toBe(false);
+    // The done-early line is the receipt, with its way back; the confirmation
+    // is not turned into a second one, and Done is as good as OK for the
+    // command it kept — both go.
+    const receipts = calls.filter((c) => /sendMessage|editMessageText/.test(c.url) && /😻/.test(c.body.text));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].body.text).toContain('done early by @nicholaswan');
+    const firingId = sql.prepare('SELECT id FROM firings').get().id;
+    expect(receipts[0].body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data))
+      .toEqual([`g:${firingId}`, `ne:${firingId}`, 'ok']);
+    expect(deleted(99)).toBe(true);
+    expect(deleted(5)).toBe(true);
     const toast = calls.find((c) => c.url.endsWith('/answerCallbackQuery'));
     expect(toast.body.text).toBe('Purrs 😻');
   });

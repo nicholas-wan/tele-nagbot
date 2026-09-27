@@ -342,7 +342,7 @@ describe('firing lifecycle fixes', () => {
       const r = { ...INTERVAL, paused: 1, next_fire_at: due };
       const { env, runs } = makeDb({ reminder: r });
       await setReminderPaused(env, r, false, TZ, 'Nick');
-      expect(setPaused(runs).args[1]).toBe(due);
+      expect(setPaused(runs).args[0]).toBe(due);
     });
 
     it('advances a lapsed interval from its anchor, not from now', async () => {
@@ -353,7 +353,7 @@ describe('firing lifecycle fixes', () => {
       const { env, runs } = makeDb({ reminder: r });
       const now = Date.now();
       await setReminderPaused(env, r, false, TZ, 'Nick');
-      const next = setPaused(runs).args[1];
+      const next = setPaused(runs).args[0];
       expect(next).toBeGreaterThan(now);
       expect(next).toBeLessThanOrEqual(now + 8 * DAY);
       expect((next - anchor) % (8 * DAY)).toBe(0);
@@ -363,7 +363,7 @@ describe('firing lifecycle fixes', () => {
       const r = { ...CHORE, paused: 1, next_fire_at: Date.now() - 2 * DAY };
       const { env, runs } = makeDb({ reminder: r });
       await setReminderPaused(env, r, false, TZ, 'Nick');
-      expect(setPaused(runs).args[1]).toBeGreaterThan(Date.now());
+      expect(setPaused(runs).args[0]).toBeGreaterThan(Date.now());
     });
 
     it('anchors intervals the same way when vacation ends', async () => {
