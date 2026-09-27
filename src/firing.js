@@ -27,49 +27,52 @@ export async function fireReminder(env, r, now, tz) {
   ).bind(claimTo, r.id, r.next_fire_at).run();
   if (!claim.meta.changes) return;
 
-  // Rotation: this occurrence goes to whoever has the fewest ✅ this week.
-  if (JSON.parse(r.schedule_detail).rotate) {
-    const who = await pickRotation(env, r.chat_id, tz);
-    if (who) {
-      await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
-        .bind(who, r.id).run();
-      r.assignee_name = who;
-      r.assignee_user_id = null;
-    }
-  }
-
-  // A previous occurrence still nagging when the next one fires gets
-  // quietly expired so only one live nag exists per reminder — unless it was
-  // deliberately postponed. "📅 Tomorrow" carries fired_at forward, so a
-  // still-nagging firing dated in the future is one the household moved past
-  // this very occurrence; the nag it asked for is arriving right now. That is
-  // superseded, not failed, so the row is removed outright instead of being
-  // expired into /stats as "expired unclaimed".
-  const stale = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
-  ).bind(r.id).all();
-  for (const f of stale.results) {
-    if (f.fired_at <= now) {
-      await expireFiring(env, f, r, { silent: true });
-      continue;
-    }
-    // Claim it the usual way first: a Done landing mid-sweep wins and keeps
-    // its receipt, exactly as expireFiring's conditional update would.
-    const gone = await env.DB.prepare(
-      "DELETE FROM firings WHERE id = ? AND state = 'nagging'"
-    ).bind(f.id).run();
-    if (!gone.meta.changes) continue;
-    if (f.last_message_id) await deleteNag(env, f);
-    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-  }
-
   // Everything from the claim to the firing row existing is the danger zone: a
   // throw in here advances the schedule with no nag to show for it, and the
   // occurrence is silently gone until the next slot — "cut nails" lost its
   // 14 Aug 17:00 this way, leaving no firing row and no trace of the cause.
   // Releasing the claim on failure lets the next cron tick simply try again.
+  // The rotation pick and the stale-nag sweep are inside it too: both query
+  // D1 after the claim, and guarding only the insert left them able to lose
+  // the occurrence the same way. Both are safe to repeat on the retry.
   let firingId;
   try {
+    // Rotation: this occurrence goes to whoever has the fewest ✅ this week.
+    if (JSON.parse(r.schedule_detail).rotate) {
+      const who = await pickRotation(env, r.chat_id, tz);
+      if (who) {
+        await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
+          .bind(who, r.id).run();
+        r.assignee_name = who;
+        r.assignee_user_id = null;
+      }
+    }
+
+    // A previous occurrence still nagging when the next one fires gets
+    // quietly expired so only one live nag exists per reminder — unless it was
+    // deliberately postponed. "📅 Tomorrow" carries fired_at forward, so a
+    // still-nagging firing dated in the future is one the household moved past
+    // this very occurrence; the nag it asked for is arriving right now. That is
+    // superseded, not failed, so the row is removed outright instead of being
+    // expired into /stats as "expired unclaimed".
+    const stale = await env.DB.prepare(
+      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
+    ).bind(r.id).all();
+    for (const f of stale.results) {
+      if (f.fired_at <= now) {
+        await expireFiring(env, f, r, { silent: true });
+        continue;
+      }
+      // Claim it the usual way first: a Done landing mid-sweep wins and keeps
+      // its receipt, exactly as expireFiring's conditional update would.
+      const gone = await env.DB.prepare(
+        "DELETE FROM firings WHERE id = ? AND state = 'nagging'"
+      ).bind(f.id).run();
+      if (!gone.meta.changes) continue;
+      if (f.last_message_id) await deleteNag(env, f);
+      if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+    }
+
     const intervals = JSON.parse(r.nag_intervals);
     const ins = await env.DB.prepare(
       'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at, scored) VALUES (?, ?, ?, ?, ?, ?)'

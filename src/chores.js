@@ -46,10 +46,19 @@ export async function findReminder(env, chatId, args, cmd = 'delete') {
     throw new ParseError(`No reminder ${num} here. See /list.`);
   }
   const q = raw.toLowerCase();
-  const matches = results.filter((x) => x.text.toLowerCase().includes(q));
+  // A name typed in full means that chore, even when a longer one contains it:
+  // "trash" beside "trash bins" was ambiguous, with no more specific spelling
+  // left to type and no number on show to fall back on.
+  const exact = results.filter((x) => x.text.toLowerCase() === q);
+  if (exact.length === 1) return exact[0];
+  const matches = exact.length ? exact : results.filter((x) => x.text.toLowerCase().includes(q));
   if (matches.length === 1) return matches[0];
   if (!matches.length) throw new ParseError(`The cats can't find a chore matching "${raw}". See /list.`);
-  throw new ParseError(`"${raw}" matches: ${matches.map((x) => x.text).join(', ')} — be more specific.`);
+  // Two chores with the same name have only their number left to tell them
+  // apart, so the refusal says it for those and for nothing else.
+  const twins = exact.length > 1;
+  const names = matches.map((x) => (twins ? `${x.text} (/${cmd} ${x.display_num})` : x.text));
+  throw new ParseError(`"${raw}" matches: ${names.join(', ')} — ${twins ? 'use the number' : 'be more specific'}.`);
 }
 
 export async function createReminder(env, chatId, p, by, tz) {
@@ -192,9 +201,12 @@ export async function undoCompletion(env, firing, by, tz) {
   let r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   let trashed = null;
   if (!r) {
+    // Only a finished one-off is stashed by its completion, under this
+    // firing's id. A chore missing for any other reason was deleted since, and
+    // bringing it back is the delete's Undo's job, not this one's.
     trashed = await env.DB.prepare(
-      "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$.id') = ? ORDER BY id DESC LIMIT 1"
-    ).bind(firing.chat_id, firing.reminder_id).first();
+      "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$._firing') = ? ORDER BY id DESC LIMIT 1"
+    ).bind(firing.chat_id, firing.id).first();
     if (!trashed) return { ok: false, why: 'gone' };
     r = JSON.parse(trashed.payload);
   }
@@ -396,16 +408,16 @@ export async function completeEarly(env, r, credit, tz) {
     ).bind(r.id).first();
     return Boolean(firing && await completeFiring(env, firing, r, credit, tz)) && firing.id;
   }
-  // The row as it was before the slot moved, kept for a day: ↩️ Not done on
-  // the receipt puts that slot back (undoEarly), and a finished one-off
-  // comes back from here whole. Every other completion could be taken back;
-  // this was the one that could not.
-  await stashReminder(env, r);
   const ins = await env.DB.prepare(
     `INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
      VALUES (?, ?, ?, ?, 'done', ?, ?, ?)`
   ).bind(r.id, r.chat_id, r.text, now, credit, now, r.scored != null ? r.scored : 1).run();
   const firingId = ins.meta.last_row_id;
+  // The row as it was before the slot moved, kept for a day under the done
+  // row it belongs to: ↩️ Not done on the receipt puts that slot back
+  // (undoEarly), and a finished one-off comes back from here whole. Every
+  // other completion could be taken back; this was the one that could not.
+  await stashReminder(env, r, firingId);
   // The receipt is the shared record — there is no nag message to edit.
   const next = r.schedule_kind === 'once' ? null
     : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
@@ -442,18 +454,23 @@ export async function undoEarly(env, firing, by, tz) {
     return { ok: false, why: 'late' };
   }
   const trashed = await env.DB.prepare(
-    "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$.id') = ? ORDER BY id DESC LIMIT 1"
-  ).bind(firing.chat_id, firing.reminder_id).first();
+    "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$._firing') = ? ORDER BY id DESC LIMIT 1"
+  ).bind(firing.chat_id, firing.id).first();
   if (!trashed) return { ok: false, why: 'gone' };
   const before = JSON.parse(trashed.payload);
   const later = await env.DB.prepare('SELECT 1 AS x FROM firings WHERE reminder_id = ? AND id > ?')
     .bind(firing.reminder_id, firing.id).first();
   if (later) return { ok: false, why: 'late' };
+  // Checked before the claim, which cannot be put back: a one-off done early
+  // is missing because that is what done early does to it, but a recurring
+  // chore that is missing was deleted since — and the delete's Undo, not this,
+  // is what brings it back.
+  const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  if (!r && before.schedule_kind !== 'once') return { ok: false, why: 'gone' };
   const claim = await env.DB.prepare(
     "DELETE FROM firings WHERE id = ? AND state = 'done' AND done_at = ?"
   ).bind(firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
-  const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (r) {
     await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at IS ?')
       .bind(before.next_fire_at, r.id, r.next_fire_at).run();
@@ -468,8 +485,31 @@ export async function undoEarly(env, firing, by, tz) {
   return { ok: true };
 }
 
-// Ends vacation mode: clears the flag, removes stale pre-vacation nags (and
-// their spent one-off reminders), rolls recurring schedules past the gap.
+// A one-off still nagging when vacation mode ends. A recurring chore's stale
+// nag can go — its next occurrence stands in for it — but a one-off has no
+// next occurrence, and wakeChat used to delete it along with its nag: an
+// overdue "renew passport" left on the board went with the holiday, no trash,
+// no word. So it stays, and its card, which read "Household paused", is put
+// back as what the firing now is. The holiday froze its clock rather than
+// excusing it: past its 24h it comes back as the quiet ⏰ card, no flood on
+// return. A chore paused on its own stays paused.
+async function keepOneOffNag(env, f, r, now, tz) {
+  if (r.paused) return showPausedCard(env, f, r, null, tz);
+  let firing = f;
+  if (isOverdue(f, now) && f.next_nag_at != null) {
+    const quiet = await env.DB.prepare(
+      "UPDATE firings SET next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
+    ).bind(f.id, f.next_nag_at).run();
+    if (!quiet.meta.changes) return;
+    firing = { ...f, next_nag_at: null };
+  }
+  const [html, markup] = firingCard(r, firing, tz, now);
+  await redrawNag(env, firing, html, markup);
+}
+
+// Ends vacation mode: clears the flag, removes stale pre-vacation nags of
+// recurring chores, keeps one-offs (keepOneOffNag), rolls recurring schedules
+// past the gap.
 export async function wakeChat(env, chatId, tz) {
   const now = Date.now();
   // The flag comes off LAST. Every reminder that came due during the holiday
@@ -481,13 +521,14 @@ export async function wakeChat(env, chatId, tz) {
     "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
   ).bind(chatId).all();
   for (const f of firings.results) {
+    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
+    if (r && r.schedule_kind === 'once') {
+      await keepOneOffNag(env, f, r, now, tz);
+      continue;
+    }
     if (f.last_message_id) await deleteNag(env, f);
     if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
     await env.DB.prepare('DELETE FROM firings WHERE id = ?').bind(f.id).run();
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
-    if (r && r.schedule_kind === 'once' && r.next_fire_at == null) {
-      await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-    }
   }
   const rems = await env.DB.prepare(
     "SELECT * FROM reminders WHERE chat_id = ? AND schedule_kind != 'once' AND next_fire_at IS NOT NULL AND next_fire_at <= ?"

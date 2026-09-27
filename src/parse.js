@@ -299,6 +299,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
       if (kind === 'interval' && detail.months) {
         detail.dom ??= fromDate ? fromDate.dom : localParts(nowMs, tz).d;
       }
+      // Rotation is set on the detail only once a time is found, below, so
+      // "/chore rotate dishes daily" reached the wizard without it and became
+      // a chore that never rotated.
+      if (rotate) detail.rotate = true;
       const err = new NoTimeError('missing time');
       err.partial = { text, assigneeName, assigneeUserId, nagIntervals, kind, detail };
       // A stated date survives a missing time: "13 sep lunch" knows the day,

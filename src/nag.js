@@ -76,12 +76,26 @@ export function firingCard(reminder, firing, tz, now = Date.now()) {
 
 // Keeps a reminder row for a day so a `t:` button, or an undone Done on a
 // one-off, can bring it back. Returns the trash id.
-export async function stashReminder(env, r) {
+//
+// A stash made by a completion carries the firing it completed (`_firing`),
+// and the undo looks for exactly that. Looking up the newest stash of the
+// chore instead found a later deletion's: ↩️ Not done then brought a deleted
+// chore back — a recurring one with nothing scheduled, for good — and took
+// the stash the delete's own Undo needed. restoreReminder names its columns,
+// so the marker never reaches a reminders row.
+export async function stashReminder(env, r, firingId = null) {
+  const payload = firingId ? { ...r, _firing: firingId } : r;
   const stash = await env.DB.prepare(
     'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
-  ).bind(r.chat_id, JSON.stringify(r), Date.now()).run();
+  ).bind(r.chat_id, JSON.stringify(payload), Date.now()).run();
   return stash.meta.last_row_id;
 }
+
+// The codes snoozeButtons offers, and the only ones a z: tap may carry.
+// Callback data is not bound to its button: "z:5:abc" burned a snooze, wrote
+// NaN into next_nag_at — a nag that never came back — and threw before the
+// card was redrawn.
+export const SNOOZE_CODES = ['30', '60', '120', 't', 'day', 'b'];
 
 export function snoozeButtons(firingId, tz) {
   const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
@@ -212,9 +226,11 @@ export async function showPausedCard(env, firing, reminder, by, tz, until = null
   if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
   await env.DB.prepare('UPDATE firings SET last_sticker_id = NULL WHERE id = ?').bind(firing.id).run();
   if (!firing.last_message_id) return;
+  // No name when nobody on hand knows it: a chore's own pause, redrawn when
+  // vacation mode ends over the top of it, was set by whoever it was.
   const state = until
     ? `Household paused until ${fmtLocal(until, tz)}.`
-    : `Paused by ${esc(by)}.`;
+    : by ? `Paused by ${esc(by)}.` : 'Paused.';
   await editNag(env, firing, `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, emptyKeyboard());
 }
 
@@ -260,7 +276,7 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // A finished one-off goes to the trash rather than straight out, so that
   // ↩️ Not done can bring it back for as long as the trash keeps it.
   if (reminder.schedule_kind === 'once') {
-    await stashReminder(env, reminder);
+    await stashReminder(env, reminder, firing.id);
     await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
   }
   await updateDashboard(env, firing.chat_id);

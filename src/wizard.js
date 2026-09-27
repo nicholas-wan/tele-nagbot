@@ -3,12 +3,11 @@
 // Handles the w: callbacks and the typed custom-time replies.
 
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
-         answerCallback, isPublicMessage, keepSourceMessage } from './tg.js';
+         answerCallback, isPublicMessage, keepSourceMessage, okButton } from './tg.js';
 import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, fmtTime, DAY_NAMES } from './time.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName, nicknames } from './household.js';
-import { emptyKeyboard } from './nag.js';
 import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
 
 // Bare /chore or /remind — the "/" autocomplete menu sends the command with
@@ -63,8 +62,11 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
       return startWizard(env, ctx, err.partial, msg.text, tz, scored, sourceMsgId);
     }
     // An unusable reply keeps the draft alive — replying to the prompt again
-    // gets another try.
-    if (err instanceof ParseError) return sendPrivate(env, ctx, esc(err.message));
+    // gets another try. The reply itself stays on show to be copied and
+    // fixed, and the refusal's OK takes it away, as a confirmation's does.
+    if (err instanceof ParseError) {
+      return sendPrivate(env, ctx, esc(err.message), { inline_keyboard: [[okButton(sourceMsgId)]] });
+    }
     throw err;
   }
   p.scored = scored;
@@ -195,19 +197,23 @@ function anchoredFirstFire(startDate, kind, detail, now, tz) {
   return next != null ? next : at;
 }
 
+// "rotate" rides in the draft's detail. A schedule rebuilt from a preset, the
+// AI's guess or a typed time starts from a fresh detail, and dropped it.
+const keepRotate = (detail, draftDetail) => (draftDetail.rotate ? { ...detail, rotate: true } : detail);
+
 function scheduleFromCode(code, draft, now, tz) {
   const kind = draft.schedule_kind;
   const { detail, startDate } = draftSchedule(draft);
   const absolute = code.match(/^a(\d+)$/);
   if (absolute) {
     const firstFireAt = +absolute[1];
-    return firstFireAt > now ? { kind: 'once', detail: {}, firstFireAt } : null;
+    return firstFireAt > now ? { kind: 'once', detail: keepRotate({}, detail), firstFireAt } : null;
   }
   if (code === 'r15' || code === 'r60') {
-    return { kind: 'once', detail: {}, firstFireAt: now + (code === 'r15' ? 15 : 60) * 60000 };
+    return { kind: 'once', detail: keepRotate({}, detail), firstFireAt: now + (code === 'r15' ? 15 : 60) * 60000 };
   }
   if (code === 'd19') {
-    const d = { h: 19, mi: 0 };
+    const d = keepRotate({ h: 19, mi: 0 }, detail);
     return { kind: 'daily', detail: d, firstFireAt: nextOccurrence('daily', d, now, tz) };
   }
   const hm = code.match(/^h(\d+)$/);
@@ -319,6 +325,7 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
   if (startDate && parsed.detail.h != null) {
     firstFireAt = anchoredFirstFire(startDate, kind, detail, now, tz);
   }
+  detail = keepRotate(detail, draftDetail);
   const p = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
     nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt, scored: draft.scored,
@@ -360,8 +367,12 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already closed.');
     const promptRef = draftRef(draft, 'prompt');
     if (promptRef) await deleteRef(env, ctx, draft.chat_id, promptRef);
+    // Cancel is often "that's not what I meant", so the command stays to be
+    // copied back, like Undo leaves it; this OK is what then clears both. The
+    // cancelled line used to have no buttons at all, and the command it kept
+    // had no way out but the daily sweep.
     await editRef(env, ctx, draft.chat_id, ref,
-      `✕ Cancelled <s>${esc(draft.text)}</s>`, emptyKeyboard());
+      `✕ Cancelled <s>${esc(draft.text)}</s>`, { inline_keyboard: [[okButton(draft.source_msg_id)]] });
     return answerCallback(env, cb.id, 'Cancelled');
   }
   if (wiz[2] === 'custom') {
@@ -399,7 +410,7 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
       : ai.kind === 'interval'
         ? nextOccurrence('daily', { h: ai.detail.h, mi: ai.detail.mi }, Date.now(), tz)
         : nextOccurrence(ai.kind, ai.detail, Date.now(), tz);
-    sched = { kind: ai.kind, detail: ai.detail, firstFireAt };
+    sched = { kind: ai.kind, detail: keepRotate(ai.detail, draftSchedule(draft).detail), firstFireAt };
   } else {
     if (!codeOffered(wiz[2], draft)) return answerCallback(env, cb.id, 'That option is not on this menu.');
     sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);

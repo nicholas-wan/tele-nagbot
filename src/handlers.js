@@ -14,7 +14,7 @@ import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          overdueHtml, overdueButtons, firingCard,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          isHouseholdDeferred, isOverdue, nagBelongsTo,
-         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS } from './nag.js';
+         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES } from './nag.js';
 import { updateDashboard, choreListHtml } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
@@ -171,8 +171,10 @@ export async function handleUpdate(env, update) {
   // never public and carries message_id 0, so there is nothing to delete —
   // guard rather than calling deleteMessage(0). A /chore or /remind is the
   // exception: it stays until its confirmation's ✅ OK, so a misread one can be
-  // checked against and copied (cmdRemind).
-  const tidy = cmd !== 'start' && cmd !== 'help' && !KEEP_UNTIL_OK.has(cmd) && isPublicMessage(msg);
+  // checked against and copied (cmdRemind). /help and /start once stayed too,
+  // beside a public help reply; the reply is private now, so the command was
+  // the only trace left in the group — never deleted, and never swept.
+  const tidy = !KEEP_UNTIL_OK.has(cmd) && isPublicMessage(msg);
   try {
     let result;
     let handled = true;
@@ -252,6 +254,17 @@ async function dismissKept(env, chatId, messageId) {
 // The firings a digest is about: every id its ✅ and ↩️ buttons still carry,
 // so a redraw keeps the same set — nothing that fires later joins a digest
 // about yesterday, and a chore just un-done stays on it to be finished again.
+// The command a confirmation kept on show, read off the confirmation's own
+// OK (okButton). Undo leaves the command standing — the parse was wrong and
+// the text is about to be needed — and the lines that replace the
+// confirmation carry the id on, so their OK still clears it once it has been
+// copied. Rewritten without it, the command had no way out but the sweep.
+function keptSourceId(cb) {
+  const rows = (cb.message.reply_markup && cb.message.reply_markup.inline_keyboard) || [];
+  const hit = rows.flat().map((b) => String(b.callback_data || '').match(/^ok:([0-9]+)$/)).find(Boolean);
+  return hit ? +hit[1] : null;
+}
+
 function digestIds(cb, tapped) {
   const rows = (cb.message.reply_markup && cb.message.reply_markup.inline_keyboard) || [];
   const carried = rows.flat().map((b) => String(b.callback_data || '').match(/^(?:dg|nd):([0-9]+)$/))
@@ -317,6 +330,13 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
     p = parseRemind(args, msg.text, msg.entities, now, tz, nicknames(env));
   } catch (err) {
     if (err instanceof NoTimeError) return startWizard(env, ctx, err.partial, args, tz, scored, sourceMsgId);
+    // A refused chore is the misread one most worth copying back and fixing,
+    // so its command stays too — and the refusal's OK takes it away, as a
+    // confirmation's does. The dispatcher's plain OK could not, which left the
+    // command standing until the daily sweep.
+    if (err instanceof ParseError) {
+      return sendPrivate(env, ctx, esc(err.message), { inline_keyboard: [[okButton(sourceMsgId)]] });
+    }
     throw err;
   }
   p.scored = scored;
@@ -511,7 +531,8 @@ async function cmdDelete(env, ctx, args, by) {
 
 // Vacation mode: "/pause all 14" mutes everything for N days (auto-resumes),
 // "/resume all" ends it early. Wake-up rolls recurring chores to their next
-// natural slot and quietly clears pre-vacation nags — no flood on return.
+// natural slot and quietly clears their pre-vacation nags — no flood on
+// return — while a one-off's nag is kept, since nothing else stands in for it.
 async function cmdPauseResumeAll(env, ctx, args, tz, pause) {
   const chatId = ctx.chatId;
   if (!pause) {
@@ -687,7 +708,7 @@ async function handleCallback(env, cb) {
     const trashId = await removeReminder(env, r);
     await editRef(env, ctx, r.chat_id, ref, `↩️ Undone — <s>${esc(r.text)}</s>`, { inline_keyboard: [[
       { text: '↩️ Restore', callback_data: `t:${trashId}` },
-      { text: '✅ OK', callback_data: 'ok' },
+      okButton(keptSourceId(cb)),
     ]] });
     await updateDashboard(env, r.chat_id);
     return answerCallback(env, cb.id, 'Undone');
@@ -804,7 +825,9 @@ async function handleCallback(env, cb) {
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already restored.');
     await restoreReminder(env, r);
     await updateDashboard(env, r.chat_id);
-    await editRef(env, ctx, r.chat_id, ref, `↩️ Restored <b>${esc(r.text)}</b>`);
+    // An OK to put the line away — and, after an Undo, the command it kept.
+    await editRef(env, ctx, r.chat_id, ref, `↩️ Restored <b>${esc(r.text)}</b>`,
+      { inline_keyboard: [[okButton(keptSourceId(cb))]] });
     return answerCallback(env, cb.id, 'Restored 😺');
   }
 
@@ -862,6 +885,7 @@ async function handleCallback(env, cb) {
   // Snooze preset picked (or Back to the main buttons).
   const zm = data.match(/^z:(\d+):(\w+)$/);
   if (zm) {
+    if (!SNOOZE_CODES.includes(zm[2])) return answerCallback(env, cb.id, 'That option is not on this menu.');
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
       .bind(+zm[1], cb.message.chat.id).first();
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
