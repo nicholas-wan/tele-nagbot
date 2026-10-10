@@ -207,6 +207,27 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     args = args.replace(monthlyM[0], ' ');
   }
 
+  // A weekday named alongside an "every N weeks|days" cadence is the day it
+  // starts on, as "from saturday" already was: "neakasa every 6 weeks
+  // saturday 9pm" became a chore called "neakasa saturday" whose first nag —
+  // and so every one after it — fell on whatever day the next 9pm did. "on
+  // sat" counts anywhere, and so does a full day name, which is not chore
+  // text in practice; a bare abbreviation only right after the cadence, since
+  // "sun" and "sat" are ordinary words elsewhere.
+  if (kind === 'interval' && fromDay == null && !fromDate) {
+    const anchorM = args.match(new RegExp(`\\bon\\s+(${DAY_WORD})s?\\b`, 'i'))
+      || args.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b/i)
+      || (intervalM && intervalM.input.slice(intervalM.index + intervalM[0].length)
+        .match(new RegExp(`^\\s+(${DAY_WORD})\\b`, 'i')));
+    if (anchorM) {
+      fromDay = DAY_INDEX[anchorM[1].slice(0, 3).toLowerCase()];
+      // The trailing-abbreviation form was matched on the original text; the
+      // word itself is what has to leave the title.
+      args = anchorM.input === args ? args.replace(anchorM[0], ' ')
+        : args.replace(new RegExp(`\\b${anchorM[1]}\\b`, 'i'), ' ');
+    }
+  }
+
   // Relative one-off in words: "in an hour", "in half an hour".
   const relWordM = args.match(/\bin\s+(half\s+an?|an?)\s+hour\b/i);
   if (relWordM && kind === 'once') {

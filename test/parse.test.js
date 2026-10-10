@@ -427,3 +427,47 @@ describe('assignee nicknames', () => {
     }
   });
 });
+
+// "/chore neakasa every 6 weeks saturday 9pm" (10 Oct 2026) became a chore
+// named "neakasa saturday" whose first nag fell on the next 9pm — a Sunday —
+// and every 42 days after. A weekday beside an "every N weeks|days" cadence
+// is its start day, as "from saturday" already was.
+describe('a weekday beside an every-N cadence', () => {
+  const now = Date.UTC(2026, 9, 10, 14, 47); // Sat 10 Oct 2026, 22:47 SGT
+  const p = (s) => parseRemind(s, `/chore ${s}`, [], now, 'Asia/Singapore');
+  const sgt = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(0, 16);
+
+  it.each([
+    'neakasa every 6 weeks saturday 9pm',
+    'neakasa every 6 weeks on saturday 9pm',
+    'neakasa every 6 weeks on saturdays 9pm',
+    'neakasa every 6 weeks sat 9pm',
+    'neakasa every 6 weeks on sat 9pm',
+    'neakasa every 6 weeks 9pm saturday',
+    'neakasa on saturday every 6 weeks 9pm',
+  ])('%s', (s) => {
+    const r = p(s);
+    expect(r.text).toBe('neakasa');
+    expect(r.kind).toBe('interval');
+    expect(r.detail).toMatchObject({ days: 42, h: 21, mi: 0 });
+    expect(sgt(r.firstFireAt)).toBe('2026-10-17T21:00');
+  });
+
+  it('works for day counts too', () => {
+    expect(sgt(p('water every 10 days friday 8am').firstFireAt)).toBe('2026-10-16T08:00');
+  });
+
+  it('leaves an abbreviation that is ordinary chat text alone', () => {
+    const r = p('wipe sun visor every 2 weeks 9am');
+    expect(r.text).toBe('wipe sun visor');
+    expect(sgt(r.firstFireAt)).toBe('2026-10-11T09:00');
+  });
+
+  it('keeps the start day when the time is left for the wizard', () => {
+    try { p('neakasa every 6 weeks saturday'); throw new Error('parsed'); }
+    catch (e) {
+      expect(e).toBeInstanceOf(NoTimeError);
+      expect(e.partial).toMatchObject({ text: 'neakasa', kind: 'interval', startDay: 6 });
+    }
+  });
+});
