@@ -95,7 +95,11 @@ export async function stashReminder(env, r, firingId = null) {
 // Callback data is not bound to its button: "z:5:abc" burned a snooze, wrote
 // NaN into next_nag_at — a nag that never came back — and threw before the
 // card was redrawn.
-export const SNOOZE_CODES = ['30', '60', '120', 't', 'day', 'b'];
+export const SNOOZE_CODES = ['30', '60', '120', 't', 'day', 'w1', 'w2', 'b'];
+
+// The postponements, in days: moves past the 24h window that carry fired_at
+// (and so the expiry) forward with the nag, rather than snoozes inside it.
+export const POSTPONE_DAYS = { day: 1, w1: 7, w2: 14 };
 
 export function snoozeButtons(firingId, tz) {
   const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
@@ -104,6 +108,7 @@ export function snoozeButtons(firingId, tz) {
     inline_keyboard: [
       [z('30m', '30'), z('1h', '60'), z('2h', '120')],
       [z(fmtShort(nine, tz), 't'), z('📅 Tomorrow', 'day')],
+      [z('📅 1 week', 'w1'), z('📅 2 weeks', 'w2')],
       [z('↩️ Back', 'b')],
     ],
   };

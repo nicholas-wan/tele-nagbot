@@ -4,6 +4,9 @@
 import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage, messageIsGone } from './tg.js';
 import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './time.js';
 import { isScored } from './household.js';
+// A function declaration, so the import cycle with nag.js (which refreshes the
+// board) resolves at call time rather than at load.
+import { isHouseholdDeferred } from './nag.js';
 
 export function dashboardButtons() {
   return { inline_keyboard: [[{ text: '⚙️ Manage chores', callback_data: 'm:list' }]] };
@@ -107,18 +110,26 @@ export async function choreListHtml(env, chatId, tz) {
   if (!results.length) return null;
   const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
   const live = (await env.DB.prepare(
-    "SELECT reminder_id, next_nag_at FROM firings WHERE chat_id = ? AND state = 'nagging'"
+    "SELECT reminder_id, fired_at, next_nag_at, snoozed_until FROM firings WHERE chat_id = ? AND state = 'nagging'"
   ).bind(chatId).all()).results;
   const nagging = new Set(live.map((f) => f.reminder_id));
   const overdue = new Set(live.filter((f) => f.next_nag_at === null).map((f) => f.reminder_id));
+  // Parked by the household — snoozed, or postponed up to two weeks — and
+  // keyed to when it comes back. "🔔 nagging now" for a fortnight said the
+  // opposite of what was chosen.
+  const parked = new Map(live.filter((f) => isHouseholdDeferred(f))
+    .map((f) => [f.reminder_id, f.next_nag_at ?? f.fired_at]));
   const lines = ['🐾 <b>Chores</b>'];
   if (st && st.paused_until && st.paused_until > Date.now()) {
     lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
   }
-  // Nagging first, then upcoming soonest-first, paused last.
-  const rank = (r) => r.paused ? 2 : (nagging.has(r.id) || !r.next_fire_at) ? 0 : 1;
+  // Nagging first, then upcoming soonest-first (a parked chore by its return),
+  // paused last.
+  const rank = (r) => r.paused ? 2 : parked.has(r.id) ? 1
+    : (nagging.has(r.id) || !r.next_fire_at) ? 0 : 1;
+  const when = (r) => parked.get(r.id) ?? r.next_fire_at ?? 0;
   results.sort((a, b) => rank(a) - rank(b)
-    || (a.next_fire_at || 0) - (b.next_fire_at || 0)
+    || when(a) - when(b)
     || a.display_num - b.display_num);
   // Two short lines per chore — when, then what — so nothing wraps on a phone
   // (squashbot's board layout). "once" says nothing a missing cadence doesn't.
@@ -127,6 +138,7 @@ export async function choreListHtml(env, chatId, tz) {
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const lead = r.paused ? '⏸️ paused'
       : r.schedule_kind === 'once' && overdue.has(r.id) ? '⏰ overdue'
+      : parked.has(r.id) ? `😴 ${fmtWhen(parked.get(r.id), tz)}`
       : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
       : fmtWhen(r.next_fire_at, tz);
     const each = cadence(r);

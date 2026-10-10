@@ -14,11 +14,11 @@ import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
          overdueHtml, overdueButtons, firingCard,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          isHouseholdDeferred, isOverdue, nagBelongsTo,
-         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES } from './nag.js';
+         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
 import { updateDashboard, choreListHtml } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
-         setReminderPaused, completeEarly, wakeChat } from './chores.js';
+         setReminderPaused, completeEarly, wakeChat, skipPastPostponement } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats, handleStatsCallback } from './stats.js';
@@ -489,6 +489,7 @@ async function handleNagReply(env, msg, firing, ctx) {
        WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
     ).bind(until, until, senderName(msg.from), firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return sendPrivate(env, ctx, '😼 That one was already handled.');
+    await updateDashboard(env, firing.chat_id); // the board shows it parked
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
       await editNag(env, firing,
@@ -919,9 +920,11 @@ async function handleCallback(env, cb) {
     // this expires". Carrying fired_at forward moves the expiry window with the
     // nag, so the chore survives the night and still gets its own 24h once it
     // comes back. Asia/Singapore has no DST, so +24h is the same clock time.
-    const postpone = zm[2] === 'day';
+    // 📅 1 week and 📅 2 weeks are the same move, further out.
+    const days = POSTPONE_DAYS[zm[2]];
+    const postpone = days != null;
     const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
-    let until = postpone ? deferQuietHours(Date.now() + 86400000, tz)
+    let until = postpone ? deferQuietHours(Date.now() + days * 86400000, tz)
       : zm[2] === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
     const capped = !postpone && until >= expiresAt;
@@ -940,11 +943,17 @@ async function handleCallback(env, cb) {
       ).bind(until, until, by, firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
     const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+    // Tomorrow keeps its old rule (the next occurrence, if it comes first,
+    // supersedes it); a week or two out moves the schedule past it.
+    const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, until, tz) : 0;
     if (reminder && firing.last_message_id) {
       await editNag(env, firing, snoozedHtml(reminder, until, by, tz), snoozedButtons(firing.id, isScored(firing)));
     }
+    // The board shows a parked chore by when it comes back.
+    await updateDashboard(env, firing.chat_id);
     if (postpone) {
-      return answerCallback(env, cb.id, `Postponed to ${fmtShort(until, tz)} 📅`);
+      return answerCallback(env, cb.id, `Postponed to ${fmtShort(until, tz)} 📅` +
+        (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : ''));
     }
     return answerCallback(env, cb.id,
       `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);

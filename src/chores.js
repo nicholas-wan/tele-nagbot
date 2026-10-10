@@ -235,6 +235,26 @@ export async function undoCompletion(env, firing, by, tz) {
   return { ok: true };
 }
 
+// A postponement a week or more out usually crosses the chore's next
+// occurrence, and fireReminder drops a postponed nag as superseded when that
+// occurrence arrives first — so "📅 2 weeks" on a weekly chore would have
+// meant one week, on the old schedule. The schedule moves past it instead:
+// every occurrence up to the postponed nag is skipped, the next one lands
+// after it. Compare-and-swap like every other move of next_fire_at; a fire
+// that wins the race just means nothing was skipped. Returns how many were.
+export async function skipPastPostponement(env, r, until, tz) {
+  if (r.schedule_kind === 'once' || r.next_fire_at == null || r.next_fire_at > until) return 0;
+  const detail = JSON.parse(r.schedule_detail);
+  const next = advanceOccurrence(r.schedule_kind, detail, r.next_fire_at, until, tz);
+  if (next == null) return 0;
+  let skipped = 0;
+  for (let t = r.next_fire_at; t != null && t <= until && skipped < 100;
+    t = nextOccurrence(r.schedule_kind, detail, t, tz)) skipped++;
+  const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+    .bind(next, r.id, r.next_fire_at).run();
+  return res.meta.changes ? skipped : 0;
+}
+
 export async function deleteReminder(env, r, ctx = null, by = null) {
   const chatId = r.chat_id;
   const trashId = await removeReminder(env, r);
