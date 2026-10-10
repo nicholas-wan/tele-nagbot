@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
 import { choreListHtml } from '../src/dashboard.js';
+import { renagPending } from '../src/cron.js';
 import { d1 } from './d1.js';
 
 const TZ = 'Asia/Singapore';
@@ -130,5 +131,66 @@ describe('the board', () => {
   it('still shows an ordinary pending re-nag as nagging', async () => {
     seedChore(); seedNag();
     expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging now');
+  });
+});
+
+// OK on the 😴 card (10 Oct 2026): the card a snooze leaves is still the
+// firing's live card, so the sweep spares it, and it had no way to be put away
+// — for a two-week postponement, two weeks in the chat.
+describe('✅ OK on a snoozed card', () => {
+  const tapOn = (data, message_id) => handleUpdate(env, { callback_query: {
+    id: 'tap', data, from: nick, message: { chat: { id: 1 }, message_id, text: '😴 cat fountain' },
+  } });
+  const deletedMsg = (id) => calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === id);
+
+  it('is on the card a snooze draws', async () => {
+    seedChore(); seedNag();
+    await tap('z:5:w1');
+    const card = calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 700);
+    expect(card.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data)).toContain('zh:5');
+  });
+
+  it('puts the card away and leaves the chore parked', async () => {
+    seedChore(); seedNag();
+    await tap('z:5:w1');
+    await tapOn('zh:5', 700);
+    expect(deletedMsg(700)).toBe(true);
+    expect(firing()).toMatchObject({ state: 'nagging', last_message_id: null, next_nag_at: NOW + 7 * DAY });
+    expect(toast()).toBe('Hidden — back Oct 17, 7:30 PM 😴');
+  });
+
+  it('gets a fresh nag when the snooze is up', async () => {
+    seedChore(); seedNag();
+    await tap('z:5:30');
+    await tapOn('zh:5', 700);
+    calls.length = 0;
+    await renagPending(env, NOW + 31 * 60000);
+    expect(calls.some((c) => c.url.endsWith('/sendMessage') && /^🐱 <b>cat fountain/.test(c.body.text))).toBe(true);
+    expect(firing().last_message_id).toBe(99);
+  });
+
+  it('still leaves a receipt when the hidden chore is finished from the board', async () => {
+    seedChore(); seedNag();
+    await tap('z:5:w1');
+    await tapOn('zh:5', 700);
+    calls.length = 0;
+    await tapOn('m:done:8', 99);
+    expect(firing().state).toBe('done');
+    expect(calls.some((c) => c.url.endsWith('/sendMessage') && /done by @nicholaswan/.test(c.body.text))).toBe(true);
+  });
+
+  it('just removes an old card the firing has moved on from', async () => {
+    seedChore(); seedNag({ snoozed_until: NOW + HOUR, next_nag_at: NOW + HOUR });
+    await tapOn('zh:5', 650);
+    expect(deletedMsg(650)).toBe(true);
+    expect(firing().last_message_id).toBe(700);
+  });
+
+  it('refuses on a card whose snooze is already spent', async () => {
+    seedChore(); seedNag();
+    await tapOn('zh:5', 700);
+    expect(toast()).toBe('Not snoozed any more — Done or snooze it again');
+    expect(deletedMsg(700)).toBe(false);
+    expect(firing().last_message_id).toBe(700);
   });
 });

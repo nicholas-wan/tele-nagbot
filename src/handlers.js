@@ -861,6 +861,34 @@ async function handleCallback(env, cb) {
   // the method from the ref rather than assuming a public message id. An OK
   // that names a source message is a chore confirmation: the command it was
   // typed in was kept on show for exactly this tap, and goes with it.
+  // OK on a 😴 card: put it away while the chore stays parked. The firing lets
+  // go of the card first (bound to the card it holds, so a re-nag that got
+  // there first keeps its own), and the cron sends a fresh nag when the snooze
+  // is up. A card that is no longer the firing's own just goes.
+  const zh = data.match(/^zh:([0-9]+)$/);
+  if (zh) {
+    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
+      .bind(+zh[1], cb.message.chat.id).first();
+    if (firing && !nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
+    const ownCard = firing && firing.state === 'nagging' && ref
+      && firing.last_message_id === ref.id && Boolean(firing.last_message_ephemeral) === ref.ephemeral;
+    if (ownCard && !isHouseholdDeferred(firing)) {
+      return answerCallback(env, cb.id, 'Not snoozed any more — Done or snooze it again');
+    }
+    if (ownCard) {
+      const release = await env.DB.prepare(
+        `UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0, last_sticker_id = NULL
+         WHERE id = ? AND state = 'nagging' AND last_message_id = ? AND last_message_ephemeral = ?`
+      ).bind(firing.id, ref.id, ref.ephemeral ? 1 : 0).run();
+      if (!release.meta.changes) return answerCallback(env, cb.id, 'Already moved on 👍');
+      if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
+    }
+    await deleteRef(env, ctx, cb.message.chat.id, ref);
+    if (!ownCard) return answerCallback(env, cb.id, '');
+    const tz = await getTz(env, firing.chat_id);
+    return answerCallback(env, cb.id, `Hidden — back ${fmtShort(firing.next_nag_at, tz)} 😴`);
+  }
+
   const okm = data.match(/^ok(?::(\d+))?$/);
   if (okm) {
     if (okm[1]) await dismissKept(env, cb.message.chat.id, +okm[1]);

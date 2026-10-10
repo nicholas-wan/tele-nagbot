@@ -33,7 +33,14 @@ export function snoozedButtons(firingId, scored = true) {
       { text: '🤝 Done together', callback_data: `b:${firingId}` },
       { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
     ],
-    [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
+    [
+      { text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` },
+      // Puts the 😴 card away while the chore stays parked (zh: in handlers).
+      // It is still the firing's live card, so the daily sweep spares it — a
+      // two-week postponement left it in the chat for two weeks with nothing
+      // to dismiss it by. The nag comes back as a fresh card when it is due.
+      { text: '✅ OK', callback_data: `zh:${firingId}` },
+    ],
   ] };
 }
 
@@ -275,7 +282,9 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   }
   // A privately-nagged chore leaves a quiet public receipt: the household still
   // gets to see the chore was done, just not that it was pending.
-  if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id) {
+  // So does one with no card left to edit — a parked chore whose 😴 card was
+  // put away with OK, then finished from the board.
+  if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
     await sendMessage(env, firing.chat_id,
       `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, receiptButtons(firing.id),
       { silent: true, ttl: RECEIPT_TTL_MS });
