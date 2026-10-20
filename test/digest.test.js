@@ -72,9 +72,11 @@ describe('the 8am digest', () => {
     await tap('dg:5', markup);
     expect(firing(5)).toMatchObject({ state: 'done', done_by: '@nicholaswan' });
     expect(firing(6)).toMatchObject({ state: 'nagging' });
-    // A one-off is spent; the private nag card is redrawn as a receipt.
+    // A one-off is spent; the private nag card is put away, since the public
+    // receipt says it to everyone, the doer included.
     expect(sql.prepare('SELECT id FROM reminders WHERE id = 10').get()).toBeUndefined();
-    expect(calls.some((c) => c.url.endsWith('/editEphemeralMessageText') && c.body.ephemeral_message_id === 777)).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/deleteEphemeralMessage') && c.body.ephemeral_message_id === 777)).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/editEphemeralMessageText'))).toBe(false);
     const redraw = calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 99);
     expect(redraw.body.text).toContain('<b>clear poop</b>');
     // The finished one stays on as a struck line with its way back.

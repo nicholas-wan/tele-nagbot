@@ -158,17 +158,27 @@ describe('↩️ Not done', () => {
     expect(toast()).toBe('Nothing to take back.');
   });
 
+  // The doer used to get two receipts for one Done: their private card turned
+  // into one, and the public one landed under it (20 Oct 2026). The card now
+  // goes, and the public receipt's ↩️ Not done sends them a fresh private nag.
   it('sits on the public receipt of a private nag, which then says so', async () => {
     seedReminder({ assignee_name: '@nicholaswan' });
     seedFiring({ nag_user_id: 2, last_message_ephemeral: 1, last_message_id: 777 });
     await tap('d:5');
+    expect(calls.some((c) => c.url.endsWith('/deleteEphemeralMessage') && c.body.ephemeral_message_id === 777)).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/editEphemeralMessageText'))).toBe(false);
+    expect(firing(5)).toMatchObject({ last_message_id: null, last_message_ephemeral: 0 });
     const receipt = sent(/done by @nicholaswan/)[0];
+    expect(receipt.body.text).toContain('done by @nicholaswan at 2:00 PM. The cats purr approvingly.');
+    expect(receipt.body.receiver_user_id).toBeUndefined();
     expect(buttons(receipt.body.reply_markup)).toEqual(['nd:5', 'ok']);
     calls.length = 0;
     await tap('nd:5', { text: receipt.body.text, message_id: 99 });
     expect(firing(5).state).toBe('nagging');
     expect(edits(99)[0].body.text).toContain('not done after all');
-    expect(calls.some((c) => c.url.endsWith('/editEphemeralMessageText') && c.body.ephemeral_message_id === 777)).toBe(true);
+    const renag = calls.find((c) => c.url.endsWith('/sendMessage') && c.body.receiver_user_id === 2);
+    expect(renag.body.text).toContain('clear poop');
+    expect(buttons(renag.body.reply_markup)).toContain('d:5');
   });
 });
 

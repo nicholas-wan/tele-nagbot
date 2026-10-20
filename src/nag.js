@@ -266,10 +266,20 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
     : 'The cats purr approvingly.';
-  if (firing.last_message_id) {
+  const when = `${fmtClock(now, tz)}. ${purr}`;
+  if (isEphemeralNag(firing)) {
+    // A private nag's card is put away, not turned into a receipt: the public
+    // receipt below tells the whole household, and the one who did the chore
+    // was seeing both (20 Oct 2026). Forgetting the card is what lets ↩️ Not
+    // done on that receipt send them a fresh private nag (see redrawNag).
+    await deleteNag(env, firing);
+    await env.DB.prepare(
+      'UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0 WHERE id = ? AND last_message_id = ?'
+    ).bind(firing.id, firing.last_message_id).run();
+  } else if (firing.last_message_id) {
     // A receipt lives two hours; the clock time is all it needs.
     await editNag(env, firing,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${fmtClock(now, tz)}. ${purr}`,
+      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}`,
       receiptButtons(firing.id));
     // The nag earned a day; its receipt only needs to be glanced at.
     await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
@@ -280,7 +290,7 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // put away with OK, then finished from the board.
   if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
     await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)}.`, receiptButtons(firing.id),
+      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}`, receiptButtons(firing.id),
       { silent: true, ttl: RECEIPT_TTL_MS });
   }
   // A finished one-off goes to the trash rather than straight out, so that
