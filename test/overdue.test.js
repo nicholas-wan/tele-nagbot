@@ -48,7 +48,7 @@ it('keeps a one-off overdue across cron ticks without failure notices or repeate
   await renagPending(env, NOW);
   expect(reminder()).toBeTruthy();
   expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: null });
-  expect(await choreListHtml(env, 1, 'Asia/Singapore')).toContain('⏰ overdue');
+  expect(await choreListHtml(env, 1, 'Asia/Singapore')).toContain('⏰ overdue · nagging since yesterday 1:00 PM');
   expect(calls.some(c => c.url.endsWith('/sendMessage'))).toBe(false);
   calls.length = 0;
   await renagPending(env, NOW + 86400000);

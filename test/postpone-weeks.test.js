@@ -130,7 +130,14 @@ describe('the board', () => {
 
   it('still shows an ordinary pending re-nag as nagging', async () => {
     seedChore(); seedNag();
-    expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging now');
+    expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging since today 6:30 PM');
+  });
+
+  // 20 Oct 2026: the board said "nagging now" whether a chore had nagged for
+  // ten minutes or two days. It now says when it first fired.
+  it('says when a nagging chore first fired, looking back past today', async () => {
+    seedChore(); seedNag({ fired_at: NOW - 20 * HOUR });
+    expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging since yesterday 11:30 PM');
   });
 });
 

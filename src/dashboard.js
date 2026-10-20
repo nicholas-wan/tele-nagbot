@@ -86,6 +86,18 @@ export function fmtWhen(ms, tz) {
   return `in ${days} days · ${when}`;
 }
 
+// fmtWhen looking back: "today 9:00 AM" / "yesterday 11:00 PM" /
+// "Sun 11:00 PM" / "Oct 3, 7:00 PM".
+export function fmtSince(ms, tz) {
+  const time = fmtClock(ms, tz);
+  const t = localParts(ms, tz);
+  const n = localParts(Date.now(), tz);
+  const days = Math.round((Date.UTC(n.y, n.mo - 1, n.d) - Date.UTC(t.y, t.mo - 1, t.d)) / 86400000);
+  if (days <= 0) return `today ${time}`;
+  if (days === 1) return `yesterday ${time}`;
+  return days < 7 ? `${DAY_NAMES[t.wd]} ${time}` : fmtShort(ms, tz);
+}
+
 // Every management button carries the chore's own identity — name plus when —
 // because the pinned board's text never changes while you navigate. Internal
 // numbers stay out of labels; the name is the handle everywhere else too.
@@ -114,6 +126,13 @@ export async function choreListHtml(env, chatId, tz) {
   ).bind(chatId).all()).results;
   const nagging = new Set(live.map((f) => f.reminder_id));
   const overdue = new Set(live.filter((f) => f.next_nag_at === null).map((f) => f.reminder_id));
+  // When each live chore first nagged, so the board says how long it has been
+  // hanging rather than just that it is.
+  const since = new Map();
+  for (const f of live) {
+    if (!since.has(f.reminder_id) || f.fired_at < since.get(f.reminder_id)) since.set(f.reminder_id, f.fired_at);
+  }
+  const sinceText = (r) => (since.has(r.id) ? ` since ${fmtSince(since.get(r.id), tz)}` : '');
   // Parked by the household — snoozed, or postponed up to two weeks — and
   // keyed to when it comes back. "🔔 nagging now" for a fortnight said the
   // opposite of what was chosen.
@@ -137,9 +156,10 @@ export async function choreListHtml(env, chatId, tz) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const lead = r.paused ? '⏸️ paused'
-      : r.schedule_kind === 'once' && overdue.has(r.id) ? '⏰ overdue'
+      : r.schedule_kind === 'once' && overdue.has(r.id) ? `⏰ overdue · nagging${sinceText(r)}`
       : parked.has(r.id) ? `😴 ${fmtWhen(parked.get(r.id), tz)}`
-      : nagging.has(r.id) || !r.next_fire_at ? '🔔 nagging now'
+      : nagging.has(r.id) ? `🔔 nagging${sinceText(r)}`
+      : !r.next_fire_at ? '🔔 nagging now'
       : fmtWhen(r.next_fire_at, tz);
     const each = cadence(r);
     lines.push('');
