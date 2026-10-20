@@ -92,7 +92,7 @@ describe('every card state carries the reminder marker and the snoozer', () => {
     const card = edits(700)[0];
     expect(card.body.text).toMatch(/^⏰/);
     expect(card.body.text).toContain('(reminder — no points)');
-    expect(buttons(card.body.reply_markup)).toEqual(['d:5', 'b:5', 'x:5']);
+    expect(buttons(card.body.reply_markup)).toEqual(['d:5', 'b:5', 's:5', 'x:5']);
   });
 
   it('↩️ Back goes by the firing, not the card text, once a snooze has been spent', async () => {

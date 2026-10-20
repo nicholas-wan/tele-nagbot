@@ -119,11 +119,12 @@ describe('vacation wake keeps one-offs', () => {
     expect(firing(8)).toBeUndefined();
   });
 
-  it('brings a one-off that was nagging when the holiday began back as quietly overdue', async () => {
+  it('brings a one-off that was nagging when the holiday began back as overdue, still nagging', async () => {
     oneOff();
     seedFiring({ id: 7, reminder_id: 20, reminder_text: 'renew passport', fired_at: NOW - 2 * DAY, next_nag_at: NOW - DAY });
     await wakeChat(env, 1, TZ);
-    expect(firing(7)).toMatchObject({ state: 'nagging', next_nag_at: null });
+    // Its re-nag is left due: the cron's hourly ⏰ nag picks it up from here.
+    expect(firing(7)).toMatchObject({ state: 'nagging', next_nag_at: NOW - DAY });
     expect(edits(700).at(-1).body.text).toMatch(/^⏰/);
   });
 

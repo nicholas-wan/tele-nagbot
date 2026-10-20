@@ -180,19 +180,20 @@ describe('cards come back as what they are', () => {
     await say(5, '/poke');
     const overdue = sent(/^⏰/)[0];
     expect(overdue.body.text).toContain('singlife');
-    expect(buttons(overdue.body.reply_markup)).toEqual(['d:5', 'b:5', 'x:5']);
+    // Snooze too since 20 Oct 2026: an overdue one-off keeps nagging hourly.
+    expect(buttons(overdue.body.reply_markup)).toEqual(['d:5', 'b:5', 's:5', 'x:5']);
     const snoozed = sent(/^😴/)[0];
     expect(snoozed.body.text).toContain('the household');
     expect(buttons(snoozed.body.reply_markup)).toContain('s:6');
     expect(sent(/^🐱/)).toHaveLength(0);
   });
 
-  it('↩️ Back on a card that went overdue restores the ⏰ keyboard, not a Snooze', async () => {
+  it('↩️ Back on a card that went overdue restores the ⏰ card keyboard', async () => {
     seedReminder({ id: 10, text: 'singlife', schedule_kind: 'once', schedule_detail: '{}', next_fire_at: null });
     seedFiring({ id: 5, reminder_text: 'singlife', fired_at: NOW - 25 * HOUR, next_nag_at: null });
     await tap('z:5:b', '🐱 singlife');
     const edit = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
-    expect(buttons(edit.body.reply_markup)).toEqual(['d:5', 'b:5', 'x:5']);
+    expect(buttons(edit.body.reply_markup)).toEqual(['d:5', 'b:5', 's:5', 'x:5']);
   });
 });
 

@@ -6,7 +6,7 @@ import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './
 import { isScored } from './household.js';
 // A function declaration, so the import cycle with nag.js (which refreshes the
 // board) resolves at call time rather than at load.
-import { isHouseholdDeferred } from './nag.js';
+import { isHouseholdDeferred, isOverdue } from './nag.js';
 
 export function dashboardButtons() {
   return { inline_keyboard: [[{ text: '⚙️ Manage chores', callback_data: 'm:list' }]] };
@@ -125,7 +125,7 @@ export async function choreListHtml(env, chatId, tz) {
     "SELECT reminder_id, fired_at, next_nag_at, snoozed_until FROM firings WHERE chat_id = ? AND state = 'nagging'"
   ).bind(chatId).all()).results;
   const nagging = new Set(live.map((f) => f.reminder_id));
-  const overdue = new Set(live.filter((f) => f.next_nag_at === null).map((f) => f.reminder_id));
+  const overdue = new Set(live.filter((f) => isOverdue(f)).map((f) => f.reminder_id));
   // When each live chore first nagged, so the board says how long it has been
   // hanging rather than just that it is.
   const since = new Map();
@@ -156,8 +156,8 @@ export async function choreListHtml(env, chatId, tz) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
     const lead = r.paused ? '⏸️ paused'
-      : r.schedule_kind === 'once' && overdue.has(r.id) ? `⏰ overdue · nagging${sinceText(r)}`
       : parked.has(r.id) ? `😴 ${fmtWhen(parked.get(r.id), tz)}`
+      : r.schedule_kind === 'once' && overdue.has(r.id) ? `⏰ overdue · nagging${sinceText(r)}`
       : nagging.has(r.id) ? `🔔 nagging${sinceText(r)}`
       : !r.next_fire_at ? '🔔 nagging now'
       : fmtWhen(r.next_fire_at, tz);

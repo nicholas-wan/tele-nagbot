@@ -7,7 +7,7 @@ import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
-         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashReminder } from './nag.js';
+         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashReminder, OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 
@@ -187,7 +187,7 @@ export const UNDO_WINDOW_MS = 86400000;
 // a finished one-off comes back from the trash (with nothing scheduled — the
 // firing it already has is the occurrence), and the card is redrawn as what
 // it should be showing. A postponed firing (fired_at ahead) simply waits for
-// the time the household chose; an overdue one-off goes back to quiet.
+// the time the household chose; an overdue one-off nags again within the hour.
 // Every step is bound to the done row that was read, so a second tap loses.
 // Returns { ok } or { ok: false, why: 'late' | 'gone' }.
 export async function undoCompletion(env, firing, by, tz) {
@@ -209,7 +209,7 @@ export async function undoCompletion(env, firing, by, tz) {
   }
   const intervals = JSON.parse(r.nag_intervals);
   const nextNag = firing.fired_at > now ? firing.fired_at
-    : r.schedule_kind === 'once' && isOverdue(firing, now) ? null
+    : r.schedule_kind === 'once' && isOverdue(firing, now) ? deferQuietHours(now + OVERDUE_NAG_MIN * 60000, tz)
     : firing.snoozed_until > now ? firing.snoozed_until
     : deferQuietHours(now + intervals[0] * 60000, tz);
   const claim = await env.DB.prepare(
@@ -515,20 +515,12 @@ export async function undoEarly(env, firing, by, tz) {
 // overdue "renew passport" left on the board went with the holiday, no trash,
 // no word. So it stays, and its card, which read "Household paused", is put
 // back as what the firing now is. The holiday froze its clock rather than
-// excusing it: past its 24h it comes back as the quiet ⏰ card, no flood on
-// return. A chore paused on its own stays paused.
+// excusing it: past its 24h it comes back as the ⏰ card, and the cron's
+// hourly re-nag carries on from there. A chore paused on its own stays paused.
 async function keepOneOffNag(env, f, r, now, tz) {
   if (r.paused) return showPausedCard(env, f, r, null, tz);
-  let firing = f;
-  if (isOverdue(f, now) && f.next_nag_at != null) {
-    const quiet = await env.DB.prepare(
-      "UPDATE firings SET next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
-    ).bind(f.id, f.next_nag_at).run();
-    if (!quiet.meta.changes) return;
-    firing = { ...f, next_nag_at: null };
-  }
-  const [html, markup] = firingCard(r, firing, tz, now);
-  await redrawNag(env, firing, html, markup);
+  const [html, markup] = firingCard(r, f, tz, now);
+  await redrawNag(env, f, html, markup);
 }
 
 // Ends vacation mode: clears the flag, removes stale pre-vacation nags of

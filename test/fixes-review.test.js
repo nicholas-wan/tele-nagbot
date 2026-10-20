@@ -252,42 +252,55 @@ describe('the snooze picker keeps a parked ephemeral card parked', () => {
 
 // 5. Snoozing an overdue one-off wrote next_nag_at into the past, burned a
 // snooze, and promised a time already gone; the next tick silently undid it.
-describe('an overdue one-off cannot be snoozed', () => {
+// 20 Oct 2026: an overdue one-off used to go quiet and refuse snoozes. It now
+// keeps nagging hourly, so a snooze is exactly what it needs — and, with no
+// expiry ahead of it, the snooze is honoured as chosen rather than clamped.
+describe('an overdue one-off keeps nagging and can be snoozed', () => {
   const overdue = () => {
     reminder({ schedule_kind: 'once', schedule_detail: '{}', next_fire_at: null });
-    nagging({ fired_at: NOW - 25 * HOUR, next_nag_at: null });
+    nagging({ fired_at: NOW - 25 * HOUR, next_nag_at: NOW + 30 * 60000 });
   };
 
-  it('refuses the preset tap and the reply', async () => {
+  it('honours a preset tap in full, with no 24h clamp', async () => {
     overdue();
-    await tap(anne, 'z:5:30');
-    expect(toast()).toMatch(/overdue/i);
-    expect(firing()).toMatchObject({ snoozes_used: 0, next_nag_at: null });
+    await tap(anne, 'z:5:360');
+    expect(firing()).toMatchObject({ snoozes_used: 1, next_nag_at: NOW + 6 * HOUR, snoozed_until: NOW + 6 * HOUR });
+    expect(toast()).not.toMatch(/24h limit/);
+  });
+
+  it('honours a snooze reply', async () => {
+    overdue();
     await handleUpdate(env, { message: {
       message_id: 41, chat: { id: 1 }, from: anne, text: 'snooze 2h', entities: [],
       reply_to_message: { message_id: 77, chat: { id: 1 } },
     } });
-    expect(firing()).toMatchObject({ snoozes_used: 0, next_nag_at: null });
-    expect(sent('sendMessage').some((c) => /overdue/i.test(c.body.text))).toBe(true);
+    expect(firing()).toMatchObject({ snoozes_used: 1, next_nag_at: NOW + 2 * HOUR });
   });
 
-  it('refuses to open the presets', async () => {
+  it('opens the presets', async () => {
     overdue();
     await tap(anne, 's:5');
-    expect(toast()).toMatch(/overdue/i);
-    expect(sent('editMessageReplyMarkup')).toHaveLength(0);
+    expect(sent('editMessageReplyMarkup')).toHaveLength(1);
   });
 
-  it('redraws the card as overdue, without Snooze, when the window closes', async () => {
+  it('re-nags hourly on the ⏰ card once the window closes, Snooze and all', async () => {
     reminder({ schedule_kind: 'once', schedule_detail: '{}', next_fire_at: null });
     nagging({ fired_at: NOW - 25 * HOUR, next_nag_at: NOW - 60000 });
     await renagPending(env, NOW);
-    expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: null });
-    const card = sent('editMessageText').find((c) => c.body.message_id === 77);
+    expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: NOW + HOUR });
+    const card = sent('sendMessage').at(-1);
     expect(card.body.text.startsWith('⏰')).toBe(true);
     const labels = card.body.reply_markup.inline_keyboard.flat().map((b) => b.text);
     expect(labels).toContain('✅ Done');
-    expect(labels.some((l) => /Snooze/.test(l))).toBe(false);
+    expect(labels.some((l) => /Snooze/.test(l))).toBe(true);
+  });
+
+  it('picks a row parked quiet by the old rule back up', async () => {
+    reminder({ schedule_kind: 'once', schedule_detail: '{}', next_fire_at: null });
+    nagging({ fired_at: NOW - 40 * HOUR, next_nag_at: null });
+    await renagPending(env, NOW);
+    expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: NOW + HOUR });
+    expect(sent('sendMessage').at(-1).body.text.startsWith('⏰')).toBe(true);
   });
 
   it('still lets Done through', async () => {

@@ -3,7 +3,8 @@
 
 import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral, okButton } from './tg.js';
 import { getTz, isScored } from './household.js';
-import { nagButtons, nagHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, EXPIRE_AFTER_MS } from './nag.js';
+import { nagButtons, nagHtml, overdueHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
+         EXPIRE_AFTER_MS, OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
@@ -40,11 +41,10 @@ export async function runCron(env) {
 // its kind requires. A message someone already dismissed with OK just makes
 // Telegram refuse the delete — same outcome, so the row goes either way.
 //
-// A nag card is recorded with the ordinary day, but three things keep its
-// firing live past that: a pause (which stops the expiry clock), a
-// postponement, and an overdue one-off, which is never re-nagged. Sweeping
-// the card then left the board saying "nagging now" with nothing to tap. So a
-// card that is still some nagging firing's current message is skipped — and
+// A nag card is recorded with the ordinary day, but two things keep its
+// firing live past that: a pause (which stops the expiry clock) and a
+// postponement. Sweeping the card then left the board saying "nagging now"
+// with nothing to tap. So a card that is still some nagging firing's current message is skipped — and
 // its row keeps coming due, so the moment the firing ends or re-nags, the
 // card goes with the next pass. Both id spaces are matched, as everywhere.
 async function sweepSentMessages(env, now) {
@@ -316,9 +316,6 @@ export async function renagPending(env, now) {
       }
       // /pause freezes in-flight nags too (no re-nags, no expiry ticking).
       if (r.paused) continue;
-      // Quiet overdue one-offs remain available on the board and to /done.
-      if (r.schedule_kind === 'once' && f.next_nag_at == null) continue;
-
       const tz = await getTz(env, f.chat_id);
       // Quiet hours: nothing nags (or announces expiry) overnight — anything
       // due now waits for 8am instead.
@@ -332,22 +329,29 @@ export async function renagPending(env, now) {
         continue;
       }
 
-      if (now - f.fired_at > EXPIRE_AFTER_MS) {
+      // A one-off is never expired: past its 24h it keeps nagging hourly on
+      // the ⏰ card until someone finishes or deletes it. (Until 20 Oct 2026 it
+      // went quiet instead, parked with next_nag_at NULL — such a row is
+      // simply due, and picks the hourly nag back up.)
+      const once = r.schedule_kind === 'once';
+      const overdue = isOverdue(f, now);
+      if (overdue && !once) {
         await expireFiring(env, f, r);
         continue;
       }
       // Row was selected by the expiry clause only; its next nag isn't due yet.
-      if (f.next_nag_at == null || f.next_nag_at > now) continue;
+      if (f.next_nag_at == null ? !once : f.next_nag_at > now) continue;
 
       const intervals = JSON.parse(r.nag_intervals);
       const nagCount = f.nag_count + 1;
       // Never below a minute: a row poisoned with [null] or [0] (the editor
       // once stored any value it was handed) re-nagged every tick forever.
-      const interval = Math.max(1, Number(intervals[Math.min(nagCount, intervals.length - 1)]) || 15);
+      const interval = overdue ? OVERDUE_NAG_MIN
+        : Math.max(1, Number(intervals[Math.min(nagCount, intervals.length - 1)]) || 15);
       // Claim this re-nag before any sends: an overlapping cron tick loses the
       // compare-and-swap, and a Done/snooze landing mid-send isn't clobbered.
       const claim = await env.DB.prepare(
-        "UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at = ?"
+        "UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at IS ?"
       ).bind(nagCount, deferQuietHours(now + interval * 60000, tz), f.id, f.next_nag_at).run();
       if (!claim.meta.changes) continue;
 
@@ -358,7 +362,8 @@ export async function renagPending(env, now) {
 
       // Loudness ladder: first re-nag is silent; later ones notify again.
       // sendNag keeps an assigned chore's re-nag as private as its first nag.
-      const ref = await sendNag(env, f, nagHtml(r, nagCount, f.cat || 'both'),
+      const ref = await sendNag(env, f,
+        overdue ? overdueHtml(r) : nagHtml(r, nagCount, f.cat || 'both'),
         nagButtons(f.id, isScored(f)), { silent: nagCount === 1 });
       // Bound to the message id this tick read as well as the state: a /poke
       // re-sending in the same second is the other writer, and two

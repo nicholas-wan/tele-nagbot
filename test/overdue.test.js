@@ -44,16 +44,24 @@ const tap = (data) => handleUpdate(env, { callback_query: {
   message: { chat: { id: 1 }, message_id: 99 },
 } });
 
-it('keeps a one-off overdue across cron ticks without failure notices or repeated nags', async () => {
+// 20 Oct 2026: a one-off past its 24h used to go quiet, and a household that
+// missed the 8am digest never heard about it again. It now keeps nagging,
+// hourly, on the ⏰ card — never a tombstone, never expired.
+it('keeps nagging an overdue one-off hourly, without a tombstone', async () => {
+  const sends = () => calls.filter((c) => c.url.endsWith('/sendMessage'));
   await renagPending(env, NOW);
   expect(reminder()).toBeTruthy();
-  expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: null });
+  expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: NOW + 3600000 });
   expect(await choreListHtml(env, 1, 'Asia/Singapore')).toContain('⏰ overdue · nagging since yesterday 1:00 PM');
-  expect(calls.some(c => c.url.endsWith('/sendMessage'))).toBe(false);
+  expect(sends()).toHaveLength(1);
+  expect(sends()[0].body.text).toMatch(/^⏰/);
   calls.length = 0;
-  await renagPending(env, NOW + 86400000);
-  expect(calls).toHaveLength(0);
-  expect(reminder()).toBeTruthy();
+  await renagPending(env, NOW + 30 * 60000);
+  expect(sends()).toHaveLength(0);
+  await renagPending(env, NOW + 3600000);
+  expect(sends()).toHaveLength(1);
+  expect(sends()[0].body.text).toMatch(/^⏰/);
+  expect(firing().state).toBe('nagging');
 });
 
 it.each(['m:done:10', 'd:5'])('allows completion after expiry via %s', async (button) => {

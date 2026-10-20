@@ -3,13 +3,16 @@
 
 import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
          editRef, deleteRef, msgRef, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
-import { nextOccurrence, fmtLocal, fmtShort, fmtClock } from './time.js';
+import { nextOccurrence, fmtLocal, fmtClock, localParts } from './time.js';
 import { sendCelebrationSticker } from './stickers.js';
 import { isScored } from './household.js';
 import { updateDashboard } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
 export const EXPIRE_AFTER_MS = 24 * 3600000;
+// A one-off never expires: past its 24h it keeps nagging at this pace (quiet
+// hours aside) until someone finishes or deletes it.
+export const OVERDUE_NAG_MIN = 60;
 
 export const emptyKeyboard = () => ({ inline_keyboard: [] });
 
@@ -44,19 +47,6 @@ export function snoozedButtons(firingId, scored = true) {
   ] };
 }
 
-// An overdue one-off keeps Done and Delete but loses Snooze: there is no 24h
-// window left to snooze inside, so a snooze here wrote next_nag_at into the
-// past and promised a time that had already gone by.
-export function overdueButtons(firingId, scored = true) {
-  return { inline_keyboard: [
-    [
-      { text: '✅ Done', callback_data: `d:${firingId}` },
-      { text: '🤝 Done together', callback_data: `b:${firingId}` },
-    ],
-    [{ text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` }],
-  ] };
-}
-
 // A Done can be a slip — the digest's ✅ sits right under the thumb — so every
 // receipt can take itself back. Anyone in the household may, as anyone may
 // tap Done; undoCompletion (chores.js) decides whether it is still possible.
@@ -67,17 +57,18 @@ export function receiptButtons(firingId) {
   ]] };
 }
 
-// The card a live firing should be showing right now: the ⏰ card past its
-// 24h, the 😴 notice while a snooze or postponement is in force, else the nag.
+// The card a live firing should be showing right now: the 😴 notice while a
+// snooze or postponement is in force, the ⏰ card of a one-off past its 24h,
+// else the nag.
 // One place for the choice, so /poke, resume, the points toggle, ↩️ Back and
 // an undone Done all draw the same thing. Rows snoozed before snoozed_by
 // existed name the household.
 export function firingCard(reminder, firing, tz, now = Date.now()) {
-  if (isOverdue(firing, now)) return [overdueHtml(reminder), overdueButtons(firing.id, isScored(firing))];
   if (isHouseholdDeferred(firing, now)) {
     return [snoozedHtml(reminder, firing.next_nag_at, firing.snoozed_by || 'the household', tz),
       snoozedButtons(firing.id, isScored(firing))];
   }
+  if (isOverdue(firing, now)) return [overdueHtml(reminder), nagButtons(firing.id, isScored(firing))];
   return [nagHtml(reminder, firing.nag_count || 0, firing.cat || 'both'), nagButtons(firing.id, isScored(firing))];
 }
 
@@ -102,7 +93,7 @@ export async function stashReminder(env, r, firingId = null) {
 // Callback data is not bound to its button: "z:5:abc" burned a snooze, wrote
 // NaN into next_nag_at — a nag that never came back — and threw before the
 // card was redrawn.
-export const SNOOZE_CODES = ['30', '60', '120', 't', 'day', 'w1', 'w2', 'b'];
+export const SNOOZE_CODES = ['30', '60', '120', '180', '360', 't', 'day', 'w1', 'w2', 'b'];
 
 // The postponements, in days: moves past the 24h window that carry fired_at
 // (and so the expiry) forward with the nag, rather than snoozes inside it.
@@ -110,12 +101,15 @@ export const POSTPONE_DAYS = { day: 1, w1: 7, w2: 14 };
 
 export function snoozeButtons(firingId, tz) {
   const z = (label, code) => ({ text: label, callback_data: `z:${firingId}:${code}` });
-  const nine = nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz);
+  // The next 9pm: tonight's until it has passed, then tomorrow's.
+  const now = Date.now();
+  const nine = nextOccurrence('daily', { h: 21, mi: 0 }, now, tz);
+  const tonight = localParts(nine, tz).d === localParts(now, tz).d;
   return {
     inline_keyboard: [
       [z('30m', '30'), z('1h', '60'), z('2h', '120')],
-      [z(fmtShort(nine, tz), 't'), z('📅 Tomorrow', 'day')],
-      [z('📅 1 week', 'w1'), z('📅 2 weeks', 'w2')],
+      [z('3h', '180'), z('6h', '360'), z(tonight ? '🌙 9pm today' : '🌙 9pm tomorrow', 't')],
+      [z('📅 Tomorrow', 'day'), z('📅 1 week', 'w1'), z('📅 2 weeks', 'w2')],
       [z('↩️ Back', 'b')],
     ],
   };
@@ -174,8 +168,8 @@ export function overdueHtml(reminder) {
   return `${titleHtml('⏰', reminder)}\n24 hours and counting — the cats are still waiting.${assignedLine(reminder)}`;
 }
 
-// Past the 24h window. A one-off in this state stays 'nagging' but quiet, so
-// it can still be completed or deleted; nothing else may be scheduled on it.
+// Past the 24h window. A recurring firing is expired here; a one-off stays
+// 'nagging' and is re-nagged hourly on the ⏰ card (OVERDUE_NAG_MIN).
 export const isOverdue = (firing, now = Date.now()) => now >= firing.fired_at + EXPIRE_AFTER_MS;
 
 // A firing the household itself parked — snoozed or postponed to a time still
@@ -303,26 +297,8 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
 // caller read to decide this firing was 24h old. A resume restamps it, so
 // without that column in the WHERE a cron tick that had already made up its
 // mind expired a nag the household had just brought back to life.
+// Recurring firings only: a one-off is never expired (see renagPending).
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
-  // A one-off has no next occurrence to replace unfinished work. End its
-  // automatic nags, but keep it actionable until someone completes or deletes it.
-  // NULL next_nag_at marks this quiet, overdue state; state stays 'nagging' so
-  // Done, replies, and the pinned manager still act on the same firing.
-  if (reminder.schedule_kind === 'once' && !silent) {
-    const claim = await env.DB.prepare(
-      "UPDATE firings SET next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ? AND next_nag_at IS NOT NULL"
-    ).bind(firing.id, firing.fired_at).run();
-    if (!claim.meta.changes) return false;
-    // The card must say what the board says. Left as a nag it kept offering
-    // Snooze, and a snooze taken past the window wrote a time already gone.
-    firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
-    if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
-    if (firing.last_message_id) {
-      await editNag(env, firing, overdueHtml(reminder), overdueButtons(firing.id, isScored(firing)));
-    }
-    await updateDashboard(env, firing.chat_id);
-    return true;
-  }
   const res = await env.DB.prepare(
     "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
   ).bind(firing.id, firing.fired_at).run();

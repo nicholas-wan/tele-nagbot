@@ -60,7 +60,18 @@ describe('📅 1 week / 📅 2 weeks', () => {
     await tap('s:5');
     const menu = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
     const row = menu.body.reply_markup.inline_keyboard.find((r) => r.some((b) => b.callback_data === 'z:5:w1'));
-    expect(row.map((b) => [b.text, b.callback_data])).toEqual([['📅 1 week', 'z:5:w1'], ['📅 2 weeks', 'z:5:w2']]);
+    expect(row.map((b) => [b.text, b.callback_data]))
+      .toEqual([['📅 Tomorrow', 'z:5:day'], ['📅 1 week', 'z:5:w1'], ['📅 2 weeks', 'z:5:w2']]);
+  });
+
+  // 20 Oct 2026: 3h and 6h, and a 9pm button that says which 9pm it means.
+  it('sit beside 3h, 6h and 9pm today', async () => {
+    seedChore(); seedNag();
+    await tap('s:5');
+    const menu = calls.find((c) => c.url.endsWith('/editMessageReplyMarkup'));
+    const row = menu.body.reply_markup.inline_keyboard.find((r) => r.some((b) => b.callback_data === 'z:5:180'));
+    expect(row.map((b) => [b.text, b.callback_data]))
+      .toEqual([['3h', 'z:5:180'], ['6h', 'z:5:360'], ['🌙 9pm today', 'z:5:t']]);
   });
 
   it('postpone a one-off by a week, expiry window and all', async () => {

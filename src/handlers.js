@@ -10,10 +10,9 @@ import { parseRemind, ParseError, NoTimeError } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, fmtClock, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, householdNames, canonName, creditTogether,
          rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
-import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml,
-         overdueHtml, overdueButtons, firingCard,
+import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firingCard,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
-         isHouseholdDeferred, isOverdue, nagBelongsTo,
+         isHouseholdDeferred, nagBelongsTo,
          completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
 import { updateDashboard, choreListHtml } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
@@ -413,6 +412,15 @@ async function handleReaction(env, rx) {
   await completeFiring(env, firing, reminder, senderName(rx.user), tz);
 }
 
+// Whether a snooze to `until` would outlive the firing: true only for a
+// recurring chore, whose occurrence expires 24h after it fired. A one-off
+// never expires, so any snooze it is given is honoured as chosen.
+async function expiresBefore(env, firing, until) {
+  if (until < firing.fired_at + EXPIRE_AFTER_MS) return false;
+  const r = await env.DB.prepare('SELECT schedule_kind FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  return !r || r.schedule_kind !== 'once';
+}
+
 async function handleNagReply(env, msg, firing, ctx) {
   const text = msg.text.trim();
   const tz = await getTz(env, msg.chat.id);
@@ -468,19 +476,12 @@ async function handleNagReply(env, msg, firing, ctx) {
     if (firing.snoozes_used >= MAX_SNOOZES) {
       return sendPrivate(env, ctx, `😾 No more snoozes (max ${MAX_SNOOZES}). The chore remains.`);
     }
-    // An overdue one-off has no window left to snooze inside: the cap below
-    // would land the "snooze" in the past, burn a count, and promise a time
-    // already gone by, which the next cron tick then silently undid.
-    if (isOverdue(firing)) {
-      return sendPrivate(env, ctx, '⏰ That one is already overdue — reply <code>done</code>, or delete it.');
-    }
     const n = sn[1] ? +sn[1] : 60;
     const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
-    // Never promise a nag past the 24h expiry — cap at one last call before it.
-    const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
     let until = Date.now() + Math.min(ms, 24 * 3600000);
-    const capped = until >= expiresAt;
-    if (capped) until = expiresAt - 60000;
+    // Never promise a nag past a recurring chore's 24h expiry — cap at one
+    // last call before it. A one-off never expires, so it has nothing to cap.
+    if (await expiresBefore(env, firing, until)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
     // snoozed_until is the household's choice on record; resume and the
     // editor honour it only while next_nag_at still equals it. snoozed_by
     // is who chose it, for any later redraw of the 😴 card.
@@ -939,9 +940,6 @@ async function handleCallback(env, cb) {
     if (firing.snoozes_used >= MAX_SNOOZES) {
       return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
     }
-    // An overdue one-off's card no longer offers these, but an older card may
-    // still be showing them. See handleNagReply for why the snooze is refused.
-    if (isOverdue(firing)) return answerCallback(env, cb.id, 'Already overdue ⏰ — Done or Delete it');
     const tz = await getTz(env, firing.chat_id);
     // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
     // to the 24h expiry, which would collapse a full day down to "just before
@@ -951,12 +949,11 @@ async function handleCallback(env, cb) {
     // 📅 1 week and 📅 2 weeks are the same move, further out.
     const days = POSTPONE_DAYS[zm[2]];
     const postpone = days != null;
-    const expiresAt = firing.fired_at + EXPIRE_AFTER_MS;
     let until = postpone ? deferQuietHours(Date.now() + days * 86400000, tz)
       : zm[2] === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
-    const capped = !postpone && until >= expiresAt;
-    if (capped) until = expiresAt - 60000;
+    const capped = !postpone && await expiresBefore(env, firing, until);
+    if (capped) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
     // snoozed_until records the household's choice; it holds only while
     // next_nag_at still equals it (see isHouseholdDeferred).
     const by = senderName(cb.from);
@@ -1021,16 +1018,13 @@ async function handleCallback(env, cb) {
   if (firing.snoozes_used >= MAX_SNOOZES) {
     return answerCallback(env, cb.id, `No more snoozes 😈 (max ${MAX_SNOOZES})`);
   }
-  if (isOverdue(firing)) return answerCallback(env, cb.id, 'Already overdue ⏰ — Done or Delete it');
   if (isEphemeralNag(firing)) {
     // No reply-markup-only edit for an ephemeral message, so the text is
     // re-rendered too — and it has to stay the card it already is. Rendering
     // a parked chore's 😴 notice as a nag turned "🕐 Change snooze → ↩️ Back"
     // into a live nag, since Back reads the card's own text to pick a keyboard.
-    // The snoozer's name is not stored, so the notice names the household.
-    const html = isHouseholdDeferred(firing)
-      ? snoozedHtml(reminder, firing.next_nag_at, 'the household', tz)
-      : nagHtml(reminder, firing.nag_count, firing.cat || 'both');
+    // firingCard picks the text, so an overdue one-off keeps its ⏰ line.
+    const [html] = firingCard(reminder, firing, tz);
     await editNag(env, firing, html, snoozeButtons(firing.id, tz));
   } else {
     await editReplyMarkup(env, nagChat(firing), cb.message.message_id, snoozeButtons(firing.id, tz));
