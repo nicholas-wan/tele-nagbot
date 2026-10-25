@@ -302,7 +302,7 @@ async function choreActionsMarkup(env, r, tz) {
   else if (!r.paused && r.next_fire_at != null) rows.push([
     { text: '✅ Done early', callback_data: `m:done:${r.id}` },
     { text: '🤝 Together early', callback_data: `m:doneall:${r.id}` },
-  ]);
+  ], [{ text: '👤 Done early by…', callback_data: `m:doneby:${r.id}` }]);
   rows.push([{ text: '✏️ Edit details', callback_data: `m:edit:${r.id}` }]);
   rows.push([{ text: r.paused ? '▶️ Resume' : '⏸️ Pause', callback_data: `m:${r.paused ? 'resume' : 'pause'}:${r.id}` }]);
   if (r.schedule_kind !== 'once' && r.next_fire_at != null) {
@@ -326,7 +326,8 @@ function renderManager(env, cb, markup) {
 // The m: callback family: the picker and per-chore actions on the pinned board.
 export async function handleManageCallback(env, cb) {
   const manage = (cb.data || '').match(/^m:(list|close)$/);
-  const manageItem = (cb.data || '').match(/^m:(item|edit|pause|resume|skip|done|doneall|delete|confirm):(\d+)$/);
+  const manageItem = (cb.data || '').match(/^m:(item|edit|pause|resume|skip|done|doneall|doneby|delete|confirm):(\d+)$/)
+    || (cb.data || '').match(/^m:(doneas):(\d+):(\d+)$/);
   if (!manage && !manageItem) return answerCallback(env, cb.id, '');
   if (!await dashboardCallbackAllowed(env, cb)) {
     return answerCallback(env, cb.id, 'That dashboard is no longer active.');
@@ -356,6 +357,17 @@ export async function handleManageCallback(env, cb) {
   if (action === 'edit') {
     await renderManager(env, cb, await editorButtons(env, r));
     return answerCallback(env, cb.id, `Editing ${r.text}`);
+  }
+  if (action === 'doneby') {
+    // Done early by a housemate who isn't holding the phone: one button per
+    // other member, keyed by user_id like the editor's assignee picker.
+    const others = (await householdMembers(env, r.chat_id)).filter((m) => m.userId !== cb.from.id);
+    if (!others.length) return answerCallback(env, cb.id, 'Nobody else has been seen in this chat yet.');
+    await renderManager(env, cb, { inline_keyboard: [
+      ...others.map((m) => [{ text: clip(`👤 ${m.name}`), callback_data: `m:doneas:${r.id}:${m.userId}` }]),
+      [{ text: '← Back', callback_data: `m:item:${r.id}` }],
+    ] });
+    return answerCallback(env, cb.id, `Who did ${r.text}?`);
   }
   if (action === 'delete') {
     // The confirm button says exactly what it will delete — the board's text
@@ -389,12 +401,17 @@ export async function handleManageCallback(env, cb) {
     await updateDashboard(env, r.chat_id);
     return answerCallback(env, cb.id, `Next: ${fmtLocal(next, tz)}`);
   }
-  if (action === 'done' || action === 'doneall') {
+  if (action === 'done' || action === 'doneall' || action === 'doneas') {
+    let credit = senderName(cb.from);
+    if (action === 'doneall') credit = creditTogether(credit, [...await householdRoster(env, r.chat_id)]);
+    if (action === 'doneas') {
+      const member = (await householdMembers(env, r.chat_id)).find((m) => String(m.userId) === manageItem[3]);
+      if (!member) return answerCallback(env, cb.id, 'That household member is no longer here.');
+      credit = member.name;
+    }
     const firing = await env.DB.prepare(
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
     ).bind(r.id).first();
-    let credit = senderName(cb.from);
-    if (action === 'doneall') credit = creditTogether(credit, [...await householdRoster(env, r.chat_id)]);
     if (!firing) {
       if (r.paused || r.next_fire_at == null) {
         return answerCallback(env, cb.id, 'This chore is not nagging now.');
