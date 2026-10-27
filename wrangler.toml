@@ -13,11 +13,11 @@ ALLOWED_CHATS = "-1004418632524"
 # value is the person's roster spelling — "@username", or the bare first name
 # of a member who has no username — which is how a nag finds them.
 NICKNAMES = "nic=@nicholaswan, yx=@Dodgerblueee"
-# Optional. The Mini App's direct link from @BotFather (/newapp), e.g.
-# https://t.me/TwoShotsNagBot/chores. When set, the pinned board's button
-# becomes 🐾 Chores and opens the app over the chat instead of ⚙️ Manage.
-# Register the app with the URL https://nag-bot.lattemocha.workers.dev/app/.
-# MINI_APP_URL = "https://t.me/TwoShotsNagBot/chores"
+# The Mini App's direct link from @BotFather (/newapp), registered with the
+# URL https://nag-bot.lattemocha.workers.dev/app/. It makes the pinned board's
+# button 🐾 Chores, opening the app over the chat; without it the button is
+# ⚙️ Manage again.
+MINI_APP_URL = "https://t.me/TwoShotsNagBot/chores"
 
 # Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET, and
 # ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.
