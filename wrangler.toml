@@ -13,6 +13,11 @@ ALLOWED_CHATS = "-1004418632524"
 # value is the person's roster spelling — "@username", or the bare first name
 # of a member who has no username — which is how a nag finds them.
 NICKNAMES = "nic=@nicholaswan, yx=@Dodgerblueee"
+# Optional. The Mini App's direct link from @BotFather (/newapp), e.g.
+# https://t.me/TwoShotsNagBot/chores. When set, the pinned board's button
+# becomes 🐾 Chores and opens the app over the chat instead of ⚙️ Manage.
+# Register the app with the URL https://nag-bot.lattemocha.workers.dev/app/.
+# MINI_APP_URL = "https://t.me/TwoShotsNagBot/chores"
 
 # Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET, and
 # ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.
@@ -34,6 +39,11 @@ database_id = "24e45c9c-75bf-4b7e-b38e-f92598c370fe"
 # Vision model for /autotag (classifying which cat is on each sticker).
 [ai]
 binding = "AI"
+
+# The Mini App's page, served at /app/. Any path without a file here reaches
+# the worker, so /webhook, /setup and /admin are unaffected.
+[assets]
+directory = "./public"
 
 # Persisted Workers Logs, so "why didn't it nag?" is answerable after the fact.
 [observability]

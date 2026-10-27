@@ -7,6 +7,7 @@ import { updateDashboard } from './dashboard.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
 import { answerCallback, armWebhookAnswer, tg } from './tg.js';
+import { handleMiniAppApi } from './miniapp-api.js';
 
 // How long the webhook response may wait for the first toast. Every callback
 // path answers, so this only matters when Telegram itself is slow — past the
@@ -85,6 +86,10 @@ export default {
       }
       ctx.waitUntil(handling);
       return new Response('ok');
+    }
+    // The Mini App's API; the page itself is a static asset at /app/.
+    if (url.pathname.startsWith('/api/app/')) {
+      return handleMiniAppApi(request, env, url.pathname.slice('/api/app/'.length));
     }
     // One-time helper: POST /setup with ADMIN_SECRET as a bearer token makes
     // the Worker register its own webhook with Telegram. WEBHOOK_SECRET is

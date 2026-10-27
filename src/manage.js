@@ -102,12 +102,18 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
 // too, and an unconditional write here either resurrected a slot the cron had
 // just consumed (a second fire the same evening) or cancelled a fire in
 // flight. Losing the swap just means "that one just fired".
-const JUST_FIRED = 'That one just fired — see its nag.';
-async function applyEditorChoice(env, r, kind, value, tz) {
+//
+// A time is an hour from the buttons ("19") or an hour and minute from the
+// Mini App's time field ("19:30").
+export const JUST_FIRED = 'That one just fired — see its nag.';
+export const NAG_PACES = ['10', 'default', '30', '60'];
+export async function applyEditorChoice(env, r, kind, value, tz) {
   if (kind === 'time') {
-    const hour = Number(value);
-    if (!Number.isInteger(hour) || hour < 0 || hour > 23) return 'Not a valid hour.';
-    const detail = { ...JSON.parse(r.schedule_detail), h: hour, mi: 0 };
+    const clock = String(value).match(/^(\d{1,2})(?::(\d{2}))?$/);
+    const hour = clock ? Number(clock[1]) : NaN;
+    const minute = clock && clock[2] ? Number(clock[2]) : 0;
+    if (!clock || hour > 23 || minute > 59) return 'Not a valid hour or time.';
+    const detail = { ...JSON.parse(r.schedule_detail), h: hour, mi: minute };
     let next;
     if (r.schedule_kind === 'once' || (r.schedule_kind === 'interval' && r.next_fire_at)) {
       // Anchored to a date rather than to a calendar rule: a one-off set for
@@ -115,8 +121,8 @@ async function applyEditorChoice(env, r, kind, value, tz) {
       // a whole gap out. Keep the date (today, for a one-off with no date
       // left); if the new time has already passed on it, take the next slot.
       const f = localParts(r.next_fire_at || Date.now(), tz);
-      next = zonedEpoch(f.y, f.mo, f.d, hour, 0, tz);
-      if (next <= Date.now()) next = nextOccurrence('daily', { h: hour, mi: 0 }, Date.now(), tz);
+      next = zonedEpoch(f.y, f.mo, f.d, hour, minute, tz);
+      if (next <= Date.now()) next = nextOccurrence('daily', { h: hour, mi: minute }, Date.now(), tz);
     } else {
       // daily / weekly / monthly regenerate their own next slot from the rule.
       next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
@@ -209,6 +215,63 @@ async function redrawLiveNag(env, r, scored, tz) {
   await editNag(env, live, html, markup);
 }
 
+// Rotation and points, set to `on`. The editor's buttons flip whatever the
+// row says now; the Mini App names the value it wants, so a screen drawn
+// before somebody else's tap cannot flip it back. Setting what is already
+// there changes nothing.
+export async function setEditorFlag(env, r, kind, on, tz) {
+  if (kind === 'rotate') {
+    const detail = JSON.parse(r.schedule_detail);
+    if (Boolean(detail.rotate) === Boolean(on)) return;
+    if (on) detail.rotate = true;
+    else delete detail.rotate;
+    await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
+      .bind(JSON.stringify(detail), r.id).run();
+    return;
+  }
+  const scored = on ? 1 : 0;
+  if (Boolean(r.scored) === Boolean(scored)) return;
+  await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
+    .bind(scored, r.id).run();
+  // A firing snapshots scored at fire time, so a nag already on screen
+  // would keep its old "(reminder — no points)" line, its old button label
+  // and its old credit until the next occurrence. Move the live one too.
+  await env.DB.prepare(
+    "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
+  ).bind(scored, r.id).run();
+  await redrawLiveNag(env, r, scored, tz);
+}
+
+// ⏭️ Skip next: the chore's upcoming slot goes by unnagged. Returns the new
+// slot, 'once' for a chore with no next to skip to, or null when the cron
+// fired it while we looked. Compare-and-swap against the cron's fire claim:
+// a skip that read the slot just before it fired used to write the value the
+// cron had already written and report a skip that changed nothing.
+export async function skipNext(env, r, tz) {
+  if (r.schedule_kind === 'once' || !r.next_fire_at) return 'once';
+  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
+  const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+    .bind(next, r.id, r.next_fire_at).run();
+  if (!res.meta.changes) return null;
+  await updateDashboard(env, r.chat_id);
+  return next;
+}
+
+// Done from the board or the Mini App, credited to `credit`: the live nag if
+// there is one, else the upcoming occurrence, done early. Returns 'done',
+// 'early', 'raced' when somebody else got there first, or 'idle' for a chore
+// with nothing to complete (paused, or a one-off with nothing scheduled).
+export async function completeNow(env, r, credit, tz) {
+  const firing = await env.DB.prepare(
+    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+  ).bind(r.id).first();
+  if (!firing) {
+    if (r.paused || r.next_fire_at == null) return 'idle';
+    return await completeEarly(env, r, credit, tz) ? 'early' : 'raced';
+  }
+  return await completeFiring(env, firing, r, credit, tz) ? 'done' : 'raced';
+}
+
 // The e: callback family: editor navigation and value taps.
 export async function handleEditorCallback(env, cb, ctx, ref) {
   const editNav = (cb.data || '').match(/^e:(menu|time|schedule|nag|assign|rotate|score|pause|close):(\d+)$/);
@@ -238,22 +301,9 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       return answerCallback(env, cb.id, '');
     }
     if (action === 'rotate') {
-      const detail = JSON.parse(r.schedule_detail);
-      if (detail.rotate) delete detail.rotate;
-      else detail.rotate = true;
-      await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
-        .bind(JSON.stringify(detail), r.id).run();
+      await setEditorFlag(env, r, 'rotate', !JSON.parse(r.schedule_detail).rotate, tz);
     } else if (action === 'score') {
-      const scored = r.scored ? 0 : 1;
-      await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
-        .bind(scored, r.id).run();
-      // A firing snapshots scored at fire time, so a nag already on screen
-      // would keep its old "(reminder — no points)" line, its old button label
-      // and its old credit until the next occurrence. Move the live one too.
-      await env.DB.prepare(
-        "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
-      ).bind(scored, r.id).run();
-      await redrawLiveNag(env, r, scored, tz);
+      await setEditorFlag(env, r, 'score', !r.scored, tz);
     } else if (action === 'pause') {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }
@@ -334,7 +384,7 @@ export async function handleManageCallback(env, cb) {
   }
   if (manage) {
     if (manage[1] === 'close') {
-      await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons());
+      await editReplyMarkup(env, cb.message.chat.id, cb.message.message_id, dashboardButtons(env, cb.message.chat.id));
     } else {
       const listTz = await getTz(env, cb.message.chat.id);
       await renderManager(env, cb, await chorePickerMarkup(env, cb.message.chat.id, listTz));
@@ -388,17 +438,9 @@ export async function handleManageCallback(env, cb) {
     return answerCallback(env, cb.id, action === 'pause' ? 'Paused ⏸️' : 'Resumed ▶️');
   }
   if (action === 'skip') {
-    if (r.schedule_kind === 'once' || !r.next_fire_at) {
-      return answerCallback(env, cb.id, 'One-off chores cannot be skipped.');
-    }
-    const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
-    // Compare-and-swap against the cron's fire claim: a skip that read the slot
-    // just before it fired used to write the value the cron had already
-    // written and report a skip that changed nothing.
-    const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-      .bind(next, r.id, r.next_fire_at).run();
-    if (!res.meta.changes) return answerCallback(env, cb.id, JUST_FIRED);
-    await updateDashboard(env, r.chat_id);
+    const next = await skipNext(env, r, tz);
+    if (next === 'once') return answerCallback(env, cb.id, 'One-off chores cannot be skipped.');
+    if (next == null) return answerCallback(env, cb.id, JUST_FIRED);
     return answerCallback(env, cb.id, `Next: ${fmtLocal(next, tz)}`);
   }
   if (action === 'done' || action === 'doneall' || action === 'doneas') {
@@ -409,18 +451,11 @@ export async function handleManageCallback(env, cb) {
       if (!member) return answerCallback(env, cb.id, 'That household member is no longer here.');
       credit = member.name;
     }
-    const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-    ).bind(r.id).first();
-    if (!firing) {
-      if (r.paused || r.next_fire_at == null) {
-        return answerCallback(env, cb.id, 'This chore is not nagging now.');
-      }
-      const early = await completeEarly(env, r, credit, tz);
-      return answerCallback(env, cb.id, early ? 'Done early 😻' : 'Already handled 👍');
-    }
-    const won = await completeFiring(env, firing, r, credit, tz);
-    return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
+    const outcome = await completeNow(env, r, credit, tz);
+    return answerCallback(env, cb.id, {
+      done: 'Purrs 😻', early: 'Done early 😻', raced: 'Already handled 👍',
+      idle: 'This chore is not nagging now.',
+    }[outcome]);
   }
   return answerCallback(env, cb.id, '');
 }

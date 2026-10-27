@@ -58,7 +58,7 @@ export function chatAllowed(env, chatId) {
 
 // Membership changes seen as `chat_member` updates. Only the statuses that
 // mean "still here" keep a row; left and kicked take it away.
-const IN_CHAT = new Set(['member', 'administrator', 'creator', 'restricted']);
+export const IN_CHAT = new Set(['member', 'administrator', 'creator', 'restricted']);
 
 async function handleChatMember(env, upd) {
   const member = upd.new_chat_member;

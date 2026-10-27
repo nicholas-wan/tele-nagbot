@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nag-Bot</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  /* Telegram hands the page its own theme as --tg-theme-* variables, so the
+     sheet matches the chat it opens over. The fallbacks are for the local
+     preview, which runs outside Telegram. Squashbot's page, restyled for
+     chores. */
+  :root {
+    --bg: var(--tg-theme-secondary-bg-color, #f0f0f4);
+    --section: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #ffffff));
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8a8a8e);
+    --link: var(--tg-theme-link-color, #2481cc);
+    --accent: var(--tg-theme-button-color, #2481cc);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --header: var(--tg-theme-section-header-text-color, #6d6d72);
+    --danger: var(--tg-theme-destructive-text-color, #e53935);
+    --separator: var(--tg-theme-section-separator-color, rgba(128, 128, 128, 0.22));
+    --radius: 12px;
+    --alert: #e8890c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not(.tg) {
+      --bg: #101014; --section: #1c1c22; --text: #f2f2f5; --hint: #8d8d96;
+      --link: #5aa9ef; --accent: #3a8fd9; --header: #8d8d96;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 16px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 12px 16px calc(24px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color: transparent;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  .top { display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 2px 0 10px; }
+  .top h1 { font-size: 20px; margin: 0; flex: 1; min-width: 0; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+  .back {
+    flex: none; border: 0; background: none; color: var(--link); padding: 6px 4px 6px 0; cursor: pointer;
+  }
+  .sub { color: var(--hint); font-size: 14px; margin: -6px 0 12px; }
+  .sub.alert { color: var(--alert); font-weight: 600; }
+
+  .label {
+    color: var(--header); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;
+    margin: 18px 4px 6px;
+  }
+  .section { background: var(--section); border-radius: var(--radius); overflow: hidden; }
+  .row {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px;
+    padding: 10px 14px; border: 0; background: none; text-align: left;
+  }
+  .row + .row, .row + .field, .field + .row { box-shadow: inset 0 1px 0 var(--separator); }
+  button.row { cursor: pointer; }
+  button.row:active { background: var(--separator); }
+  .row .main { flex: 1; min-width: 0; }
+  .row .title { font-weight: 600; overflow-wrap: anywhere; }
+  .row .meta { color: var(--hint); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field .meta { color: var(--hint); font-size: 14px; }
+  .row .meta.status { white-space: normal; }
+  .meta.alert { color: var(--alert); }
+  .row.link { color: var(--link); }
+  .row.danger { color: var(--danger); }
+  .row.indent { padding-left: 30px; }
+  .row:disabled { opacity: 0.45; }
+  .note { color: var(--hint); font-size: 13px; margin: 6px 4px 0; }
+  .banner {
+    margin: 0 0 12px; padding: 10px 14px; border-radius: var(--radius); font-size: 14px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 4px; }
+  .tag { font-size: 13px; padding: 3px 9px; border-radius: 999px; background: var(--section); color: var(--hint); }
+
+  .row.chore { padding-right: 12px; }
+  .main.open {
+    display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 0;
+    text-align: left; cursor: pointer;
+  }
+  .main.open .text { flex: 1; min-width: 0; }
+  .chev { flex: none; color: var(--hint); font-size: 22px; line-height: 1; }
+  .quick {
+    flex: none; min-width: 72px; height: 34px; padding: 0 14px; border: 0; border-radius: 999px;
+    background: var(--accent); color: var(--accent-text); font-weight: 600; cursor: pointer;
+  }
+  .seg {
+    display: flex; gap: 4px; padding: 3px; margin: 0 0 14px; border-radius: 10px;
+    background: var(--section);
+  }
+  .seg button {
+    flex: 1; min-height: 34px; border: 0; border-radius: 8px; background: none;
+    color: var(--hint); font-weight: 600; cursor: pointer;
+  }
+  .seg button.on { background: var(--accent); color: var(--accent-text); }
+  .seg.small button { min-height: 30px; font-size: 14px; }
+  .count { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .wrap { overflow-wrap: anywhere; }
+
+  .switch { position: relative; flex: none; width: 46px; height: 28px; }
+  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .switch span {
+    position: absolute; inset: 0; border-radius: 999px; background: var(--separator);
+    transition: background 0.15s;
+  }
+  .switch span::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s;
+  }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(18px); }
+
+  .field { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 14px; }
+  .field + .field { box-shadow: inset 0 1px 0 var(--separator); }
+  .field label, .field .name { flex: 1; }
+  .field input:not([type=checkbox]), .field select {
+    flex: none; width: 56%; min-height: 36px; padding: 4px 8px; text-align: right;
+    border: 0; border-radius: 8px; background: var(--bg);
+  }
+  .field.stack { flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 14px; }
+  .field.stack input { width: 100%; text-align: left; min-height: 42px; padding: 8px 10px; }
+
+  .primary {
+    display: block; width: 100%; margin-top: 18px; min-height: 48px; border: 0;
+    border-radius: var(--radius); background: var(--accent); color: var(--accent-text);
+    font-weight: 600; cursor: pointer;
+  }
+  .primary:disabled { opacity: 0.55; }
+
+  .empty { text-align: center; color: var(--hint); padding: 48px 12px; }
+  .empty .big { font-size: 40px; margin-bottom: 8px; }
+
+  .toast {
+    position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom));
+    padding: 12px 14px; border-radius: var(--radius); font-size: 14px;
+    background: rgba(30, 30, 34, 0.94); color: #fff; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    transform: translateY(calc(100% + 40px)); visibility: hidden; z-index: 10;
+    transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
+  }
+  .toast.show { transform: none; visibility: visible; transition: transform 0.2s ease-out; }
+  .busy { opacity: 0.6; pointer-events: none; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+'use strict';
+
+const tg = window.Telegram && window.Telegram.WebApp;
+const inTelegram = Boolean(tg && tg.initData);
+// Opened in a browser on this machine, the page draws sample chores so its
+// screens can be checked without Telegram. Nothing it does reaches the bot:
+// the API refuses any request Telegram did not sign.
+const preview = !inTelegram && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+if (inTelegram) {
+  document.documentElement.classList.add('tg');
+  tg.ready();
+}
+
+const app = document.getElementById('app');
+let state = { screen: 'loading' };
+let trail = [];
+
+// ---- Small DOM helper. Every name on screen arrives as text, never HTML.
+function h(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value == null || value === false) continue;
+    if (key === 'class') node.className = value;
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else if (key in node && key !== 'list') node[key] = value;
+    else node.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    node.append(child.nodeType ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+// ---- Feedback
+let toastTimer;
+function toast(message, kind = 'success') {
+  if (!message) return;
+  const node = document.getElementById('toast');
+  node.textContent = message;
+  node.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove('show'), 3200);
+  if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(kind);
+}
+
+function confirmAction(message) {
+  if (inTelegram && tg.showConfirm) {
+    return new Promise((resolve) => tg.showConfirm(message, resolve));
+  }
+  return Promise.resolve(window.confirm(message));
+}
+
+function closeApp() {
+  if (inTelegram) tg.close();
+  else toast('In Telegram this closes the sheet.');
+}
+
+// ---- API
+async function api(method, path, body) {
+  if (preview) return previewApi(method, path, body);
+  const response = await fetch(`/api/app/${path}`, {
+    method,
+    headers: {
+      Authorization: `tma ${inTelegram ? tg.initData : ''}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await response.json(); } catch { /* an empty body reads as a failure */ }
+  return { status: response.status, ...data };
+}
+
+async function run(button, work) {
+  document.body.classList.add('busy');
+  if (button) button.disabled = true;
+  try {
+    return await work();
+  } catch (error) {
+    toast('Could not reach the cats. Check your connection and try again.', 'error');
+    return null;
+  } finally {
+    document.body.classList.remove('busy');
+    if (button) button.disabled = false;
+  }
+}
+
+function blockedBy(result) {
+  if (result.status === 401 || result.status === 403) {
+    trail = [];
+    go('blocked', { message: result.message }, false);
+    return true;
+  }
+  return false;
+}
+
+// ---- Navigation. Telegram's own back button in its header, an in-page one
+// in the preview.
+function go(screen, extra = {}, push = true) {
+  if (push && state.screen !== 'loading' && state.screen !== 'blocked') trail.push(state);
+  state = { screen, ...extra };
+  render();
+}
+function back() {
+  const previous = trail.pop();
+  if (!previous) return;
+  state = previous;
+  if (state.screen === 'list') return loadList(false);
+  if (state.screen === 'chore') return openChore(state.chore.id, false);
+  render();
+}
+if (inTelegram) tg.BackButton.onClick(back);
+
+function header(title) {
+  const showBack = trail.length > 0;
+  if (inTelegram) {
+    if (showBack) tg.BackButton.show(); else tg.BackButton.hide();
+  }
+  return h('div', { class: 'top' },
+    !inTelegram && showBack ? h('button', { class: 'back', onclick: back }, '‹ Back') : null,
+    h('h1', null, title),
+    h('button', { class: 'back', onclick: closeApp, 'aria-label': 'Close' }, 'Close'));
+}
+
+// Chores and stats are the two roots; the switch under the header moves
+// between them without stacking either on the back trail.
+function sections(current) {
+  const option = (key, label, open) => h('button', {
+    class: current === key ? 'on' : '', 'aria-pressed': current === key ? 'true' : 'false',
+    onclick: () => { if (current !== key) { trail = []; open(false); } },
+  }, label);
+  return h('div', { class: 'seg', role: 'group' },
+    option('list', '🐾 Chores', loadList), option('stats', '🏆 Stats', (push) => loadStats('week', push)));
+}
+
+// ---- Screens
+function render() {
+  const screens = { loading, blocked, list, chore, add, stats };
+  app.replaceChildren(...[].concat(screens[state.screen]()).flat(Infinity).filter(Boolean));
+  window.scrollTo(0, 0);
+}
+
+function loading() {
+  return h('div', { class: 'empty' }, 'Loading…');
+}
+
+function blocked() {
+  return [
+    h('div', { class: 'empty' },
+      h('div', { class: 'big' }, '🔒'),
+      h('div', null, state.message)),
+    h('button', { class: 'primary', onclick: closeApp }, 'Close'),
+  ];
+}
+
+const title = (c) => [c.emoji, c.text].filter(Boolean).join(' ');
+const urgent = (c) => c.state === 'nagging' || c.state === 'overdue';
+
+// The board's second line: how often, for whom, and whether it scores.
+function details(c) {
+  return [c.cadence, c.assignee, c.rotate ? '🔄 rotation' : null, c.scored ? null : 'reminder · no points']
+    .filter(Boolean).join(' · ');
+}
+
+function choreRow(c) {
+  const more = details(c);
+  // A nag that is out gets its Done right on the list, as the nag card has
+  // one. A chore the household parked is not due yet, and doing one early is
+  // a deliberate choice: both are done from the chore's own screen.
+  const quick = c.live && urgent(c);
+  return h('div', { class: 'row chore' },
+    h('button', { class: 'main open', onclick: () => openChore(c.id) },
+      h('div', { class: 'text' },
+        h('div', { class: 'title' }, title(c)),
+        h('div', { class: urgent(c) ? 'meta status alert' : 'meta status' }, c.status),
+        more ? h('div', { class: 'meta' }, more) : null),
+      quick ? null : h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
+    quick ? h('button', {
+      class: 'quick', 'aria-label': `Done: ${c.text}`,
+      onclick: (event) => done(event.currentTarget, c, { how: 'me' }),
+    }, 'Done') : null);
+}
+
+function list() {
+  const { chores, vacation } = state.data;
+  return [
+    header('Chores'),
+    sections('list'),
+    vacation ? h('div', { class: 'banner' }, `✈️ All paused until ${vacation}. /resume all in the chat wakes the cats.`) : null,
+    chores.length
+      ? h('div', { class: 'section' }, chores.map(choreRow))
+      : h('div', { class: 'empty' }, h('div', { class: 'big' }, '😺'), 'No chores on the list.'),
+    chores.length ? h('div', { class: 'note' }, 'Tap a chore to do it early, change it, pause or delete it.') : null,
+    h('button', { class: 'primary', onclick: openAdd }, '➕ Add chore'),
+  ];
+}
+
+function select(options, current, onchange, currentLabel) {
+  // A value the screen cannot choose — "every 8 days", "nag:15m" — still shows
+  // as what the chore has now.
+  const known = options.some(([value]) => value === current);
+  return h('select', { onchange },
+    !known ? h('option', { value: '', selected: true, disabled: true }, currentLabel) : null,
+    options.map(([value, label]) => h('option', { value, selected: value === current }, label)));
+}
+
+function toggle(label, hint, on, onchange) {
+  return h('label', { class: 'field' },
+    h('span', { class: 'name' }, h('div', null, label), hint ? h('div', { class: 'meta' }, hint) : null),
+    h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: on, onchange }), h('span')));
+}
+
+function chore() {
+  const c = state.chore;
+  const members = state.members || [];
+  const me = state.me;
+  const early = c.done === 'early';
+  const others = members.filter((member) => !me || member.userId !== me.id);
+  const tags = [
+    c.assignee && `👤 ${c.assignee}`,
+    c.rotate && '🔄 Rotation',
+    !c.scored && 'Reminder · no points',
+  ].filter(Boolean);
+
+  const doneRows = [];
+  if (c.done) {
+    doneRows.push(
+      h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'me' }) },
+        early ? '✅ Done early' : '✅ Done'),
+      h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'together' }) },
+        early ? '🤝 Together early' : '🤝 Done together'));
+    if (others.length) {
+      doneRows.push(h('button', {
+        class: 'row link', onclick: () => { state.doneBy = !state.doneBy; render(); },
+      }, h('div', { class: 'main' }, early ? '👤 Done early by…' : '👤 Done by…'),
+      h('span', { class: 'chev', 'aria-hidden': 'true' }, state.doneBy ? '⌄' : '›')));
+      if (state.doneBy) {
+        for (const member of others) {
+          doneRows.push(h('button', {
+            class: 'row link indent',
+            onclick: (event) => done(event.currentTarget, c, { how: 'as', member: member.userId }),
+          }, member.name));
+        }
+      }
+    }
+  }
+
+  const assignees = [['0', 'Anyone'], ...members.map((member) => [String(member.userId), member.name])];
+  const assigned = c.assigneeId != null ? String(c.assigneeId) : c.assignee ? null : '0';
+
+  return [
+    header(title(c)),
+    h('div', { class: urgent(c) ? 'sub alert' : 'sub' }, c.status),
+    tags.length ? h('div', { class: 'tags' }, tags.map((tag) => h('span', { class: 'tag' }, tag))) : null,
+    c.vacation ? h('div', { class: 'banner' }, `✈️ All paused until ${c.vacation}.`) : null,
+
+    doneRows.length ? [h('div', { class: 'label' },
+      c.state === 'parked' ? 'Snoozed — done anyway?' : c.live ? 'Nagging now' : 'Ahead of the nag'),
+      h('div', { class: 'section' }, doneRows),
+      early ? h('div', { class: 'note' }, 'Still counts on the board. The schedule moves on past the next slot.') : null] : null,
+
+    h('div', { class: 'label' }, 'Schedule'),
+    h('div', { class: 'section' },
+      c.timed ? [
+        h('div', { class: 'field' }, h('label', { for: 'time' }, 'Time'),
+          h('input', {
+            id: 'time', type: 'time', value: c.time || '', step: 300,
+            onchange: (event) => event.target.value && edit('time', event.target.value),
+          })),
+        h('div', { class: 'field' }, h('span', { class: 'name' }, 'Repeats'),
+          select([['daily', 'Daily'], ['weekdays', 'Weekdays'], ['weekends', 'Weekends']],
+            c.scheduleKey, (event) => edit('schedule', event.target.value), c.schedule)),
+      ] : h('div', { class: 'row' }, h('div', { class: 'main' },
+        h('div', null, c.schedule), h('div', { class: 'meta' }, 'Its time can change once this nag is done.'))),
+      h('div', { class: 'field' }, h('span', { class: 'name' }, 'Nag pace'),
+        select([['default', '15 / 30 / 60 min'], ['10', 'Every 10 min'], ['30', 'Every 30 min'], ['60', 'Every 60 min']],
+          c.paceKey, (event) => edit('nag', event.target.value), c.pace)),
+      h('div', { class: 'field' }, h('span', { class: 'name' }, 'Assigned'),
+        select(assignees, assigned, (event) => edit('assign', event.target.value), c.assignee || 'Anyone')),
+      toggle('Rotation', 'Assign whoever has done it least', c.rotate, (event) => edit('rotate', event.target.checked)),
+      toggle('Points', c.scored ? 'Counts on the leaderboard' : 'A reminder — no points',
+        c.scored, (event) => edit('score', event.target.checked))),
+    c.next ? h('div', { class: 'note' }, `Next: ${c.next} · ${c.schedule}`) : null,
+
+    h('div', { class: 'label' }, 'More'),
+    h('div', { class: 'section' },
+      c.canSkip && !c.paused ? h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, 'skip') },
+        '⏭️ Skip next') : null,
+      h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, c.paused ? 'resume' : 'pause') },
+        c.paused ? '▶️ Resume' : '⏸️ Pause'),
+      h('button', { class: 'row danger', onclick: (event) => remove(event.currentTarget) }, '🗑️ Delete chore')),
+  ];
+}
+
+function add() {
+  const values = state.values;
+  const members = state.members || [];
+  const set = (key) => (event) => { values[key] = event.target.value; };
+  const kind = (scored, label) => h('button', {
+    class: values.scored === scored ? 'on' : '', 'aria-pressed': values.scored === scored ? 'true' : 'false',
+    onclick: () => { values.scored = scored; render(); },
+  }, label);
+  return [
+    header('Add chore'),
+    h('div', { class: 'seg small', role: 'group' }, kind(true, '🏆 Chore · points'), kind(false, '🔔 Reminder')),
+    h('div', { class: 'section' },
+      h('div', { class: 'field stack' },
+        h('label', { for: 'text' }, 'What, and when'),
+        h('input', {
+          id: 'text', type: 'text', value: values.text, placeholder: 'trash 7pm daily', maxLength: 240,
+          autocomplete: 'off', enterKeyHint: 'done', oninput: set('text'),
+          onkeydown: (event) => { if (event.key === 'Enter') save(document.getElementById('save')); },
+        })),
+      h('div', { class: 'field' }, h('span', { class: 'name' }, 'Assigned'),
+        h('select', { onchange: set('assignee') },
+          h('option', { value: '', selected: !values.assignee }, 'Anyone'),
+          members.map((member) => h('option', {
+            value: String(member.userId), selected: values.assignee === String(member.userId),
+          }, member.name))))),
+    h('div', { class: 'note' }, 'As after /chore: 7pm daily · every mon,thu 8am · every 2 weeks · '
+      + 'on the 1st · tomorrow 9:30am · in 20m · now · nag:10m'),
+    h('button', { id: 'save', class: 'primary', onclick: (event) => save(event.currentTarget) },
+      values.scored ? '✅ Add chore' : '✅ Add reminder'),
+  ];
+}
+
+const MEDALS = ['🥇', '🥈', '🥉'];
+
+function stats() {
+  const s = state.data;
+  const view = (key, label) => h('button', {
+    class: s.view === key ? 'on' : '', 'aria-pressed': s.view === key ? 'true' : 'false',
+    onclick: () => { if (s.view !== key) loadStats(key, false); },
+  }, label);
+  const people = s.people.map((person, index) => h('div', { class: 'row' },
+    h('div', { class: 'main' },
+      h('div', { class: 'title' }, `${MEDALS[index] || '•'} ${person.name}`),
+      person.solo !== person.count || (index === 0 && s.streak >= 1)
+        ? h('div', { class: 'meta' }, [
+          person.solo !== person.count ? `${person.solo} solo` : null,
+          index === 0 && s.streak >= 1 ? `🔥 ${s.streak + 1}-week reign` : null,
+        ].filter(Boolean).join(' · ')) : null),
+    h('span', { class: 'count' }, `${person.count} ✅`)));
+  return [
+    header('Stats'),
+    sections('stats'),
+    h('div', { class: 'seg small', role: 'group' }, view('week', 'This week'), view('last', 'Last week')),
+    s.total || s.expired ? [
+      h('div', { class: 'label' }, `Week of ${s.week}`),
+      h('div', { class: 'section' }, people,
+        s.together ? h('div', { class: 'row' }, h('div', { class: 'main' }, '🤝 Done together'),
+          h('span', { class: 'count' }, `${s.together} ✅`)) : null),
+      s.expired ? h('div', { class: 'note' }, `🪦 Expired unclaimed: ${s.expired}`) : null,
+      s.recent.length ? [
+        h('div', { class: 'label' }, 'Done'),
+        h('div', { class: 'section' }, s.recent.map((item) => h('div', { class: 'row' },
+          h('div', { class: 'main' },
+            h('div', { class: 'wrap' }, [item.emoji, item.text].filter(Boolean).join(' ')),
+            h('div', { class: 'meta' }, `${item.who} · ${item.when}`))))),
+      ] : null,
+    ] : h('div', { class: 'empty' }, h('div', { class: 'big' }, '🏆'), s.view === 'last'
+      ? 'Nothing was completed last week. The cats pretend not to remember.'
+      : 'Fresh week, empty board — the first chore takes the lead.'),
+    h('div', { class: 'note' }, 'Chores count; reminders do not. The week resets on Monday.'),
+  ];
+}
+
+// ---- Loading screens
+async function loadList(push = true) {
+  const result = await run(null, () => api('GET', 'chores'));
+  if (!result || blockedBy(result)) return;
+  go('list', { data: result }, push);
+}
+
+async function openChore(id, push = true) {
+  const result = await run(null, () => api('GET', `chore/${id}`));
+  if (!result || blockedBy(result)) return;
+  if (!result.ok) {
+    toast(result.message, 'error');
+    trail = [];
+    return loadList(false);
+  }
+  const listed = trail.concat(state).find((entry) => entry.screen === 'list');
+  go('chore', {
+    chore: result.chore, members: result.members, me: listed && listed.data.me,
+    doneBy: push ? false : state.doneBy,
+  }, push);
+}
+
+async function loadStats(view, push = true) {
+  const result = await run(null, () => api('GET', `stats/${view}`));
+  if (!result || blockedBy(result)) return;
+  go('stats', { data: result }, push);
+}
+
+function openAdd() {
+  const listed = trail.concat(state).find((entry) => entry.screen === 'list');
+  go('add', {
+    members: listed ? listed.data.members : [],
+    values: { text: '', scored: true, assignee: '' },
+  });
+  const input = document.getElementById('text');
+  if (input) input.focus();
+}
+
+// ---- Actions. Every reply carries the chore as it now stands (null once it
+// has gone) and the whole list, so the page draws what the server holds.
+function settle(result) {
+  toast(result.message, result.ok ? 'success' : 'error');
+  if (!result.chores) return;
+  const listed = trail.find((entry) => entry.screen === 'list');
+  if (listed) listed.data = result;
+  if (state.screen === 'chore' && result.chore) {
+    state.chore = result.chore;
+    state.doneBy = false;
+    render();
+  } else {
+    trail = [];
+    go('list', { data: result }, false);
+  }
+}
+
+async function done(button, c, body) {
+  const result = await run(button, () => api('POST', `chore/${c.id}/done`, body));
+  if (!result || blockedBy(result)) return;
+  settle(result);
+}
+
+async function act(button, action) {
+  const result = await run(button, () => api('POST', `chore/${state.chore.id}/${action}`));
+  if (!result || blockedBy(result)) return;
+  settle(result);
+}
+
+async function edit(field, value) {
+  const result = await run(null, () => api('POST', `chore/${state.chore.id}/edit`, { field, value }));
+  if (!result || blockedBy(result)) return;
+  if (!result.ok) {
+    toast(result.message, 'error');
+    render(); // put the control back to what the chore still has
+    return;
+  }
+  settle(result);
+}
+
+async function remove(button) {
+  const c = state.chore;
+  if (!(await confirmAction(`Delete ${c.text}? This removes it for everyone. Undo is in the chat for a day.`))) return;
+  const result = await run(button, () => api('POST', `chore/${c.id}/delete`));
+  if (!result || blockedBy(result)) return;
+  settle(result);
+}
+
+async function save(button) {
+  const values = state.values;
+  const result = await run(button, () => api('POST', 'chores', {
+    text: values.text, scored: values.scored, assignee: values.assignee || null,
+  }));
+  if (!result || blockedBy(result)) return;
+  toast(result.message, result.ok ? 'success' : 'error');
+  if (!result.ok) return;
+  trail = [];
+  go('list', { data: result }, false);
+}
+
+// ---- Start
+async function start() {
+  render();
+  if (!inTelegram && !preview) {
+    go('blocked', { message: 'Open this from the 🐾 Chores button on the pinned board.' }, false);
+    return;
+  }
+  await loadList(false);
+}
+
+// ---- Preview data. Only ever used at localhost, outside Telegram.
+let sample;
+function previewApi(method, path, body) {
+  const me = { id: 2, name: '@nicholaswan' };
+  if (!sample) {
+    sample = {
+      nextId: 6,
+      members: [{ userId: 3, name: '@Dodgerblueee' }, { userId: 2, name: '@nicholaswan' }],
+      chores: [
+        { id: 1, text: 'clear poop', emoji: '💩', state: 'nagging', status: '🔔 nagging since today 9:00 PM', live: true,
+          cadence: 'every 2 days', assignee: null, scored: true, rotate: true, paused: false,
+          schedule: 'every 2 days at 9pm', next: null, timed: false, time: '21:00', scheduleKey: null,
+          paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: 'now', canSkip: false },
+        { id: 2, text: 'renew passport', emoji: '📌', state: 'overdue', status: '⏰ overdue · nagging since Sun 10:00 AM', live: true,
+          cadence: null, assignee: '@Dodgerblueee', scored: false, rotate: false, paused: false,
+          schedule: 'once', next: null, timed: false, time: '10:00', scheduleKey: null,
+          paceKey: null, pace: '60 min', assigneeId: 3, done: 'now', canSkip: false },
+        { id: 3, text: 'trash', emoji: '🗑️', state: 'upcoming', status: 'tomorrow 7:00 PM', live: false,
+          cadence: 'daily', assignee: null, scored: true, rotate: false, paused: false,
+          schedule: 'daily 7pm', next: 'Wed, Oct 28, 7:00 PM', timed: true, time: '19:00', scheduleKey: 'daily',
+          paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: 'early', canSkip: true },
+        { id: 4, text: 'water plants', emoji: '🪴', state: 'parked', status: '😴 in 6 days · Mon 8:00 AM', live: true,
+          cadence: 'every Mon,Thu', assignee: '@nicholaswan', scored: true, rotate: false, paused: false,
+          schedule: 'every Mon,Thu 8am', next: 'Thu, Oct 29, 8:00 AM', timed: true, time: '08:00', scheduleKey: null,
+          paceKey: '30', pace: '30 min', assigneeId: 2, done: 'now', canSkip: true },
+        { id: 5, text: 'pay MyRepublic bill', emoji: '🌐', state: 'paused', status: '⏸️ paused', live: false,
+          cadence: 'on the 1st', assignee: null, scored: false, rotate: false, paused: true,
+          schedule: 'on the 1 at 9am', next: 'Sun, Nov 1, 9:00 AM', timed: true, time: '09:00', scheduleKey: null,
+          paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: null, canSkip: true },
+      ],
+    };
+  }
+  const reply = (data) => new Promise((resolve) => setTimeout(() => resolve({ status: 200, ok: true, ...data }), 150));
+  const listing = () => ({ chores: sample.chores, vacation: null, members: sample.members, me });
+  const withList = (c, data) => reply({ ...data, chore: c || null, ...listing() });
+  if (method === 'GET' && path === 'chores') return reply(listing());
+  const statsMatch = path.match(/^stats\/(week|last)$/);
+  if (statsMatch) {
+    return reply(statsMatch[1] === 'week'
+      ? { view: 'week', week: 'Oct 26', streak: 2, total: 7, expired: 1, together: 2,
+        people: [{ name: '@Dodgerblueee', count: 5, solo: 3 }, { name: '@nicholaswan', count: 4, solo: 2 }],
+        recent: [
+          { emoji: '💩', text: 'clear poop', who: '@Dodgerblueee', when: 'Oct 27, 9:12 PM' },
+          { emoji: '🍽️', text: 'dishes', who: '@nicholaswan & @Dodgerblueee', when: 'Oct 27, 8:40 PM' },
+          { emoji: '🗑️', text: 'trash', who: '@nicholaswan', when: 'Oct 26, 7:05 PM' },
+        ] }
+      : { view: 'last', week: 'Oct 19', streak: 0, total: 0, expired: 0, together: 0, people: [], recent: [] });
+  }
+  if (method === 'POST' && path === 'chores') {
+    if (!/\d|now|tomorrow|daily|noon/i.test(body.text || '')) {
+      return reply({ ok: false, message: 'When? Add a time — e.g. 7pm daily, every mon 8am, tomorrow 9am.' });
+    }
+    const member = sample.members.find((m) => String(m.userId) === String(body.assignee));
+    const added = { id: sample.nextId++, text: body.text.replace(/\s+\d.*$/, ''), emoji: '📌', state: 'upcoming',
+      status: 'tomorrow 7:00 PM', live: false, cadence: /daily/.test(body.text) ? 'daily' : null,
+      assignee: member ? member.name : null, scored: body.scored, rotate: false, paused: false,
+      schedule: 'daily 7pm', next: 'Wed, Oct 28, 7:00 PM', timed: true, time: '19:00', scheduleKey: 'daily',
+      paceKey: 'default', pace: '15/30/60 min', assigneeId: member ? member.userId : null, done: 'early', canSkip: true };
+    sample.chores.push(added);
+    return withList(added, { message: '📝 Added — first reminder Wed, Oct 28, 7:00 PM' });
+  }
+  const match = path.match(/^chore\/(\d+)(?:\/(\w+))?$/);
+  const c = match && sample.chores.find((entry) => entry.id === Number(match[1]));
+  if (!c) return reply({ ok: false, message: 'That chore is already gone.' });
+  const action = match[2];
+  if (!action) return reply({ chore: c, members: sample.members });
+  if (action === 'done') {
+    const who = body.how === 'together' ? 'Together' : body.how === 'as' ? 'Credited' : 'Purrs 😻 —';
+    const message = c.done === 'early' ? 'Done early 😻' : `${who} done.`;
+    if (c.cadence) {
+      Object.assign(c, { state: 'upcoming', status: 'in 2 days · Thu 9:00 PM', live: false, done: 'early', timed: true, next: 'Thu, Oct 29, 9:00 PM' });
+      return withList(c, { message });
+    }
+    sample.chores = sample.chores.filter((entry) => entry !== c);
+    return withList(null, { message });
+  }
+  if (action === 'skip') {
+    c.status = 'in 2 days · Thu 7:00 PM';
+    return withList(c, { message: '⏭️ Skipped — next Thu, Oct 29, 7:00 PM' });
+  }
+  if (action === 'pause' || action === 'resume') {
+    c.paused = action === 'pause';
+    Object.assign(c, c.paused ? { state: 'paused', status: '⏸️ paused', done: null }
+      : { state: 'upcoming', status: 'tomorrow 9:00 AM', done: 'early' });
+    return withList(c, { message: c.paused ? '⏸️ Paused' : '▶️ Resumed — next Wed, Oct 28, 9:00 AM' });
+  }
+  if (action === 'delete') {
+    sample.chores = sample.chores.filter((entry) => entry !== c);
+    return withList(null, { message: '🗑️ Deleted — Undo is in the chat for a day.' });
+  }
+  if (action === 'edit') {
+    const { field, value } = body;
+    if (field === 'time') c.time = value;
+    if (field === 'schedule') { c.scheduleKey = value; c.cadence = value; }
+    if (field === 'nag') c.paceKey = value;
+    if (field === 'assign') {
+      const member = sample.members.find((m) => String(m.userId) === value);
+      c.assigneeId = member ? member.userId : null;
+      c.assignee = member ? member.name : null;
+    }
+    if (field === 'rotate') c.rotate = value;
+    if (field === 'score') c.scored = value;
+    return withList(c, { message: 'Updated ✓' });
+  }
+  return reply({ ok: false, message: 'Not found.' });
+}
+
+start();
+</script>
+</body>
+</html>

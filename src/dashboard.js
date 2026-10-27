@@ -7,9 +7,15 @@ import { isScored } from './household.js';
 // A function declaration, so the import cycle with nag.js (which refreshes the
 // board) resolves at call time rather than at load.
 import { isHouseholdDeferred, isOverdue } from './nag.js';
+import { miniAppLink } from './miniapp-link.js';
 
-export function dashboardButtons() {
-  return { inline_keyboard: [[{ text: '⚙️ Manage chores', callback_data: 'm:list' }]] };
+// Once MINI_APP_URL is set, the board's one button opens the Mini App over the
+// chat; until then it is ⚙️ Manage, which swaps the board's own buttons.
+export function dashboardButtons(env, chatId) {
+  const app = miniAppLink(env, chatId);
+  return { inline_keyboard: [[app
+    ? { text: '🐾 Chores', url: app }
+    : { text: '⚙️ Manage chores', callback_data: 'm:list' }]] };
 }
 
 // Best-guess emoji for a chore, by keyword. Falls back to a paw.
@@ -113,9 +119,13 @@ export function clip(text, max = 42) {
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
 }
 
-// Renders the chore-card list shared by /list and the pinned dashboard.
-// Null when there are no chores at all.
-export async function choreListHtml(env, chatId, tz) {
+// Every chore in board order, each with the status line the board leads it
+// with — shared by the pinned board, /list and the Mini App, so the three
+// never disagree about what a chore is doing. `state` is that line as a key:
+// paused | parked | overdue | nagging | upcoming. `live` is whether a nag is
+// out, which is what Done (rather than Done early) acts on. Null when there
+// are no chores at all.
+export async function choreBoard(env, chatId, tz) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
   ).bind(chatId).all();
@@ -138,10 +148,6 @@ export async function choreListHtml(env, chatId, tz) {
   // opposite of what was chosen.
   const parked = new Map(live.filter((f) => isHouseholdDeferred(f))
     .map((f) => [f.reminder_id, f.next_nag_at ?? f.fired_at]));
-  const lines = ['🐾 <b>Chores</b>'];
-  if (st && st.paused_until && st.paused_until > Date.now()) {
-    lines.push(`✈️ All paused until ${fmtLocal(st.paused_until, tz)} — /resume all to wake the cats.`);
-  }
   // Nagging first, then upcoming soonest-first (a parked chore by its return),
   // paused last.
   const rank = (r) => r.paused ? 2 : parked.has(r.id) ? 1
@@ -150,18 +156,33 @@ export async function choreListHtml(env, chatId, tz) {
   results.sort((a, b) => rank(a) - rank(b)
     || when(a) - when(b)
     || a.display_num - b.display_num);
+  const rows = results.map((r) => {
+    const [state, lead] = r.paused ? ['paused', '⏸️ paused']
+      : parked.has(r.id) ? ['parked', `😴 ${fmtWhen(parked.get(r.id), tz)}`]
+      : r.schedule_kind === 'once' && overdue.has(r.id) ? ['overdue', `⏰ overdue · nagging${sinceText(r)}`]
+      : nagging.has(r.id) ? ['nagging', `🔔 nagging${sinceText(r)}`]
+      : !r.next_fire_at ? ['nagging', '🔔 nagging now']
+      : ['upcoming', fmtWhen(r.next_fire_at, tz)];
+    return { r, state, lead, live: nagging.has(r.id), cadence: cadence(r) };
+  });
+  const vacationUntil = st && st.paused_until && st.paused_until > Date.now() ? st.paused_until : null;
+  return { rows, vacationUntil };
+}
+
+// Renders the chore-card list shared by /list and the pinned dashboard.
+// Null when there are no chores at all.
+export async function choreListHtml(env, chatId, tz) {
+  const board = await choreBoard(env, chatId, tz);
+  if (!board) return null;
+  const lines = ['🐾 <b>Chores</b>'];
+  if (board.vacationUntil) {
+    lines.push(`✈️ All paused until ${fmtLocal(board.vacationUntil, tz)} — /resume all to wake the cats.`);
+  }
   // Two short lines per chore — when, then what — so nothing wraps on a phone
   // (squashbot's board layout). "once" says nothing a missing cadence doesn't.
-  for (const r of results) {
+  for (const { r, lead, cadence: each } of board.rows) {
     const rot = r.schedule_detail.includes('"rotate"') ? ' 🔄' : '';
     const who = r.assignee_name ? ` · ${esc(r.assignee_name)}` : '';
-    const lead = r.paused ? '⏸️ paused'
-      : parked.has(r.id) ? `😴 ${fmtWhen(parked.get(r.id), tz)}`
-      : r.schedule_kind === 'once' && overdue.has(r.id) ? `⏰ overdue · nagging${sinceText(r)}`
-      : nagging.has(r.id) ? `🔔 nagging${sinceText(r)}`
-      : !r.next_fire_at ? '🔔 nagging now'
-      : fmtWhen(r.next_fire_at, tz);
-    const each = cadence(r);
     lines.push('');
     lines.push(lead);
     // Chores are the default here; a reminder is the thing worth flagging,
@@ -199,7 +220,7 @@ export async function updateDashboard(env, chatId) {
     }
 
     if (msgId) {
-      const res = await editMessage(env, chatId, msgId, html, dashboardButtons());
+      const res = await editMessage(env, chatId, msgId, html, dashboardButtons(env, chatId));
       if (res.ok || String(res.description || '').includes('not modified')) return;
       // Only a board that is genuinely gone earns a replacement. Anything else
       // — a network blip, a 429 that outlived tg()'s one retry, any other
@@ -213,7 +234,7 @@ export async function updateDashboard(env, chatId) {
       // Message was deleted by hand — fall through and recreate it.
     }
     // keep: the pinned dashboard is the one message the daily sweep spares.
-    const sent = await sendMessage(env, chatId, html, dashboardButtons(), { silent: true, keep: true });
+    const sent = await sendMessage(env, chatId, html, dashboardButtons(env, chatId), { silent: true, keep: true });
     if (sent.ok) {
       // A board that exists but isn't pinned is worse than a missing one: it
       // scrolls away and nobody notices it stopped being the board. Say so
