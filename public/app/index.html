@@ -69,6 +69,14 @@
   .row.link { color: var(--link); }
   .row.danger { color: var(--danger); }
   .row.indent { padding-left: 30px; }
+  .row.fam { position: relative; padding-left: calc(14px + var(--d, 0) * 22px); }
+  .row.fam.nested::before {
+    content: ""; position: absolute; left: calc(var(--d) * 22px - 2px); top: 0; height: 50%; width: 9px;
+    border-left: 1.5px solid color-mix(in srgb, var(--hint) 60%, transparent);
+    border-bottom: 1.5px solid color-mix(in srgb, var(--hint) 60%, transparent);
+    border-bottom-left-radius: 6px;
+  }
+  .row.fam.self { background: color-mix(in srgb, var(--link) 13%, transparent); }
   .row:disabled { opacity: 0.45; }
   .note { color: var(--hint); font-size: 13px; margin: 6px 4px 0; }
   .banner {
@@ -404,6 +412,28 @@ function chore() {
   const assignees = [['0', 'Anyone'], ...members.map((member) => [String(member.userId), member.name])];
   const assigned = c.assigneeId != null ? String(c.assigneeId) : c.assignee ? null : '0';
 
+  // Nesting: doing the chore picked here resets this one too — washing the
+  // litter box clears the poop. Only recurring chores can sit under one.
+  const resetsWith = (c.parents || []).length || c.parentId != null
+    ? h('div', { class: 'field' }, h('span', { class: 'name' },
+      h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'Doing that chore resets this one')),
+      select([['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
+        c.parentId != null ? String(c.parentId) : '0', (event) => edit('parent', event.target.value),
+        c.under || 'Nothing'))
+    : null;
+  // The whole family, top tier first, this chore highlighted. Every other
+  // member opens its own screen.
+  const fam = c.family || [];
+  const relation = { above: 'resets this one', below: 'reset by this one', self: 'this chore' };
+  const famRows = fam.map((m) => {
+    const body = [h('div', { class: 'main' },
+      h('div', { class: 'title' }, title(m)),
+      h('div', { class: 'meta' }, [m.rel === 'self' ? null : m.status, relation[m.rel]].filter(Boolean).join(' · ')))];
+    const props = { class: `row fam${m.depth ? ' nested' : ''}${m.rel === 'self' ? ' self' : ''}`, style: `--d: ${m.depth}` };
+    return m.rel === 'self' ? h('div', props, body)
+      : h('button', { ...props, onclick: () => openChore(m.id) }, body, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›'));
+  });
+
   return [
     header(title(c)),
     h('div', { class: urgent(c) ? 'sub alert' : 'sub' }, c.status),
@@ -414,6 +444,8 @@ function chore() {
       c.state === 'parked' ? 'Snoozed — done anyway?' : c.live ? 'Nagging now' : 'Ahead of the nag'),
       h('div', { class: 'section' }, doneRows),
       early ? h('div', { class: 'note' }, 'Still counts on the board. The schedule moves on past the next slot.') : null] : null,
+
+    fam.length ? [h('div', { class: 'label' }, 'Family'), h('div', { class: 'section' }, famRows, resetsWith)] : null,
 
     h('div', { class: 'label' }, 'Schedule'),
     h('div', { class: 'section' },
@@ -436,18 +468,10 @@ function chore() {
       toggle('Rotation', 'Assign whoever has done it least', c.rotate, (event) => edit('rotate', event.target.checked)),
       toggle('Points', c.scored ? 'Counts on the leaderboard' : 'A reminder — no points',
         c.scored, (event) => edit('score', event.target.checked)),
-      // Nesting: doing the chore picked here resets this one too — washing
-      // the litter box clears the poop. Only recurring chores can sit under one.
-      (c.parents || []).length || c.parentId != null
-        ? h('div', { class: 'field' }, h('span', { class: 'name' },
-          h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'Doing that chore resets this one')),
-          select([['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
-            c.parentId != null ? String(c.parentId) : '0', (event) => edit('parent', event.target.value),
-            c.under || 'Nothing'))
-        : null),
+      // A chore on its own picks its parent here; one already in a family
+      // does it from the Family section.
+      fam.length ? null : resetsWith),
     c.next ? h('div', { class: 'note' }, `Next: ${c.next} · ${c.schedule}`) : null,
-    (c.resets || []).length
-      ? h('div', { class: 'note' }, `Doing this also resets ${c.resets.join(', ')}.`) : null,
 
     h('div', { class: 'label' }, 'More'),
     h('div', { class: 'section' },
@@ -642,15 +666,34 @@ async function start() {
 
 // ---- Preview data. Only ever used at localhost, outside Telegram.
 let sample;
+// What the API's detail() adds for nesting, worked out from the sample.
+function previewNest(c) {
+  const byId = new Map(sample.chores.map((o) => [o.id, o]));
+  const under = (o, id) => { for (let x = o; x && x.parentId != null; x = byId.get(x.parentId)) if (x.parentId === id) return true; return false; };
+  let root = c;
+  while (root.parentId != null && byId.has(root.parentId)) root = byId.get(root.parentId);
+  const family = [];
+  const walk = (o, depth) => {
+    family.push({ id: o.id, text: o.text, emoji: o.emoji, depth, status: o.status,
+      rel: o === c ? 'self' : under(c, o.id) ? 'above' : under(o, c.id) ? 'below' : 'side' });
+    sample.chores.filter((k) => k.parentId === o.id).forEach((k) => walk(k, depth + 1));
+  };
+  walk(root, 0);
+  return {
+    parents: sample.chores.filter((o) => o !== c && o.cadence && !under(o, c.id)).map((o) => ({ id: o.id, text: o.text })),
+    family: family.length > 1 ? family : [],
+  };
+}
+
 function previewApi(method, path, body) {
   const me = { id: 2, name: '@nicholaswan' };
   if (!sample) {
     sample = {
-      nextId: 6,
+      nextId: 8,
       members: [{ userId: 3, name: '@Dodgerblueee' }, { userId: 2, name: '@nicholaswan' }],
       chores: [
         { id: 1, text: 'clear poop', emoji: '💩', state: 'nagging', status: '🔔 nagging since today 9:00 PM', live: true,
-          cadence: 'every 2 days', assignee: null, scored: true, rotate: true, paused: false,
+          cadence: 'every 2 days', assignee: null, scored: true, rotate: true, paused: false, parentId: 6, under: 'wash neakasa',
           schedule: 'every 2 days at 9pm', next: null, timed: false, time: '21:00', scheduleKey: null,
           paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: 'now', canSkip: false },
         { id: 2, text: 'renew passport', emoji: '📌', state: 'overdue', status: '⏰ overdue · nagging since Sun 10:00 AM', live: true,
@@ -669,6 +712,14 @@ function previewApi(method, path, body) {
           cadence: 'on the 1st', assignee: null, scored: false, rotate: false, paused: true,
           schedule: 'on the 1 at 9am', next: 'Sun, Nov 1, 9:00 AM', timed: true, time: '09:00', scheduleKey: null,
           paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: null, canSkip: true },
+        { id: 6, text: 'wash neakasa', emoji: '📌', state: 'upcoming', status: 'Sat 21 Nov 9:00 PM', live: false,
+          cadence: 'every 6 weeks', assignee: null, scored: true, rotate: false, paused: false,
+          schedule: 'every 6 weeks at 9pm', next: 'Sat, Nov 21, 9:00 PM', timed: true, time: '21:00', scheduleKey: null,
+          paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: 'early', canSkip: true },
+        { id: 7, text: 'shake neakasa', emoji: '📌', state: 'upcoming', status: 'Tue 10 Nov 9:00 PM', live: false,
+          cadence: 'every 4 days', assignee: null, scored: true, rotate: false, paused: false, parentId: 1, under: 'clear poop',
+          schedule: 'every 4 days at 9pm', next: 'Tue, Nov 10, 9:00 PM', timed: true, time: '21:00', scheduleKey: null,
+          paceKey: 'default', pace: '15/30/60 min', assigneeId: null, done: 'early', canSkip: true },
       ],
     };
   }
@@ -706,10 +757,7 @@ function previewApi(method, path, body) {
   if (!c) return reply({ ok: false, message: 'That chore is already gone.' });
   const action = match[2];
   if (!action) {
-    const nest = {
-      parents: sample.chores.filter((o) => o !== c && o.cadence).map((o) => ({ id: o.id, text: o.text })),
-      resets: sample.chores.filter((o) => o.parentId === c.id).map((o) => o.text),
-    };
+    const nest = previewNest(c);
     return reply({ chore: { ...c, ...nest }, members: sample.members });
   }
   if (action === 'done') {
@@ -753,10 +801,7 @@ function previewApi(method, path, body) {
       c.parentId = parent ? parent.id : null;
       c.under = parent ? parent.text : null;
     }
-    const nest = {
-      parents: sample.chores.filter((o) => o !== c && o.cadence).map((o) => ({ id: o.id, text: o.text })),
-      resets: sample.chores.filter((o) => o.parentId === c.id).map((o) => o.text),
-    };
+    const nest = previewNest(c);
     return withList({ ...c, ...nest }, { message: 'Updated ✓' });
   }
   return reply({ ok: false, message: 'Not found.' });

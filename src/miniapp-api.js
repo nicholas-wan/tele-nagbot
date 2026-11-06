@@ -23,7 +23,7 @@ import { applyEditorChoice, completeNow, setEditorFlag, skipNext, JUST_FIRED, NA
 import { createReminder, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStats, winnerStreak } from './stats.js';
-import { parentChoices, setParent, descendants } from './nesting.js';
+import { parentChoices, setParent } from './nesting.js';
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -88,6 +88,38 @@ async function listing(env, chatId, tz, user) {
   };
 }
 
+// The nested family a chore belongs to (nesting.js), top tier first and each
+// chore under its own parent, drawn from the board's rows. `rel` says how each
+// one relates to the chore on screen: 'above' (doing it resets this one),
+// 'self', 'below' (reset when this one is done), or 'side' (same family, other
+// branch). A chore on its own has no family: [].
+function family(board, r) {
+  const rows = new Map(board.rows.map((entry) => [entry.r.id, entry]));
+  const kids = (id) => board.rows.filter((entry) => entry.r.parent_id === id).sort((a, b) => a.r.id - b.r.id);
+  const above = new Set();
+  let root = r;
+  while (root.parent_id != null && rows.has(root.parent_id) && !above.has(root.parent_id) && root.parent_id !== r.id) {
+    above.add(root.parent_id);
+    root = rows.get(root.parent_id).r;
+  }
+  const below = new Set();
+  const out = [];
+  const seen = new Set();
+  const walk = (entry, depth, underSelf) => {
+    if (seen.has(entry.r.id)) return;
+    seen.add(entry.r.id);
+    if (underSelf) below.add(entry.r.id);
+    out.push({ entry, depth });
+    for (const kid of kids(entry.r.id)) walk(kid, depth + 1, underSelf || entry.r.id === r.id);
+  };
+  walk(rows.get(root.id), 0, false);
+  if (out.length < 2) return [];
+  return out.map(({ entry, depth }) => ({
+    id: entry.r.id, text: entry.r.text, emoji: choreEmoji(entry.r.text), depth, status: entry.lead,
+    rel: entry.r.id === r.id ? 'self' : above.has(entry.r.id) ? 'above' : below.has(entry.r.id) ? 'below' : 'side',
+  }));
+}
+
 // One chore with everything its screen can change, each value as the editor
 // keys it. A schedule, time or nag pace the editor does not offer — "every 8
 // days", a 7:45 typed in the command, "nag:15m" — has no key, and the page
@@ -107,10 +139,10 @@ async function detail(env, chatId, id, tz) {
   return {
     ...summary(row, choreNames(board)),
     // Nesting: the chore this one sits under, the ones it may sit under, and
-    // the ones that reset when it is done.
+    // the whole family it belongs to.
     parentId: r.parent_id ?? null,
     parents: (await parentChoices(env, r)).map((c) => ({ id: c.id, text: c.text })),
-    resets: (await descendants(env, chatId, r.id)).map((c) => c.text),
+    family: family(board, r),
     schedule: describeSchedule(r),
     next: r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : null,
     // Time and schedule are the next slot's, so a chore nagging with nothing

@@ -316,3 +316,32 @@ describe('the board button', () => {
     expect(miniAppLink({ MINI_APP_URL: 'not a url' }, 1)).toBeNull();
   });
 });
+
+describe('nested chores', () => {
+  const nest = (id, num, text, parent) => seed('reminders', {
+    id, chat_id: 1, display_num: num, text, schedule_kind: 'interval', schedule_detail: '{"days":4,"h":21,"mi":0}',
+    nag_intervals: '[15,30,60]', next_fire_at: TUE_7PM, paused: 0, created_at: NOW, scored: 1, parent_id: parent,
+  });
+
+  it('draws the whole family, top tier first, relative to the chore on screen', async () => {
+    nest(43, 5, 'wash neakasa', null);
+    nest(5, 6, 'clear poop', 43);
+    nest(60, 7, 'shake neakasa', 5);
+    nest(61, 8, 'scoop tray', 43);
+    const rels = async (id) => (await call(`chore/${id}`)).chore.family.map((m) => [m.text, m.depth, m.rel]);
+    expect(await rels(5)).toEqual([
+      ['wash neakasa', 0, 'above'], ['clear poop', 1, 'self'], ['shake neakasa', 2, 'below'], ['scoop tray', 1, 'side'],
+    ]);
+    expect((await rels(43)).map(([, , rel]) => rel)).toEqual(['self', 'below', 'below', 'below']);
+    expect((await call('chore/8')).chore.family).toEqual([]);
+    expect((await call('chores')).chores.find((c) => c.id === 60).under).toBe('clear poop');
+  });
+
+  it('sets and clears what a chore resets with, and refuses a loop', async () => {
+    nest(43, 5, 'wash neakasa', null);
+    nest(5, 6, 'clear poop', null);
+    expect((await call('chore/5/edit', { field: 'parent', value: '43' })).chore.parentId).toBe(43);
+    expect(await call('chore/43/edit', { field: 'parent', value: '5' })).toMatchObject({ ok: false });
+    expect((await call('chore/5/edit', { field: 'parent', value: '0' })).chore.parentId).toBeNull();
+  });
+});
