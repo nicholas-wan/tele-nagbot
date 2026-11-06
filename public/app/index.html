@@ -313,7 +313,8 @@ const urgent = (c) => c.state === 'nagging' || c.state === 'overdue';
 
 // The board's second line: how often, for whom, and whether it scores.
 function details(c) {
-  return [c.cadence, c.assignee, c.rotate ? '🔄 rotation' : null, c.scored ? null : 'reminder · no points']
+  return [c.cadence, c.under ? `↪️ resets with ${c.under}` : null, c.assignee,
+    c.rotate ? '🔄 rotation' : null, c.scored ? null : 'reminder · no points']
     .filter(Boolean).join(' · ');
 }
 
@@ -434,8 +435,19 @@ function chore() {
         select(assignees, assigned, (event) => edit('assign', event.target.value), c.assignee || 'Anyone')),
       toggle('Rotation', 'Assign whoever has done it least', c.rotate, (event) => edit('rotate', event.target.checked)),
       toggle('Points', c.scored ? 'Counts on the leaderboard' : 'A reminder — no points',
-        c.scored, (event) => edit('score', event.target.checked))),
+        c.scored, (event) => edit('score', event.target.checked)),
+      // Nesting: doing the chore picked here resets this one too — washing
+      // the litter box clears the poop. Only recurring chores can sit under one.
+      (c.parents || []).length || c.parentId != null
+        ? h('div', { class: 'field' }, h('span', { class: 'name' },
+          h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'Doing that chore resets this one')),
+          select([['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
+            c.parentId != null ? String(c.parentId) : '0', (event) => edit('parent', event.target.value),
+            c.under || 'Nothing'))
+        : null),
     c.next ? h('div', { class: 'note' }, `Next: ${c.next} · ${c.schedule}`) : null,
+    (c.resets || []).length
+      ? h('div', { class: 'note' }, `Doing this also resets ${c.resets.join(', ')}.`) : null,
 
     h('div', { class: 'label' }, 'More'),
     h('div', { class: 'section' },
@@ -693,7 +705,13 @@ function previewApi(method, path, body) {
   const c = match && sample.chores.find((entry) => entry.id === Number(match[1]));
   if (!c) return reply({ ok: false, message: 'That chore is already gone.' });
   const action = match[2];
-  if (!action) return reply({ chore: c, members: sample.members });
+  if (!action) {
+    const nest = {
+      parents: sample.chores.filter((o) => o !== c && o.cadence).map((o) => ({ id: o.id, text: o.text })),
+      resets: sample.chores.filter((o) => o.parentId === c.id).map((o) => o.text),
+    };
+    return reply({ chore: { ...c, ...nest }, members: sample.members });
+  }
   if (action === 'done') {
     const who = body.how === 'together' ? 'Together' : body.how === 'as' ? 'Credited' : 'Purrs 😻 —';
     const message = c.done === 'early' ? 'Done early 😻' : `${who} done.`;
@@ -730,7 +748,16 @@ function previewApi(method, path, body) {
     }
     if (field === 'rotate') c.rotate = value;
     if (field === 'score') c.scored = value;
-    return withList(c, { message: 'Updated ✓' });
+    if (field === 'parent') {
+      const parent = sample.chores.find((o) => String(o.id) === value);
+      c.parentId = parent ? parent.id : null;
+      c.under = parent ? parent.text : null;
+    }
+    const nest = {
+      parents: sample.chores.filter((o) => o !== c && o.cadence).map((o) => ({ id: o.id, text: o.text })),
+      resets: sample.chores.filter((o) => o.parentId === c.id).map((o) => o.text),
+    };
+    return withList({ ...c, ...nest }, { message: 'Updated ✓' });
   }
   return reply({ ok: false, message: 'Not found.' });
 }

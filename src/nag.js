@@ -6,6 +6,7 @@ import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
 import { nextOccurrence, fmtLocal, fmtClock, localParts } from './time.js';
 import { sendCelebrationSticker } from './stickers.js';
 import { isScored } from './household.js';
+import { coverChildren, coverLine } from './nesting.js';
 import { updateDashboard } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
@@ -257,6 +258,8 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   if (!res.meta.changes) return false;
   // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.
   firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
+  // Chores under this one are covered by it (nesting.js), and the receipt says so.
+  const also = coverLine(await coverChildren(env, reminder, firing.id, tz));
   if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
@@ -279,7 +282,7 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   } else if (firing.last_message_id) {
     // A receipt lives two hours; the clock time is all it needs.
     await editNag(env, firing,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}`,
+      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}${also}`,
       receiptButtons(firing.id));
     // The nag earned a day; its receipt only needs to be glanced at.
     await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
@@ -290,7 +293,7 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
   // put away with OK, then finished from the board.
   if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
     await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}`, receiptButtons(firing.id),
+      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`, receiptButtons(firing.id),
       { silent: true, ttl: RECEIPT_TTL_MS });
   }
   // A finished one-off goes to the trash rather than straight out, so that

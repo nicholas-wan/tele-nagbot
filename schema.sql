@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS reminders (
   paused INTEGER NOT NULL DEFAULT 0,
   created_by TEXT,
   created_at INTEGER NOT NULL,
-  scored INTEGER NOT NULL DEFAULT 1      -- /chore = 1 (leaderboard points), /remind = 0
+  scored INTEGER NOT NULL DEFAULT 1,     -- /chore = 1 (leaderboard points), /remind = 0
+  parent_id INTEGER                     -- the chore this one sits under; doing that one resets this (nesting.js)
 );
 
 CREATE TABLE IF NOT EXISTS firings (

@@ -24,6 +24,7 @@ import { cmdStats, handleStatsCallback } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
 import { digestView } from './cron.js';
+import { coveredNames } from './nesting.js';
 
 // Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
 let botUsername = null;
@@ -823,6 +824,9 @@ async function handleCallback(env, cb) {
       .bind(+tr[1], cb.message.chat.id).first();
     if (!row) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
     const r = JSON.parse(row.payload);
+    // Only a stashed chore can be restored. A nested chore's reset record
+    // (`_cover`, nesting.js) lives in trash too, and ↩️ Not done needs it.
+    if (r._cover != null || r.id == null) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
     // Claim the stash first: two taps on the same Undo used to restore twice.
     const claim = await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already restored.');
@@ -853,7 +857,8 @@ async function handleCallback(env, cb) {
     const next = await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?')
       .bind(firing.reminder_id).first();
     // Same receipt as the one being widened, so ↩️ Not done stays on it.
-    const receipt = earlyReceipt(firing.reminder_text || 'chore', credit, next && next.next_fire_at, tz, firing.id);
+    const receipt = earlyReceipt(firing.reminder_text || 'chore', credit, next && next.next_fire_at, tz, firing.id,
+      await coveredNames(env, firing.chat_id, firing.id));
     await editRef(env, ctx, firing.chat_id, ref, receipt.html, receipt.markup);
     return answerCallback(env, cb.id, 'Shared credit 🤝');
   }

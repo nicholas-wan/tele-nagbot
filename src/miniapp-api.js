@@ -23,6 +23,7 @@ import { applyEditorChoice, completeNow, setEditorFlag, skipNext, JUST_FIRED, NA
 import { createReminder, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStats, winnerStreak } from './stats.js';
+import { parentChoices, setParent, descendants } from './nesting.js';
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -65,9 +66,13 @@ const pad = (n) => String(n).padStart(2, '0');
 const sameDays = (days, want) => Array.isArray(days)
   && [...days].sort().join(',') === [...want].sort().join(',');
 
-// One chore as a list row: what the board says about it, as text.
-function summary({ r, state, lead, live, cadence }) {
+const choreNames = (board) => new Map(board.rows.map(({ r }) => [r.id, r.text]));
+
+// One chore as a list row: what the board says about it, as text. `under` is
+// the chore it sits under (nesting.js), named.
+function summary({ r, state, lead, live, cadence }, names = new Map()) {
   return {
+    under: r.parent_id != null ? names.get(r.parent_id) || null : null,
     id: r.id, text: r.text, emoji: choreEmoji(r.text), state, status: lead, live,
     cadence: cadence === 'once' ? null : cadence, assignee: r.assignee_name || null,
     scored: isScored(r), rotate: Boolean(JSON.parse(r.schedule_detail).rotate), paused: Boolean(r.paused),
@@ -77,7 +82,7 @@ function summary({ r, state, lead, live, cadence }) {
 async function listing(env, chatId, tz, user) {
   const [board, members] = await Promise.all([choreBoard(env, chatId, tz), householdMembers(env, chatId)]);
   return {
-    chores: board ? board.rows.map(summary) : [],
+    chores: board ? board.rows.map((row) => summary(row, choreNames(board))) : [],
     vacation: board && board.vacationUntil ? fmtLocal(board.vacationUntil, tz) : null,
     members, me: { id: user.id, name: senderName(user) },
   };
@@ -100,7 +105,12 @@ async function detail(env, chatId, id, tz) {
     : r.schedule_kind === 'weekly' && sameDays(d.days, [1, 2, 3, 4, 5]) ? 'weekdays'
     : r.schedule_kind === 'weekly' && sameDays(d.days, [0, 6]) ? 'weekends' : null;
   return {
-    ...summary(row),
+    ...summary(row, choreNames(board)),
+    // Nesting: the chore this one sits under, the ones it may sit under, and
+    // the ones that reset when it is done.
+    parentId: r.parent_id ?? null,
+    parents: (await parentChoices(env, r)).map((c) => ({ id: c.id, text: c.text })),
+    resets: (await descendants(env, chatId, r.id)).map((c) => c.text),
     schedule: describeSchedule(r),
     next: r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : null,
     // Time and schedule are the next slot's, so a chore nagging with nothing
@@ -128,7 +138,7 @@ async function findChore(env, chatId, id) {
 }
 
 const GONE = { ok: false, message: 'That chore is already gone.' };
-const EDIT_FIELDS = new Set(['time', 'schedule', 'nag', 'assign', 'rotate', 'score']);
+const EDIT_FIELDS = new Set(['time', 'schedule', 'nag', 'assign', 'rotate', 'score', 'parent']);
 
 // Who a Done credits: the person tapping, everyone on the roster with them,
 // or one housemate chosen by user_id, as the board's 👤 Done early by… does.
@@ -195,6 +205,9 @@ const routes = [
     if (!EDIT_FIELDS.has(field)) return json({ ok: false, message: 'Not something the editor changes.' });
     if (field === 'rotate' || field === 'score') {
       await setEditorFlag(env, r, field, Boolean(body.value), tz);
+    } else if (field === 'parent') {
+      const problem = await setParent(env, r, body.value == null ? null : String(body.value));
+      if (problem) return json({ ok: false, message: problem });
     } else {
       if ((field === 'time' || field === 'schedule') && r.next_fire_at == null) {
         return json({ ok: false, message: 'It is nagging now — change its time once it is done.' });

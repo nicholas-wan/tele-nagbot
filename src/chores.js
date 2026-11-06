@@ -10,6 +10,7 @@ import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNag
          completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashReminder, OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
+import { coverChildren, uncoverChildren, coverLine } from './nesting.js';
 
 // Done completes the chore from its confirmation: an assigned chore's private
 // copy is the only message its owner sees until the nag, and a private nag
@@ -166,15 +167,15 @@ export async function restoreReminder(env, r, { nextFireAt } = {}) {
     : r.next_fire_at != null ? r.next_fire_at : Date.now();
   await env.DB.prepare(
     `INSERT INTO reminders (id, chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, next_fire_at, nag_intervals, paused, created_by, created_at, scored)
+       schedule_detail, next_fire_at, nag_intervals, paused, created_by, created_at, scored, parent_id)
      VALUES (?, ?, CASE WHEN ? > 0 AND NOT EXISTS
        (SELECT 1 FROM reminders WHERE chat_id = ? AND display_num = ?)
-       THEN ? ELSE ${FREE_NUMBER} END, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       THEN ? ELSE ${FREE_NUMBER} END, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     r.id, r.chat_id, r.display_num ?? null, r.chat_id, r.display_num ?? null,
     r.display_num ?? null, r.chat_id, r.chat_id, r.text, r.assignee_name, r.assignee_user_id, r.schedule_kind,
     r.schedule_detail, slot, r.nag_intervals,
-    r.paused ? 1 : 0, r.created_by, r.created_at, r.scored != null ? r.scored : 1
+    r.paused ? 1 : 0, r.created_by, r.created_at, r.scored != null ? r.scored : 1, r.parent_id ?? null
   ).run();
   return r.id;
 }
@@ -218,6 +219,7 @@ export async function undoCompletion(env, firing, by, tz) {
        AND NOT EXISTS (SELECT 1 FROM firings newer WHERE newer.reminder_id = firings.reminder_id AND newer.id > firings.id)`
   ).bind(nextNag, firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
+  await uncoverChildren(env, firing.chat_id, firing.id, tz);
   if (trashed) {
     await restoreReminder(env, r, { nextFireAt: null });
     await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(trashed.id).run();
@@ -442,10 +444,11 @@ export async function completeEarly(env, r, credit, tz) {
     return Boolean(firing && await completeFiring(env, firing, r, credit, tz)) && firing.id;
   }
   const firingId = ins.meta.last_row_id;
+  const covered = await coverChildren(env, r, firingId, tz);
   // The receipt is the shared record — there is no nag message to edit.
   const next = r.schedule_kind === 'once' ? null
     : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
-  const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId);
+  const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId, covered);
   await sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS });
   await updateDashboard(env, r.chat_id);
   return firingId;
@@ -455,9 +458,9 @@ export async function completeEarly(env, r, credit, tz) {
 // the wider credit. A solo credit carries the fix-up button, because tapping
 // Done early when the work was actually shared shouldn't need an admin to
 // repair; every credit carries ↩️ Not done, like every other receipt.
-export function earlyReceipt(text, credit, nextFireAt, tz, firingId) {
+export function earlyReceipt(text, credit, nextFireAt, tz, firingId, covered = []) {
   const html = `😻 <s>${esc(text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
-    (nextFireAt ? `\nNext: ${fmtLocal(nextFireAt, tz)}` : '');
+    (nextFireAt ? `\nNext: ${fmtLocal(nextFireAt, tz)}` : '') + coverLine(covered);
   const together = credit.includes(CREDIT_SEP) ? []
     : [{ text: '🤝 Together too', callback_data: `g:${firingId}` }];
   return { html, markup: { inline_keyboard: [[
@@ -495,6 +498,7 @@ export async function undoEarly(env, firing, by, tz) {
     "DELETE FROM firings WHERE id = ? AND state = 'done' AND done_at = ?"
   ).bind(firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
+  await uncoverChildren(env, firing.chat_id, firing.id, tz);
   if (r) {
     await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at IS ?')
       .bind(before.next_fire_at, r.id, r.next_fire_at).run();
