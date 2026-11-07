@@ -21,6 +21,8 @@ describe('webhook answers', () => {
           async run() { return { meta: { changes: query.includes('webhook_updates') ? 1 : 0 } }; },
         }; } };
       },
+      // The webhook stores and claims a delivery in one batch.
+      async batch(statements) { return statements.map(() => ({ results: [], meta: { changes: 1 } })); },
     },
     ...extra,
   });
@@ -76,7 +78,19 @@ describe('webhook answers', () => {
         from: { id: 7, first_name: 'Nick' },
         message: { message_id: 55, chat: { id: -123456789 } },
       },
-    }), env({ DB: { prepare(query) { if (!query.includes('webhook_updates')) throw new Error('D1 is down'); return { bind() { return { run: async () => ({ meta: { changes: 1 } }) }; } }; } } }),
+    }), env({ DB: {
+      // Storing the delivery works; every read after it fails.
+      prepare(query) { return { bind() { return {
+        query,
+        run: async () => ({ meta: { changes: 1 } }),
+        first: async () => { throw new Error('D1 is down'); },
+        all: async () => { throw new Error('D1 is down'); },
+      }; } }; },
+      batch: async (statements) => {
+        if (statements.some((s) => /^\s*SELECT/i.test(s.query))) throw new Error('D1 is down');
+        return statements.map(() => ({ results: [], meta: { changes: 1 } }));
+      },
+    } }),
     { waitUntil: (task) => tasks.push(task) });
     const body = JSON.parse(await response.text());
     expect(body.method).toBe('answerCallbackQuery');

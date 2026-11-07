@@ -2,7 +2,7 @@
 //  - fetch: Telegram webhook (validated with the secret token header)
 //  - scheduled: every-minute cron that fires reminders and re-nags
 
-import { enqueueUpdate, processUpdate } from './updates.js';
+import { acceptUpdate, runClaimedUpdate } from './updates.js';
 import { updateDashboard } from './dashboard.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
@@ -36,16 +36,22 @@ export default {
       if (!update || !Number.isSafeInteger(update.update_id)) {
         return new Response('bad update', { status: 400 });
       }
+      let accepted;
       try {
-        if (!await enqueueUpdate(env, update)) return new Response('ok');
+        accepted = await acceptUpdate(env, update);
       } catch (e) {
         console.log(`could not persist update: ${e}`);
         return new Response('temporarily unavailable', { status: 503 });
       }
-      // Once durable, cron can recover a delivery that never starts. Started
-      // updates are claimed once, including when Telegram repeats the POST.
-      const handling = processUpdate(env, update).then(async (processed) => {
-        if (!processed && update.callback_query?.id) {
+      if (accepted === 'rejected') return new Response('ok');
+      // Stored and claimed in one round trip (acceptUpdate). A repeated POST
+      // of the same update claims nothing and is only acknowledged. Handling
+      // starts on the next microtask, so the toast capture below is armed
+      // before anything can answer.
+      const handling = Promise.resolve().then(async () => {
+        if (accepted === 'claimed') {
+          await runClaimedUpdate(env, update, { memberRecorded: true });
+        } else if (update.callback_query?.id) {
           await answerCallback(env, update.callback_query.id, 'Already received 👍');
         }
       }).catch(async (e) => {
@@ -89,7 +95,7 @@ export default {
     }
     // The Mini App's API; the page itself is a static asset at /app/.
     if (url.pathname.startsWith('/api/app/')) {
-      return handleMiniAppApi(request, env, url.pathname.slice('/api/app/'.length));
+      return handleMiniAppApi(request, env, url.pathname.slice('/api/app/'.length), Date.now(), ctx);
     }
     // One-time helper: POST /setup with ADMIN_SECRET as a bearer token makes
     // the Worker register its own webhook with Telegram. WEBHOOK_SECRET is

@@ -125,15 +125,36 @@ export function clip(text, max = 42) {
 // paused | parked | overdue | nagging | upcoming. `live` is whether a nag is
 // out, which is what Done (rather than Done early) acts on. Null when there
 // are no chores at all.
-export async function choreBoard(env, chatId, tz) {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE chat_id = ? ORDER BY id'
-  ).bind(chatId).all();
+// Everything the board is drawn from, in one D1 batch — one round trip where
+// it used to be three (four with the pin's own settings read). `members` adds
+// the roster, for the Mini App, which shows both.
+export async function loadBoard(env, chatId, { members = false } = {}) {
+  const statements = [
+    env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ? ORDER BY id').bind(chatId),
+    env.DB.prepare('SELECT paused_until, dashboard_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
+    env.DB.prepare(
+      "SELECT reminder_id, fired_at, next_nag_at, snoozed_until FROM firings WHERE chat_id = ? AND state = 'nagging'"
+    ).bind(chatId),
+  ];
+  if (members) {
+    statements.push(env.DB.prepare('SELECT user_id, username, first_name FROM members WHERE chat_id = ?').bind(chatId));
+  }
+  const [reminders, settings, live, roster] = await env.DB.batch(statements);
+  return {
+    reminders: reminders.results || [],
+    settings: (settings.results || [])[0] || null,
+    live: live.results || [],
+    members: roster ? roster.results || [] : null,
+  };
+}
+
+export async function choreBoard(env, chatId, tz, loaded = null) {
+  const data = loaded || await loadBoard(env, chatId);
+  // A copy: the sort below must not reorder rows a caller still holds.
+  const results = [...data.reminders];
   if (!results.length) return null;
-  const st = await env.DB.prepare('SELECT paused_until FROM settings WHERE chat_id = ?').bind(chatId).first();
-  const live = (await env.DB.prepare(
-    "SELECT reminder_id, fired_at, next_nag_at, snoozed_until FROM firings WHERE chat_id = ? AND state = 'nagging'"
-  ).bind(chatId).all()).results;
+  const st = data.settings;
+  const { live } = data;
   const nagging = new Set(live.map((f) => f.reminder_id));
   const overdue = new Set(live.filter((f) => isOverdue(f)).map((f) => f.reminder_id));
   // When each live chore first nagged, so the board says how long it has been
@@ -171,8 +192,8 @@ export async function choreBoard(env, chatId, tz) {
 
 // Renders the chore-card list shared by /list and the pinned dashboard.
 // Null when there are no chores at all.
-export async function choreListHtml(env, chatId, tz) {
-  const board = await choreBoard(env, chatId, tz);
+export async function choreListHtml(env, chatId, tz, loaded = null) {
+  const board = await choreBoard(env, chatId, tz, loaded);
   if (!board) return null;
   const lines = ['🐾 <b>Chores</b>'];
   if (board.vacationUntil) {
@@ -194,17 +215,57 @@ export async function choreListHtml(env, chatId, tz) {
   return lines.join('\n');
 }
 
+// Board redraws asked for while one update or Mini App request is being
+// handled are collected and drawn once, when the work that changed things is
+// done. A tap used to redraw the pin in the middle of its own work — before
+// the card it was changing, and often twice — and each redraw is a D1 read
+// plus a Telegram edit. deferBoards gives that piece of work its own env;
+// flushBoards draws whatever it asked for. The webhook, the Mini App and each
+// cron tick use one; anything without one (/admin, the tests that call
+// handlers directly) draws at once.
+const BOARDS = Symbol('boards');
+
+export function deferBoards(env) {
+  const scoped = Object.create(env);
+  scoped[BOARDS] = new Set();
+  return scoped;
+}
+
+// For a caller that has just drawn the board message itself, chore list and
+// all — the editor, when it lives on the pin. A pending redraw would run
+// after it and put the board's own button back over the editor's.
+export function boardDrawn(env, chatId) {
+  if (env[BOARDS]) env[BOARDS].delete(chatId);
+}
+
+export async function flushBoards(env) {
+  const chats = env[BOARDS];
+  if (!chats) return;
+  while (chats.size) {
+    const [chatId] = chats;
+    chats.delete(chatId);
+    await drawDashboard(env, chatId);
+  }
+}
+
 // One pinned message per chat, silently edited in place: the full chore list
 // (nagging marked 🔔, paused included). Created on first need, unpinned and
 // removed only when the chore list is empty.
 export async function updateDashboard(env, chatId) {
+  if (env[BOARDS]) {
+    env[BOARDS].add(chatId);
+    return;
+  }
+  await drawDashboard(env, chatId);
+}
+
+async function drawDashboard(env, chatId) {
   try {
-    const row = await env.DB.prepare(
-      'SELECT dashboard_msg_id, tz FROM settings WHERE chat_id = ?'
-    ).bind(chatId).first();
+    const loaded = await loadBoard(env, chatId);
+    const row = loaded.settings;
     const msgId = row && row.dashboard_msg_id;
     const tz = (row && row.tz) || 'Asia/Singapore';
-    let html = await choreListHtml(env, chatId, tz);
+    let html = await choreListHtml(env, chatId, tz, loaded);
 
     if (!html) {
       if (msgId) {

@@ -1,22 +1,43 @@
 import { handleUpdate, chatAllowed } from './handlers.js';
-import { isMember } from './household.js';
+import { isMember, rememberMemberStatement } from './household.js';
 import { replyCtx, sendPrivate } from './tg.js';
+import { deferBoards, flushBoards } from './dashboard.js';
+
+const updateChat = (update) => update.message?.chat || update.callback_query?.message?.chat
+  || update.message_reaction?.chat || update.chat_member?.chat;
+const updateFrom = (update) => update.message?.from || update.callback_query?.from
+  || update.message_reaction?.user;
+
+// Whether this update lets the household's roster learn its sender, exactly
+// as handleUpdate would: group traffic from a person, except the updates that
+// are themselves about someone leaving or a membership change.
+function learnsSender(env, update) {
+  const chat = updateChat(update);
+  const from = updateFrom(update);
+  return Boolean(chatAllowed(env, chat?.id) && from && !from.is_bot
+    && !update.message?.left_chat_member && !update.chat_member);
+}
+
+// The household boundary, before any update payload is stored. Rejected group
+// traffic is logged here, since it stops before handleUpdate ever sees it: the
+// usual cause is a group upgraded to a supergroup, whose new chat id
+// ALLOWED_CHATS doesn't name yet, and this line is how `wrangler tail` shows
+// it. DMs stay unlogged; a household member's DM is kept for its one-line
+// pointer back to the group.
+async function admitted(env, update) {
+  const chat = updateChat(update);
+  const from = updateFrom(update);
+  if (chatAllowed(env, chat?.id)) return true;
+  if (chat && chat.id < 0) console.log(`rejected chat ${chat.id} (${chat.type}) "${chat.title || ''}"`);
+  return Boolean(chat && chat.id > 0 && from && !from.is_bot && await isMember(env, from.id));
+}
 
 // A delivery is durable before Telegram gets its ACK. Only a pending update
 // may start; replayed and concurrent deliveries cannot repeat a mutation.
+// Kept for deliveries stored this way before acceptUpdate, which recoverUpdates
+// still starts.
 export async function enqueueUpdate(env, update) {
-  const chat = update.message?.chat || update.callback_query?.message?.chat
-    || update.message_reaction?.chat || update.chat_member?.chat;
-  const from = update.message?.from || update.callback_query?.from || update.message_reaction?.user;
-  if (!chatAllowed(env, chat?.id)) {
-    // Rejected group traffic is logged here, since it now stops before
-    // handleUpdate ever sees it: the usual cause is a group upgraded to a
-    // supergroup, whose new chat id ALLOWED_CHATS doesn't name yet, and this
-    // line is how `wrangler tail` shows it. DMs stay unlogged.
-    if (chat && chat.id < 0) console.log(`rejected chat ${chat.id} (${chat.type}) "${chat.title || ''}"`);
-    // Preserve the household boundary before storing any update payload.
-    if (!chat || chat.id < 0 || !from || from.is_bot || !await isMember(env, from.id)) return false;
-  }
+  if (!await admitted(env, update)) return false;
   await env.DB.prepare(
     `INSERT INTO webhook_updates (update_id, payload, received_at) VALUES (?, ?, ?)
      ON CONFLICT(update_id) DO NOTHING`
@@ -24,38 +45,81 @@ export async function enqueueUpdate(env, update) {
   return true;
 }
 
-export async function processUpdate(env, update) {
-  const claim = await env.DB.prepare(
-    "UPDATE webhook_updates SET state = 'processing', started_at = ? WHERE update_id = ? AND state = 'pending'"
-  ).bind(Date.now(), update.update_id).run();
-  if (!claim.meta.changes) return false;
+// The webhook's one round trip before handling: the delivery is stored and
+// claimed in a single D1 batch (a transaction), together with the sender's
+// roster row. Storing and claiming used to be two round trips and the roster
+// write a third, every one of them in front of every tap's toast. The pair is
+// as safe as before: a batch that fails stores nothing and Telegram is told to
+// retry, and a copy of an update already stored claims nothing. The roster
+// write rides only on a claim, so a repeated delivery changes nothing at all.
+// Returns 'rejected' (not ours, nothing stored), 'duplicate' or 'claimed'.
+export async function acceptUpdate(env, update) {
+  if (!await admitted(env, update)) return 'rejected';
+  const now = Date.now();
+  const statements = [
+    env.DB.prepare(
+      `INSERT INTO webhook_updates (update_id, payload, received_at, state, started_at)
+       VALUES (?, ?, ?, 'processing', ?) ON CONFLICT(update_id) DO NOTHING`
+    ).bind(update.update_id, JSON.stringify(update), now, now),
+  ];
+  const learn = learnsSender(env, update);
+  if (learn) statements.push(rememberMemberStatement(env, updateChat(update).id, updateFrom(update), now, { gated: true }));
+  const [claim] = await env.DB.batch(statements);
+  return claim.meta.changes ? 'claimed' : 'duplicate';
+}
+
+// Handles an update this delivery has claimed, and records how it ended. The
+// pinned board is redrawn once, after the work (deferBoards), and whatever
+// happened: a handler that failed half way may still have changed a chore.
+export async function runClaimedUpdate(env, update, { memberRecorded = false } = {}) {
+  const scoped = deferBoards(env);
   try {
-    await handleUpdate(env, update);
+    await handleUpdate(scoped, update, { memberRecorded });
   } catch (e) {
+    await flushBoards(scoped);
     await env.DB.prepare(
       "UPDATE webhook_updates SET state = 'failed', finished_at = ? WHERE update_id = ? AND state = 'processing'"
     ).bind(Date.now(), update.update_id).run();
     throw e;
   }
-  await env.DB.prepare(
-    "UPDATE webhook_updates SET state = 'done', finished_at = ? WHERE update_id = ? AND state = 'processing'"
+  await Promise.all([
+    flushBoards(scoped),
+    env.DB.prepare(
+      "UPDATE webhook_updates SET state = 'done', finished_at = ? WHERE update_id = ? AND state = 'processing'"
+    ).bind(Date.now(), update.update_id).run(),
+  ]);
+}
+
+export async function processUpdate(env, update) {
+  const claim = await env.DB.prepare(
+    "UPDATE webhook_updates SET state = 'processing', started_at = ? WHERE update_id = ? AND state = 'pending'"
   ).bind(Date.now(), update.update_id).run();
+  if (!claim.meta.changes) return false;
+  await runClaimedUpdate(env, update);
   return true;
 }
 
+// Runs every minute and usually finds nothing, so its two reads and the
+// week-old cleanup share one round trip. An interrupted handler is one that
+// started over 15 minutes ago, so nothing the first loop starts can be in it.
 export async function recoverUpdates(env, now) {
-  const pending = await env.DB.prepare(
-    "SELECT payload FROM webhook_updates WHERE state = 'pending' AND received_at < ? ORDER BY received_at LIMIT 20"
-  ).bind(now - 30000).all();
+  const [pending, interrupted] = await env.DB.batch([
+    env.DB.prepare(
+      "SELECT payload FROM webhook_updates WHERE state = 'pending' AND received_at < ? ORDER BY received_at LIMIT 20"
+    ).bind(now - 30000),
+    env.DB.prepare(
+      "SELECT update_id, payload FROM webhook_updates WHERE state = 'processing' AND started_at < ? LIMIT 20"
+    ).bind(now - 15 * 60000),
+    env.DB.prepare(
+      "DELETE FROM webhook_updates WHERE state IN ('done', 'failed') AND finished_at < ?"
+    ).bind(now - 7 * 86400000),
+  ]);
   for (const row of pending.results) {
     try { await processUpdate(env, JSON.parse(row.payload)); }
     catch (e) { console.log(`recover update failed: ${e.stack || e}`); }
   }
   // An interrupted handler may already have changed chores. Report it instead
   // of replaying a /delete, /done, or /chore with unknowable partial effects.
-  const interrupted = await env.DB.prepare(
-    "SELECT update_id, payload FROM webhook_updates WHERE state = 'processing' AND started_at < ? LIMIT 20"
-  ).bind(now - 15 * 60000).all();
   for (const row of interrupted.results) {
     const claim = await env.DB.prepare(
       "UPDATE webhook_updates SET state = 'failed', finished_at = ? WHERE update_id = ? AND state = 'processing' AND started_at < ?"
@@ -71,7 +135,4 @@ export async function recoverUpdates(env, now) {
         '⚠️ A previous request was interrupted. Check /list before trying it again; it may have partly completed.');
     }
   }
-  await env.DB.prepare(
-    "DELETE FROM webhook_updates WHERE state IN ('done', 'failed') AND finished_at < ?"
-  ).bind(now - 7 * 86400000).run();
 }

@@ -20,19 +20,32 @@ import { nextOccurrence, deferQuietHours } from './time.js';
 import { deleteNag, nagChat, firingCard } from './nag.js';
 import { redrawNag } from './chores.js';
 
-// Every chore that sits under `parentId`, at any depth, in tier order. The
-// `seen` set guards against a cycle that slipped past the setter.
+// Every chore that sits under `parentId`, at any depth, in tier order. One
+// read of the chat's nested chores, walked here: a query per tier used to put
+// a D1 round trip per chore in the family in front of every Done's receipt.
 export async function descendants(env, chatId, parentId) {
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM reminders WHERE chat_id = ? AND parent_id IS NOT NULL ORDER BY id'
+  ).bind(chatId).all();
+  return descendantsIn(results, parentId);
+}
+
+// The same walk over rows already in hand. The `seen` set guards against a
+// cycle that slipped past the setter.
+export function descendantsIn(reminders, parentId) {
+  const kids = new Map();
+  for (const r of [...reminders].sort((a, b) => a.id - b.id)) {
+    if (r.parent_id == null) continue;
+    if (!kids.has(r.parent_id)) kids.set(r.parent_id, []);
+    kids.get(r.parent_id).push(r);
+  }
   const out = [];
   const seen = new Set([parentId]);
   let level = [parentId];
   while (level.length) {
     const next = [];
     for (const id of level) {
-      const { results } = await env.DB.prepare(
-        'SELECT * FROM reminders WHERE chat_id = ? AND parent_id = ? ORDER BY id'
-      ).bind(chatId, id).all();
-      for (const r of results) {
+      for (const r of kids.get(id) || []) {
         if (seen.has(r.id)) continue;
         seen.add(r.id);
         out.push(r);
@@ -166,11 +179,19 @@ export async function uncoverChildren(env, chatId, parentFiringId, tz) {
 // is not under `r` itself (that would be a loop).
 export async function parentChoices(env, r) {
   if (r.schedule_kind === 'once') return [];
-  const below = new Set((await descendants(env, r.chat_id, r.id)).map((c) => c.id));
-  const { results } = await env.DB.prepare(
-    "SELECT id, text FROM reminders WHERE chat_id = ? AND id != ? AND schedule_kind != 'once' ORDER BY display_num"
-  ).bind(r.chat_id, r.id).all();
-  return results.filter((c) => !below.has(c.id));
+  const { results } = await env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ?').bind(r.chat_id).all();
+  return parentChoicesIn(results, r);
+}
+
+// The same choice over the chat's chores already in hand (the Mini App has
+// them from the board), in the order the setter lists them.
+export function parentChoicesIn(reminders, r) {
+  if (r.schedule_kind === 'once') return [];
+  const below = new Set(descendantsIn(reminders, r.id).map((c) => c.id));
+  return reminders
+    .filter((c) => c.id !== r.id && c.schedule_kind !== 'once' && !below.has(c.id))
+    .sort((a, b) => (a.display_num ?? 0) - (b.display_num ?? 0) || a.id - b.id)
+    .map((c) => ({ id: c.id, text: c.text }));
 }
 
 // Sets or clears the chore `r` sits under. Returns a refusal, or null.

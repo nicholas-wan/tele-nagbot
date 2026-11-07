@@ -4,6 +4,7 @@ import { handleUpdate } from '../src/handlers.js';
 import { updateDashboard } from '../src/dashboard.js';
 import { localParts, zonedEpoch } from '../src/time.js';
 import worker from '../src/index.js';
+import { withBatch } from './d1.js';
 
 const TZ = 'Asia/Singapore';
 
@@ -17,7 +18,7 @@ const CHORE = {
 // write so a test can assert on what the bot actually stored.
 function db(reminder = CHORE, { runs = [], dashboardMsgId = 99, firings = [],
                                 pausedUntil = null } = {}) {
-  return {
+  return withBatch({
     prepare(sql) {
       const stmt = (args = []) => ({
         async first() {
@@ -40,7 +41,7 @@ function db(reminder = CHORE, { runs = [], dashboardMsgId = 99, firings = [],
       });
       return { ...stmt(), bind: (...args) => stmt(args) };
     },
-  };
+  });
 }
 
 const env = (reminder, opts) => ({
@@ -121,7 +122,7 @@ describe('editor, board, and setup fixes', () => {
 
   // 2. A failed edit is not evidence the board is gone. Recreating on every
   // failure pins a second board beside the first.
-  const boardDb = () => ({
+  const boardDb = () => (withBatch({
     prepare(sql) {
       const stmt = () => ({
         async first() {
@@ -136,7 +137,7 @@ describe('editor, board, and setup fixes', () => {
       });
       return { ...stmt(), bind: () => stmt() };
     },
-  });
+  }));
 
   function failEdits(description, errorCode) {
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {

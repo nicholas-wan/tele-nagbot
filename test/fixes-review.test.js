@@ -8,6 +8,7 @@ import { handleUpdate } from '../src/handlers.js';
 import { setReminderPaused } from '../src/chores.js';
 import { runCron, renagPending } from '../src/cron.js';
 import { fireReminder } from '../src/firing.js';
+import { d1 } from './d1.js';
 
 const TZ = 'Asia/Singapore';
 const HOUR = 3600000;
@@ -22,18 +23,7 @@ beforeEach(() => {
   sql.exec(`INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (1, 99);
     INSERT INTO members (chat_id, user_id, username, first_name, last_seen) VALUES
       (1, 2, 'anne', 'Anne', ${NOW}), (1, 3, 'zack', 'Zack', ${NOW});`);
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: {
-    prepare(query) {
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => { const r = stmt.run(...args); return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } }; },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: d1(sql) };
   calls = [];
   // refuse(method, body) → a Telegram error description, or null to succeed.
   refuse = () => null;

@@ -7,7 +7,7 @@ import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
-         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashReminder, OVERDUE_NAG_MIN } from './nag.js';
+         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashStatement, OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, describeSchedule } from './dashboard.js';
 import { fireReminder } from './firing.js';
 import { coverChildren, uncoverChildren, coverLine } from './nesting.js';
@@ -112,7 +112,10 @@ export async function confirmNewChore(env, ctx, by, p, tz, id, html) {
 }
 
 // "now" reminders fire on the spot instead of waiting for the next cron tick.
-export async function fireIfDue(env, id, tz) {
+// `dueAt` is the first slot the caller just wrote: when that is still ahead,
+// there is nothing to fire and no need to read the row back to find out.
+export async function fireIfDue(env, id, tz, { dueAt } = {}) {
+  if (dueAt != null && dueAt > Date.now() + 500) return;
   const row = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(id).first();
   if (!row || row.next_fire_at == null || row.next_fire_at > Date.now() + 500) return;
   // Vacation mode is a household-wide "not now", and this is the one fire path
@@ -143,16 +146,19 @@ export async function chatPaused(env, chatId) {
 // in stats — and both removals are reversible, since the Undo button sits on
 // a confirmation for up to a day and the chore may have fired since.
 export async function removeReminder(env, r) {
-  const firings = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
-  ).bind(r.id).all();
-  for (const f of firings.results) {
-    if (f.last_message_id) await deleteNag(env, f);
-    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-  }
-  await env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id).run();
-  await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id).run();
-  return stashReminder(env, r);
+  // The live nags are read and removed, the chore deleted and stashed, in one
+  // transaction; their cards come down from the rows it handed back.
+  const [firings, , , stash] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+    env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+    env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id),
+    stashStatement(env, r),
+  ]);
+  await Promise.all(firings.results.flatMap((f) => [
+    f.last_message_id ? deleteNag(env, f) : null,
+    f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+  ]));
+  return stash.meta.last_row_id;
 }
 
 // Puts a trashed reminder row back, under its old id: AUTOINCREMENT never
@@ -191,7 +197,7 @@ export const UNDO_WINDOW_MS = 86400000;
 // the time the household chose; an overdue one-off nags again within the hour.
 // Every step is bound to the done row that was read, so a second tap loses.
 // Returns { ok } or { ok: false, why: 'late' | 'gone' }.
-export async function undoCompletion(env, firing, by, tz) {
+export async function undoCompletion(env, firing, by, tz, { onClaim } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
@@ -219,6 +225,7 @@ export async function undoCompletion(env, firing, by, tz) {
        AND NOT EXISTS (SELECT 1 FROM firings newer WHERE newer.reminder_id = firings.reminder_id AND newer.id > firings.id)`
   ).bind(nextNag, firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
+  if (onClaim) await onClaim();
   await uncoverChildren(env, firing.chat_id, firing.id, tz);
   if (trashed) {
     await restoreReminder(env, r, { nextFireAt: null });
@@ -257,9 +264,12 @@ export async function skipPastPostponement(env, r, until, tz) {
   return res.meta.changes ? skipped : 0;
 }
 
-export async function deleteReminder(env, r, ctx = null, by = null) {
+// `onClaim` runs once the chore is gone, before the log and the board — where
+// a tap's toast goes.
+export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } = {}) {
   const chatId = r.chat_id;
   const trashId = await removeReminder(env, r);
+  if (onClaim) await onClaim();
   // OK dismisses the log once everyone has seen it; Undo restores the chore.
   const undo = { inline_keyboard: [[
     { text: '↩️ Undo', callback_data: `t:${trashId}` },
@@ -407,7 +417,8 @@ export async function setReminderPaused(env, r, pause, tz, by) {
 // upcoming occurrence now and advance the schedule past it, so the diligent
 // never have to wait for the nag just to tap Done. Returns false when a race
 // got there first and nothing else could be completed.
-export async function completeEarly(env, r, credit, tz) {
+// `onClaim` runs the moment the occurrence is won, as in completeFiring.
+export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
   const now = Date.now();
   const detail = JSON.parse(r.schedule_detail);
   // Day intervals describe the gap between completed chores. When one is done
@@ -441,13 +452,14 @@ export async function completeEarly(env, r, credit, tz) {
     const firing = await env.DB.prepare(
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
     ).bind(r.id).first();
-    return Boolean(firing && await completeFiring(env, firing, r, credit, tz)) && firing.id;
+    return Boolean(firing && await completeFiring(env, firing, r, credit, tz, { onClaim })) && firing.id;
   }
   const firingId = ins.meta.last_row_id;
+  if (onClaim) await onClaim();
+  // The receipt is the shared record — there is no nag message to edit. The
+  // next slot is the one this batch just wrote.
   const covered = await coverChildren(env, r, firingId, tz);
-  // The receipt is the shared record — there is no nag message to edit.
-  const next = r.schedule_kind === 'once' ? null
-    : await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(r.id).first();
+  const next = r.schedule_kind === 'once' ? null : { next_fire_at: nextFireAt };
   const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId, covered);
   await sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS });
   await updateDashboard(env, r.chat_id);
@@ -475,7 +487,7 @@ export function earlyReceipt(text, credit, nextFireAt, tz, firingId, covered = [
 // next_fire_at, or the whole one-off. Refused once a later occurrence has
 // fired, since the slot would then be history, and after a day like every
 // undo. The firing claim comes first, so a second tap has nothing to take.
-export async function undoEarly(env, firing, by, tz) {
+export async function undoEarly(env, firing, by, tz, { onClaim } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
@@ -498,6 +510,7 @@ export async function undoEarly(env, firing, by, tz) {
     "DELETE FROM firings WHERE id = ? AND state = 'done' AND done_at = ?"
   ).bind(firing.id, firing.done_at).run();
   if (!claim.meta.changes) return { ok: false, why: 'late' };
+  if (onClaim) await onClaim();
   await uncoverChildren(env, firing.chat_id, firing.id, tz);
   if (r) {
     await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at IS ?')

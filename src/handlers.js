@@ -100,7 +100,9 @@ async function handleMemberDm(env, update, chat) {
     null, { noOk: true });
 }
 
-export async function handleUpdate(env, update) {
+// `memberRecorded`: the webhook already wrote the sender's roster row in the
+// same round trip that claimed the delivery (acceptUpdate).
+export async function handleUpdate(env, update, { memberRecorded = false } = {}) {
   const chat = (update.message && update.message.chat)
     || (update.callback_query && update.callback_query.message && update.callback_query.message.chat)
     || (update.message_reaction && update.message_reaction.chat)
@@ -133,7 +135,7 @@ export async function handleUpdate(env, update) {
   if (update.chat_member) return handleChatMember(env, update.chat_member);
   // Learn member ids from group traffic: they are the household roster, and an
   // ephemeral (in-group private) nag is addressed to one of them.
-  if (from && !from.is_bot) await rememberMember(env, chat.id, from);
+  if (from && !from.is_bot && !memberRecorded) await rememberMember(env, chat.id, from);
   if (update.message_reaction) return handleReaction(env, update.message_reaction);
   if (update.callback_query) return handleCallback(env, update.callback_query);
 
@@ -343,7 +345,7 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
   p.sourceMsgId = sourceMsgId;
   const { id, html } = await createReminder(env, chatId, p, by, tz);
   await confirmNewChore(env, ctx, by, p, tz, id, html);
-  await fireIfDue(env, id, tz);
+  await fireIfDue(env, id, tz, { dueAt: p.firstFireAt });
 }
 
 // Plain (non-command) text: a reply acting on a nag, a bare "done", or a
@@ -416,9 +418,9 @@ async function handleReaction(env, rx) {
 // Whether a snooze to `until` would outlive the firing: true only for a
 // recurring chore, whose occurrence expires 24h after it fired. A one-off
 // never expires, so any snooze it is given is honoured as chosen.
-async function expiresBefore(env, firing, until) {
+// `r` is the firing's chore, already in hand; a missing one counts as recurring.
+function expiresBefore(firing, until, r) {
   if (until < firing.fired_at + EXPIRE_AFTER_MS) return false;
-  const r = await env.DB.prepare('SELECT schedule_kind FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   return !r || r.schedule_kind !== 'once';
 }
 
@@ -480,9 +482,10 @@ async function handleNagReply(env, msg, firing, ctx) {
     const n = sn[1] ? +sn[1] : 60;
     const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
     let until = Date.now() + Math.min(ms, 24 * 3600000);
+    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     // Never promise a nag past a recurring chore's 24h expiry — cap at one
     // last call before it. A one-off never expires, so it has nothing to cap.
-    if (await expiresBefore(env, firing, until)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
+    if (expiresBefore(firing, until, reminder)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
     // snoozed_until is the household's choice on record; resume and the
     // editor honour it only while next_nag_at still equals it. snoozed_by
     // is who chose it, for any later redraw of the 😴 card.
@@ -492,7 +495,6 @@ async function handleNagReply(env, msg, firing, ctx) {
     ).bind(until, until, senderName(msg.from), firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return sendPrivate(env, ctx, '😼 That one was already handled.');
     await updateDashboard(env, firing.chat_id); // the board shows it parked
-    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     if (reminder && firing.last_message_id) {
       await editNag(env, firing,
         snoozedHtml(reminder, until, senderName(msg.from), tz), snoozedButtons(firing.id, isScored(firing)));
@@ -675,6 +677,20 @@ async function cmdPoke(env, ctx) {
   }
 }
 
+// A nag button's firing and its chore, scoped to the chat the tap came from,
+// in one round trip: every nag button needs both, and reading the chore only
+// once the firing was back put a second D1 trip in front of every toast.
+async function tappedFiring(env, firingId, chatId) {
+  const [f, r] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?').bind(firingId, chatId),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+       WHERE f.id = ? AND f.chat_id = ?`
+    ).bind(firingId, chatId),
+  ]);
+  return { firing: f.results[0] || null, reminder: r.results[0] || null };
+}
+
 async function handleCallback(env, cb) {
   // The tap authorizes a private reply for the next 15 seconds even if the bot
   // has no other recent contact with this member.
@@ -710,12 +726,14 @@ async function handleCallback(env, cb) {
       .bind(+um[1], cb.message.chat.id).first();
     if (!r) return answerCallback(env, cb.id, 'Already gone.');
     const trashId = await removeReminder(env, r);
+    // Said as soon as it is true; the line and the board follow.
+    await answerCallback(env, cb.id, 'Undone');
     await editRef(env, ctx, r.chat_id, ref, `↩️ Undone — <s>${esc(r.text)}</s>`, { inline_keyboard: [[
       { text: '↩️ Restore', callback_data: `t:${trashId}` },
       okButton(keptSourceId(cb)),
     ]] });
     await updateDashboard(env, r.chat_id);
-    return answerCallback(env, cb.id, 'Undone');
+    return;
   }
 
   // Done from a creation confirmation. Completes whatever the chore is up to:
@@ -734,17 +752,20 @@ async function handleCallback(env, cb) {
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
     ).bind(r.id).first();
     let won;
-    if (firing) won = await completeFiring(env, firing, r, credit, tz);
+    const onClaim = () => answerCallback(env, cb.id, 'Purrs 😻');
+    if (firing) won = await completeFiring(env, firing, r, credit, tz, { onClaim });
     else if (r.paused || r.next_fire_at == null) return answerCallback(env, cb.id, 'This chore is not nagging now.');
-    else won = await completeEarly(env, r, credit, tz);
+    else won = await completeEarly(env, r, credit, tz, { onClaim });
     if (!won) return answerCallback(env, cb.id, 'Already handled 👍');
     // The completion drew its own receipt — the card's, or the done-early
     // line — with ↩️ Not done on it. Turning this confirmation into a second
     // receipt left two 😻 lines for one tap, so it goes instead, and takes the
     // command it kept with it: Done is the strongest OK there is for a parse.
-    if (cm[2]) await dismissKept(env, r.chat_id, +cm[2]);
-    await deleteRef(env, ctx, r.chat_id, ref);
-    return answerCallback(env, cb.id, 'Purrs 😻');
+    await Promise.all([
+      cm[2] ? dismissKept(env, r.chat_id, +cm[2]) : null,
+      deleteRef(env, ctx, r.chat_id, ref),
+    ]);
+    return;
   }
 
   // Done from the 8am digest. The digest names what was left hanging, and the
@@ -757,19 +778,19 @@ async function handleCallback(env, cb) {
   const dg = data.match(/^dg:([0-9]+)$/);
   if (dg) {
     const chatId = cb.message.chat.id;
-    const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE id = ? AND chat_id = ? AND state = 'nagging'"
-    ).bind(+dg[1], chatId).first();
-    let toast = 'Already handled 👍';
-    if (firing) {
-      const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+    const { firing, reminder: r } = await tappedFiring(env, +dg[1], chatId);
+    const live = firing && firing.state === 'nagging' ? firing : null;
+    let won = false;
+    if (live) {
       if (!r) return answerCallback(env, cb.id, 'That one is gone.');
-      const won = await completeFiring(env, firing, r, senderName(cb.from), await getTz(env, chatId));
-      if (won) toast = 'Purrs 😻';
+      won = await completeFiring(env, live, r, senderName(cb.from), await getTz(env, chatId), {
+        onClaim: () => answerCallback(env, cb.id, 'Purrs 😻 — ↩️ Not done is below if that was a slip'),
+      });
     }
+    if (!won) await answerCallback(env, cb.id, 'Already handled 👍');
     const view = await digestView(env, chatId, digestIds(cb, +dg[1]));
     await editRef(env, ctx, chatId, ref, view.html, view.markup);
-    return answerCallback(env, cb.id, toast === 'Purrs 😻' ? 'Purrs 😻 — ↩️ Not done is below if that was a slip' : toast);
+    return;
   }
 
   // Take a Done back. The receipt it came from is redrawn by undoCompletion
@@ -783,7 +804,9 @@ async function handleCallback(env, cb) {
       .bind(+nd[1], chatId).first();
     if (!firing || firing.state !== 'done') return answerCallback(env, cb.id, 'Nothing to take back.');
     const tz = await getTz(env, chatId);
-    const res = await undoCompletion(env, firing, senderName(cb.from), tz);
+    const res = await undoCompletion(env, firing, senderName(cb.from), tz, {
+      onClaim: () => answerCallback(env, cb.id, 'Taken back ↩️'),
+    });
     if (!res.ok) {
       return answerCallback(env, cb.id,
         res.why === 'gone' ? 'That chore is gone for good.' : 'Too late to take that back.');
@@ -796,7 +819,7 @@ async function handleCallback(env, cb) {
         `↩️ <b>${esc(firing.reminder_text || 'chore')}</b> — not done after all.`,
         { inline_keyboard: [[okButton()]] });
     }
-    return answerCallback(env, cb.id, 'Taken back ↩️');
+    return;
   }
 
   // Take a Done early back: the receipt it sits on says so.
@@ -806,7 +829,9 @@ async function handleCallback(env, cb) {
     const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
       .bind(+ne[1], chatId).first();
     if (!firing || firing.state !== 'done') return answerCallback(env, cb.id, 'Nothing to take back.');
-    const res = await undoEarly(env, firing, senderName(cb.from), await getTz(env, chatId));
+    const res = await undoEarly(env, firing, senderName(cb.from), await getTz(env, chatId), {
+      onClaim: () => answerCallback(env, cb.id, 'Taken back ↩️'),
+    });
     if (!res.ok) {
       return answerCallback(env, cb.id,
         res.why === 'gone' ? 'That chore is gone for good.' : 'Too late to take that back.');
@@ -814,7 +839,7 @@ async function handleCallback(env, cb) {
     await editRef(env, ctx, chatId, ref,
       `↩️ <b>${esc(firing.reminder_text || 'chore')}</b> — not done after all.`,
       { inline_keyboard: [[okButton()]] });
-    return answerCallback(env, cb.id, 'Taken back ↩️');
+    return;
   }
 
   // Undo a /delete: restore the stashed reminder row.
@@ -831,11 +856,12 @@ async function handleCallback(env, cb) {
     const claim = await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already restored.');
     await restoreReminder(env, r);
+    await answerCallback(env, cb.id, 'Restored 😺');
     await updateDashboard(env, r.chat_id);
     // An OK to put the line away — and, after an Undo, the command it kept.
     await editRef(env, ctx, r.chat_id, ref, `↩️ Restored <b>${esc(r.text)}</b>`,
       { inline_keyboard: [[okButton(keptSourceId(cb))]] });
-    return answerCallback(env, cb.id, 'Restored 😺');
+    return;
   }
 
   // Upgrade a done receipt's credit to the whole household — the fix for
@@ -853,14 +879,17 @@ async function handleCallback(env, cb) {
     const credit = creditTogether(names[0] || senderName(cb.from), [...names.slice(1), ...roster]);
     await env.DB.prepare("UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done'")
       .bind(credit, firing.id).run();
-    const tz = await getTz(env, firing.chat_id);
-    const next = await env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?')
-      .bind(firing.reminder_id).first();
+    await answerCallback(env, cb.id, 'Shared credit 🤝');
+    const [tz, next, covered] = await Promise.all([
+      getTz(env, firing.chat_id),
+      env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(firing.reminder_id).first(),
+      coveredNames(env, firing.chat_id, firing.id),
+    ]);
     // Same receipt as the one being widened, so ↩️ Not done stays on it.
     const receipt = earlyReceipt(firing.reminder_text || 'chore', credit, next && next.next_fire_at, tz, firing.id,
-      await coveredNames(env, firing.chat_id, firing.id));
+      covered);
     await editRef(env, ctx, firing.chat_id, ref, receipt.html, receipt.markup);
-    return answerCallback(env, cb.id, 'Shared credit 🤝');
+    return;
   }
 
   // Dismiss a log line. Works on either kind of message, since deleteRef picks
@@ -895,35 +924,38 @@ async function handleCallback(env, cb) {
     return answerCallback(env, cb.id, `Hidden — back ${fmtShort(firing.next_nag_at, tz)} 😴`);
   }
 
+  // The spinner stops at once; the message itself goes a moment later, and the
+  // command it kept goes alongside it.
   const okm = data.match(/^ok(?::(\d+))?$/);
   if (okm) {
-    if (okm[1]) await dismissKept(env, cb.message.chat.id, +okm[1]);
-    await deleteRef(env, ctx, cb.message.chat.id, ref);
-    return answerCallback(env, cb.id, '');
+    await answerCallback(env, cb.id, '');
+    await Promise.all([
+      okm[1] ? dismissKept(env, cb.message.chat.id, +okm[1]) : null,
+      deleteRef(env, ctx, cb.message.chat.id, ref),
+    ]);
+    return;
   }
 
   // 🗑 on a nag removes the chore outright. One tap, because the log line it
   // leaves carries Undo — a mis-tap is recoverable for a day.
   const xm = data.match(/^x:(\d+)$/);
   if (xm) {
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
-      .bind(+xm[1], cb.message.chat.id).first();
+    const { firing, reminder: r } = await tappedFiring(env, +xm[1], cb.message.chat.id);
     if (!firing) return answerCallback(env, cb.id, 'Already gone.');
     if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-      .bind(firing.reminder_id, firing.chat_id).first();
     if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
     // No ctx: the log is public on purpose, whoever the nag belonged to.
-    await deleteReminder(env, r, null, senderName(cb.from));
-    return answerCallback(env, cb.id, 'Deleted — Undo is in the group.');
+    await deleteReminder(env, r, null, senderName(cb.from), {
+      onClaim: () => answerCallback(env, cb.id, 'Deleted — Undo is in the group.'),
+    });
+    return;
   }
 
   // Snooze preset picked (or Back to the main buttons).
   const zm = data.match(/^z:(\d+):(\w+)$/);
   if (zm) {
     if (!SNOOZE_CODES.includes(zm[2])) return answerCallback(env, cb.id, 'That option is not on this menu.');
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
-      .bind(+zm[1], cb.message.chat.id).first();
+    const { firing, reminder } = await tappedFiring(env, +zm[1], cb.message.chat.id);
     if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
     if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
     if (zm[2] === 'b') {
@@ -933,8 +965,7 @@ async function handleCallback(env, cb) {
       // that crossed the 24h mark with its menu open came back offering a
       // Snooze the next tap only refused. An ephemeral message has no
       // reply-markup-only edit, so its text is re-rendered alongside.
-      const rem = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?')
-        .bind(firing.reminder_id).first();
+      const rem = reminder;
       if (rem) {
         const [html, buttons] = firingCard(rem, firing, await getTz(env, firing.chat_id));
         if (isEphemeralNag(firing)) await editNag(env, firing, html, buttons);
@@ -957,7 +988,7 @@ async function handleCallback(env, cb) {
     let until = postpone ? deferQuietHours(Date.now() + days * 86400000, tz)
       : zm[2] === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
       : Date.now() + (+zm[2]) * 60000;
-    const capped = !postpone && await expiresBefore(env, firing, until);
+    const capped = !postpone && expiresBefore(firing, until, reminder);
     if (capped) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
     // snoozed_until records the household's choice; it holds only while
     // next_nag_at still equals it (see isHouseholdDeferred).
@@ -972,32 +1003,29 @@ async function handleCallback(env, cb) {
          WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
       ).bind(until, until, by, firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
-    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
     // Tomorrow keeps its old rule (the next occurrence, if it comes first,
     // supersedes it); a week or two out moves the schedule past it.
     const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, until, tz) : 0;
+    // The toast as soon as the snooze is decided; the card and the board follow.
+    await answerCallback(env, cb.id, postpone
+      ? `Postponed to ${fmtShort(until, tz)} 📅` +
+        (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : '')
+      : `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);
     if (reminder && firing.last_message_id) {
       await editNag(env, firing, snoozedHtml(reminder, until, by, tz), snoozedButtons(firing.id, isScored(firing)));
     }
     // The board shows a parked chore by when it comes back.
     await updateDashboard(env, firing.chat_id);
-    if (postpone) {
-      return answerCallback(env, cb.id, `Postponed to ${fmtShort(until, tz)} 📅` +
-        (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : ''));
-    }
-    return answerCallback(env, cb.id,
-      `Snoozed until ${fmtClock(until, tz)} 😴${capped ? ' (24h limit — last call)' : ''}`);
+    return;
   }
 
   const m = data.match(/^([dsb]):(\d+)$/);
   if (!m) return answerCallback(env, cb.id, '');
-  const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
-    .bind(+m[2], cb.message.chat.id).first();
+  const { firing, reminder } = await tappedFiring(env, +m[2], cb.message.chat.id);
   if (!firing || firing.state !== 'nagging') {
     return answerCallback(env, cb.id, 'Already handled 👍');
   }
   if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
-  const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!reminder) {
     // Same compare-and-swap as every other state change: the row was read a
     // moment ago, and a cron tick or a second tap may have moved it since.
@@ -1015,8 +1043,13 @@ async function handleCallback(env, cb) {
       const roster = await householdRoster(env, firing.chat_id);
       credit = creditTogether(by, [...roster]);
     }
-    const won = await completeFiring(env, firing, reminder, credit, tz);
-    return answerCallback(env, cb.id, won ? 'Purrs 😻' : 'Already handled 👍');
+    // "Purrs" goes out the moment the Done is won (onClaim), not after the
+    // sticker, the receipt and the board.
+    const won = await completeFiring(env, firing, reminder, credit, tz, {
+      onClaim: () => answerCallback(env, cb.id, 'Purrs 😻'),
+    });
+    if (!won) return answerCallback(env, cb.id, 'Already handled 👍');
+    return;
   }
 
   // Snooze tapped: swap the keyboard for duration presets.

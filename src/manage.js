@@ -7,7 +7,8 @@ import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, householdMembers, senderName, creditTogether, isScored } from './household.js';
 import { completeFiring, editNag, firingCard, deleteNag, nagChat } from './nag.js';
-import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons } from './dashboard.js';
+import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons,
+         boardDrawn } from './dashboard.js';
 import { setReminderPaused, deleteReminder, completeEarly, chatPaused, redrawNag } from './chores.js';
 
 export function editorText(r, tz) {
@@ -86,7 +87,10 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
   const markup = buttons || await editorButtons(env, r);
   if (await editorIsDashboard(env, cb)) {
     const html = await choreListHtml(env, r.chat_id, tz);
-    return editMessage(env, r.chat_id, cb.message.message_id, html, markup);
+    const res = await editMessage(env, r.chat_id, cb.message.message_id, html, markup);
+    // This edit is the board's redraw; the deferred one would close the editor.
+    boardDrawn(env, r.chat_id);
+    return res;
   }
   return editRef(env, ctx, r.chat_id, ref, editorText(r, tz), markup);
 }

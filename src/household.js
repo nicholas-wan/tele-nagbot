@@ -1,9 +1,23 @@
 // Who is in this household: chat settings, member tracking, display names,
 // and the combined-credit format the roster and leaderboard share.
 
+// A chat's timezone is read on nearly every command and tap, and nothing in
+// the bot ever changes it — so each isolate remembers it for a while instead
+// of paying a D1 round trip for the same answer every time. Keyed by the
+// database binding as well, so separate databases never share an answer.
+const TZ_TTL_MS = 10 * 60000;
+const tzCache = new WeakMap();
+
 export async function getTz(env, chatId) {
+  let byChat = tzCache.get(env.DB);
+  if (!byChat) tzCache.set(env.DB, byChat = new Map());
+  const hit = byChat.get(chatId);
+  const now = Date.now();
+  if (hit && now - hit.at < TZ_TTL_MS) return hit.tz;
   const row = await env.DB.prepare('SELECT tz FROM settings WHERE chat_id = ?').bind(chatId).first();
-  return row ? row.tz : 'Asia/Singapore';
+  const tz = row ? row.tz : 'Asia/Singapore';
+  byChat.set(chatId, { tz, at: now });
+  return tz;
 }
 
 export function senderName(from) {
@@ -49,7 +63,12 @@ export async function householdMembers(env, chatId) {
   const { results } = await env.DB.prepare(
     'SELECT user_id, username, first_name FROM members WHERE chat_id = ?'
   ).bind(chatId).all();
-  return (results || [])
+  return membersFrom(results);
+}
+
+// householdMembers over rows already read (the Mini App reads them in a batch).
+export function membersFrom(rows) {
+  return (rows || [])
     .map((r) => ({ userId: r.user_id, name: displayName(r) }))
     .filter((m) => m.name)
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -119,11 +138,19 @@ export function creditTogether(by, others) {
 // Group members the bot has seen. Their ids are what an ephemeral (in-group
 // private) nag is addressed to, and their names are the household roster.
 export async function rememberMember(env, chatId, from) {
-  await env.DB.prepare(
-    `INSERT INTO members (chat_id, user_id, username, first_name, last_seen) VALUES (?, ?, ?, ?, ?)
+  await rememberMemberStatement(env, chatId, from).run();
+}
+
+// The roster write as a statement, so it can ride in a batch. `gated` makes it
+// a no-op unless the statement just before it changed a row — the claim of a
+// webhook delivery (acceptUpdate), so a repeated delivery writes nothing.
+export function rememberMemberStatement(env, chatId, from, now = Date.now(), { gated = false } = {}) {
+  return env.DB.prepare(
+    `INSERT INTO members (chat_id, user_id, username, first_name, last_seen)
+     ${gated ? 'SELECT ?, ?, ?, ?, ? WHERE changes() = 1' : 'VALUES (?, ?, ?, ?, ?)'}
      ON CONFLICT(chat_id, user_id) DO UPDATE SET username = excluded.username,
        first_name = excluded.first_name, last_seen = excluded.last_seen`
-  ).bind(chatId, from.id, from.username || null, from.first_name || null, Date.now()).run();
+  ).bind(chatId, from.id, from.username || null, from.first_name || null, now);
 }
 
 // Someone who left the chat is not in the household any more. Nothing used to

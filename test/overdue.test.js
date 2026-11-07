@@ -5,6 +5,7 @@ import { renagPending } from '../src/cron.js';
 import { expireFiring } from '../src/nag.js';
 import { choreListHtml } from '../src/dashboard.js';
 import { handleUpdate } from '../src/handlers.js';
+import { d1 } from './d1.js';
 
 const NOW = Date.UTC(2026, 8, 5, 6);
 let sql, env, calls;
@@ -17,18 +18,7 @@ beforeEach(() => {
     VALUES (10, 1, 'test reminder', 'once', '{}', '[15,30,60]', ${NOW - 90000000}, 0);
     INSERT INTO firings (id, reminder_id, chat_id, reminder_text, fired_at, next_nag_at, nag_user_id, last_message_ephemeral, scored)
     VALUES (5, 10, 1, 'test reminder', ${NOW - 90000000}, ${NOW - 60000}, 2, 1, 0);`);
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: {
-    prepare(query) {
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => { const r = stmt.run(...args); return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } }; },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: d1(sql) };
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const body = JSON.parse(init.body);

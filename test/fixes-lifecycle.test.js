@@ -7,6 +7,7 @@ import { fireReminder } from '../src/firing.js';
 import { setReminderPaused, fireIfDue, wakeChat, completeEarly } from '../src/chores.js';
 import { renagPending } from '../src/cron.js';
 import { zonedEpoch } from '../src/time.js';
+import { withBatch } from './d1.js';
 
 const TZ = 'Asia/Singapore';
 const HOUR = 3600000;
@@ -30,7 +31,7 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
                  reminders = null, credits = [] } = {}) {
   const runs = [];
   const nagging = () => firings.filter((f) => f.state === 'nagging');
-  const DB = {
+  const DB = withBatch({
     async batch(statements) { const results = []; for (const stmt of statements) results.push(await stmt.run()); return results; },
     prepare(sql) {
       const stmt = (args = []) => ({
@@ -60,7 +61,7 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
       });
       return { ...stmt(), bind: (...args) => stmt(args) };
     },
-  };
+  });
   return { DB, runs, env: { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB } };
 }
 
@@ -69,7 +70,7 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
 // firing — which is exactly the row a missing-reminder test has to withhold.
 function makeCronDb({ firings = [], reminder = null, pausedChats = [] } = {}) {
   const runs = [];
-  const DB = {
+  const DB = withBatch({
     prepare(sql) {
       const stmt = (args = []) => ({
         async first() {
@@ -94,7 +95,7 @@ function makeCronDb({ firings = [], reminder = null, pausedChats = [] } = {}) {
       });
       return { ...stmt(), bind: (...args) => stmt(args) };
     },
-  };
+  });
   return { DB, runs, env: { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB } };
 }
 

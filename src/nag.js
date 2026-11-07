@@ -83,11 +83,16 @@ export function firingCard(reminder, firing, tz, now = Date.now()) {
 // the stash the delete's own Undo needed. restoreReminder names its columns,
 // so the marker never reaches a reminders row.
 export async function stashReminder(env, r, firingId = null) {
-  const payload = firingId ? { ...r, _firing: firingId } : r;
-  const stash = await env.DB.prepare(
-    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
-  ).bind(r.chat_id, JSON.stringify(payload), Date.now()).run();
+  const stash = await stashStatement(env, r, firingId).run();
   return stash.meta.last_row_id;
+}
+
+// The same stash as a statement, for a batch.
+export function stashStatement(env, r, firingId = null) {
+  const payload = firingId ? { ...r, _firing: firingId } : r;
+  return env.DB.prepare(
+    'INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)'
+  ).bind(r.chat_id, JSON.stringify(payload), Date.now());
 }
 
 // The codes snoozeButtons offers, and the only ones a z: tap may carry.
@@ -246,62 +251,88 @@ async function silenceOldNag(env, firing, text, note) {
   await editNag(env, firing, `${note} <s>${esc(text)}</s>`, emptyKeyboard());
 }
 
-export async function completeFiring(env, firing, reminder, byName, tz) {
+// `onClaim` runs the moment the Done is won, before any of the redrawing: it
+// is where a tap's toast goes, so the person hears "Purrs" as soon as it is
+// true rather than after the sticker, the card and the board.
+export async function completeFiring(env, firing, reminder, byName, tz, { onClaim } = {}) {
   const now = Date.now();
   // Only the winner of this state transition performs the side effects: a
   // concurrent cron expiry or second Done tap loses here and returns false.
-  const res = await env.DB.prepare(
-    `UPDATE firings SET state = 'done', done_by = ?, done_at = ?,
-       snoozed_until = CASE WHEN next_nag_at = snoozed_until THEN snoozed_until ELSE NULL END,
-       next_nag_at = NULL WHERE id = ? AND state = 'nagging'`
-  ).bind(byName, now, firing.id).run();
-  if (!res.meta.changes) return false;
-  // Re-read so message ids reflect a re-nag that landed after our caller's SELECT.
-  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
-  // Chores under this one are covered by it (nesting.js), and the receipt says so.
-  const also = coverLine(await coverChildren(env, reminder, firing.id, tz));
-  if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
+  // The row is read back in the same batch (one round trip), so message ids
+  // reflect a re-nag that landed after our caller's SELECT.
+  const [claim, after] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE firings SET state = 'done', done_by = ?, done_at = ?,
+         snoozed_until = CASE WHEN next_nag_at = snoozed_until THEN snoozed_until ELSE NULL END,
+         next_nag_at = NULL WHERE id = ? AND state = 'nagging'`
+    ).bind(byName, now, firing.id),
+    env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id),
+  ]);
+  if (!claim.meta.changes) return false;
+  firing = (after.results || [])[0] || firing;
+  if (onClaim) await onClaim();
+  // Independent of each other, so they run together: the chores under this
+  // one are covered by it (nesting.js) and the receipt says so; the nag's
+  // sticker goes; and a celebration sticker names the cat for the purr line.
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
-  const celebration = isEphemeralNag(firing)
-    ? { cat: 'both' }
-    : await sendCelebrationSticker(env, nagChat(firing), firing.id);
+  const [covered, celebration] = await Promise.all([
+    coverChildren(env, reminder, firing.id, tz),
+    isEphemeralNag(firing) ? { cat: 'both' } : sendCelebrationSticker(env, nagChat(firing), firing.id),
+    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+  ]);
+  const also = coverLine(covered);
   const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
     : 'The cats purr approvingly.';
   const when = `${fmtClock(now, tz)}. ${purr}`;
-  if (isEphemeralNag(firing)) {
-    // A private nag's card is put away, not turned into a receipt: the public
-    // receipt below tells the whole household, and the one who did the chore
-    // was seeing both (20 Oct 2026). Forgetting the card is what lets ↩️ Not
-    // done on that receipt send them a fresh private nag (see redrawNag).
-    await deleteNag(env, firing);
-    await env.DB.prepare(
-      'UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0 WHERE id = ? AND last_message_id = ?'
-    ).bind(firing.id, firing.last_message_id).run();
-  } else if (firing.last_message_id) {
-    // A receipt lives two hours; the clock time is all it needs.
-    await editNag(env, firing,
-      `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}${also}`,
-      receiptButtons(firing.id));
-    // The nag earned a day; its receipt only needs to be glanced at.
-    await retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS);
-  }
+  // The card, the public receipt and a one-off's stash touch different things,
+  // so they go out together rather than one round trip after another.
+  const card = async () => {
+    if (isEphemeralNag(firing)) {
+      // A private nag's card is put away, not turned into a receipt: the public
+      // receipt below tells the whole household, and the one who did the chore
+      // was seeing both (20 Oct 2026). Forgetting the card is what lets ↩️ Not
+      // done on that receipt send them a fresh private nag (see redrawNag).
+      await Promise.all([
+        deleteNag(env, firing),
+        env.DB.prepare(
+          'UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0 WHERE id = ? AND last_message_id = ?'
+        ).bind(firing.id, firing.last_message_id).run(),
+      ]);
+    } else if (firing.last_message_id) {
+      // A receipt lives two hours; the clock time is all it needs. The nag
+      // earned a day; its receipt only needs to be glanced at.
+      await Promise.all([
+        editNag(env, firing,
+          `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}${also}`,
+          receiptButtons(firing.id)),
+        retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS),
+      ]);
+    }
+  };
   // A privately-nagged chore leaves a quiet public receipt: the household still
   // gets to see the chore was done, just not that it was pending.
   // So does one with no card left to edit — a parked chore whose 😴 card was
   // put away with OK, then finished from the board.
-  if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
-    await sendMessage(env, firing.chat_id,
-      `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`, receiptButtons(firing.id),
-      { silent: true, ttl: RECEIPT_TTL_MS });
-  }
+  const receipt = async () => {
+    if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
+      await sendMessage(env, firing.chat_id,
+        `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`, receiptButtons(firing.id),
+        { silent: true, ttl: RECEIPT_TTL_MS });
+    }
+  };
   // A finished one-off goes to the trash rather than straight out, so that
-  // ↩️ Not done can bring it back for as long as the trash keeps it.
-  if (reminder.schedule_kind === 'once') {
-    await stashReminder(env, reminder, firing.id);
-    await env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id).run();
-  }
+  // ↩️ Not done can bring it back for as long as the trash keeps it. Stash
+  // and removal are one batch, so one round trip.
+  const stash = async () => {
+    if (reminder.schedule_kind !== 'once') return;
+    await env.DB.batch([
+      stashStatement(env, reminder, firing.id),
+      env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id),
+    ]);
+  };
+  await Promise.all([card(), receipt(), stash()]);
   await updateDashboard(env, firing.chat_id);
   return true;
 }
@@ -312,13 +343,18 @@ export async function completeFiring(env, firing, reminder, byName, tz) {
 // mind expired a nag the household had just brought back to life.
 // Recurring firings only: a one-off is never expired (see renagPending).
 export async function expireFiring(env, firing, reminder, { silent } = {}) {
-  const res = await env.DB.prepare(
-    "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
-  ).bind(firing.id, firing.fired_at).run();
-  if (!res.meta.changes) return false;
-  firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
-  await silenceOldNag(env, firing, reminder.text, '🙀');
-  if (firing.last_sticker_id) await deleteMessage(env, nagChat(firing), firing.last_sticker_id);
+  const [claim, after] = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
+    ).bind(firing.id, firing.fired_at),
+    env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id),
+  ]);
+  if (!claim.meta.changes) return false;
+  firing = (after.results || [])[0] || firing;
+  await Promise.all([
+    silenceOldNag(env, firing, reminder.text, '🙀'),
+    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+  ]);
   if (!silent) {
     // The tombstone always lands in the group — accountability is household-wide.
     await sendMessage(env, firing.chat_id,

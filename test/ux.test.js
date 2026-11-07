@@ -2,9 +2,10 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
 import { nagButtons } from '../src/nag.js';
 import { updateDashboard } from '../src/dashboard.js';
+import { withBatch } from './d1.js';
 
 function dbForDashboard(reminders = []) {
-  return {
+  return withBatch({
     prepare(sql) {
       return {
         bind() {
@@ -28,7 +29,7 @@ function dbForDashboard(reminders = []) {
         },
       };
     },
-  };
+  });
 }
 
 describe('chat UX', () => {
@@ -126,7 +127,7 @@ describe('chat UX', () => {
       schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null,
     };
     const updates = [];
-    const db = {
+    const db = withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -141,7 +142,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
     const env = { BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db };
     await handleUpdate(env, {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/pause 10pm meds' },
@@ -160,7 +161,7 @@ describe('chat UX', () => {
       id: 10, chat_id: 1, text: 'Water plants', paused: 0, schedule_kind: 'daily',
       schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null, scored: 1,
     };
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -181,7 +182,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
   }
 
   const nagReply = (text) => ({
@@ -222,7 +223,7 @@ describe('chat UX', () => {
       schedule_detail: JSON.stringify({ h: 19, mi: 0 }), assignee_name: null, scored: 1,
     };
     const runs = [];
-    const db = {
+    const db = withBatch({
       async batch(statements) { const results = []; for (const stmt of statements) results.push(await stmt.run()); return results; },
       prepare(sql) {
         return {
@@ -243,7 +244,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
     await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/done water plants' },
     });
@@ -264,7 +265,7 @@ describe('chat UX', () => {
   // Tapping Together too on a done receipt upgrades the credit to everyone.
   it('upgrades a solo done-early credit to the whole household', async () => {
     const runs = [];
-    const db = {
+    const db = withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -290,7 +291,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
     await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
       callback_query: {
         id: 'cb7', data: 'g:27', from: { id: 2, first_name: 'Nick' },
@@ -321,7 +322,7 @@ describe('chat UX', () => {
       id: 12, chat_id: 1, text: '', scored: 1, schedule_kind: 'once', schedule_detail: '{}',
       nag_intervals: '[15,30,60]', prompt_msg_id: 77, prompt_msg_ephemeral: 0, created_at: Date.now(),
     };
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -337,7 +338,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
   }
 
   const promptReply = (text) => ({
@@ -373,7 +374,7 @@ describe('chat UX', () => {
       schedule_detail: '{"days":14}', nag_intervals: '[15,30,60]',
       wizard_msg_id: 77, wizard_msg_ephemeral: 0, prompt_msg_id: null, created_at: Date.now(),
     };
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -390,7 +391,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
   }
 
   const firesSoon = (runs) => {
@@ -439,7 +440,7 @@ describe('chat UX', () => {
       { done_by: '@nick & @jane', done_at: now - 2000, text: 'bedsheets' },
       { done_by: '@nick', done_at: now - 1000, text: 'clear poop' },
     ];
-    const db = {
+    const db = withBatch({
       prepare(sql) {
         return {
           bind() {
@@ -458,7 +459,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
     await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/stats' },
     });
@@ -523,7 +524,7 @@ describe('chat UX', () => {
       schedule_kind: 'interval', nag_intervals: '[15,30,60]',
       schedule_detail: JSON.stringify({ h: 21, mi: 0, days: 8 }), assignee_name: null,
     };
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind() {
@@ -540,7 +541,7 @@ describe('chat UX', () => {
           },
         };
       },
-    };
+    });
   }
 
   const NAGGING = {
@@ -662,7 +663,7 @@ describe('daily sweep of bot messages', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   function db() {
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -680,7 +681,7 @@ describe('daily sweep of bot messages', () => {
           },
         };
       },
-    };
+    });
   }
 
   it('records ordinary sends for the sweep', async () => {
@@ -779,7 +780,7 @@ describe('receipt lifetimes', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('records a short TTL when asked', async () => {
-    const db = {
+    const db = withBatch({
       prepare(sql) {
         return { bind(...args) { return {
           async first() { return null; },
@@ -790,7 +791,7 @@ describe('receipt lifetimes', () => {
           },
         }; } };
       },
-    };
+    });
     const { sendMessage } = await import('../src/tg.js');
     await sendMessage({ BOT_TOKEN: 't', DB: db }, 1, 'receipt', null, { ttl: 7200000 });
     const [, , , , deleteAfter] = inserted[0];
@@ -888,7 +889,7 @@ describe('the wizard keeps a stated start date', () => {
   };
 
   function draftDb(runs, draft = DRAFT) {
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -904,7 +905,7 @@ describe('the wizard keeps a stated start date', () => {
           },
         };
       },
-    };
+    });
   }
 
   const tap = (code) => ({

@@ -5,7 +5,7 @@ import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEpheme
 import { getTz, isScored } from './household.js';
 import { nagButtons, nagHtml, overdueHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
          EXPIRE_AFTER_MS, OVERDUE_NAG_MIN } from './nag.js';
-import { updateDashboard } from './dashboard.js';
+import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
 import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
@@ -14,14 +14,23 @@ import { recoverUpdates } from './updates.js';
 
 export async function runCron(env) {
   const now = Date.now();
+  // The pinned board is redrawn once per chat at the end of the tick, however
+  // many chores fired or re-nagged in it (deferBoards).
+  const tick = deferBoards(env);
+  // Vacation mode is read once for the two daily announcements, after the
+  // wake step may have ended it.
+  let paused = null;
+  const pausedNow = async () => (paused ??= await pausedChats(env, now));
   // Each step isolated: one failing must not starve the ones after it.
   const steps = {
     updates: () => recoverUpdates(env, now),
-    wake: () => wakeLapsedPauses(env, now),
-    digests: () => sendDigests(env, now),
-    weekly: () => sendWeeklyRecap(env, now),
-    fire: () => fireDueReminders(env, now),
-    renag: () => renagPending(env, now),
+    wake: () => wakeLapsedPauses(tick, now),
+    digests: async () => sendDigests(tick, now, await pausedNow()),
+    weekly: async () => sendWeeklyRecap(tick, now, await pausedNow()),
+    // These two read it again themselves, and only when something is due: a
+    // /pause all landing mid-tick must still stop the nags.
+    fire: () => fireDueReminders(tick, now),
+    renag: () => renagPending(tick, now),
     // Abandoned time-choice prompts and /delete undo stashes expire after a day.
     drafts: () => pruneDraftsAndTrash(env, now),
     // Everything the bot said a day ago is tidied away; the pin stays.
@@ -35,6 +44,7 @@ export async function runCron(env) {
       console.log(`cron step ${name} failed: ${e.stack || e}`);
     }
   }
+  await flushBoards(tick);
 }
 
 // Deletes every recorded bot message whose day is up, each through the method
@@ -89,8 +99,10 @@ async function pruneDraftsAndTrash(env, now) {
       await deleteMessage(env, draft.chat_id, draft.prompt_msg_id);
     }
   }
-  await env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(cutoff).run();
-  await env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(cutoff).run();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM drafts WHERE created_at < ?').bind(cutoff),
+    env.DB.prepare('DELETE FROM trash WHERE created_at < ?').bind(cutoff),
+  ]);
 }
 
 // Vacation mode ("/pause all N"): end any chat pause whose deadline passed.
@@ -130,8 +142,8 @@ async function pruneOldFirings(env, now) {
 }
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.
-async function sendWeeklyRecap(env, now) {
-  const paused = await pausedChats(env, now);
+async function sendWeeklyRecap(env, now, paused = null) {
+  paused ??= await pausedChats(env, now);
   const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all();
   for (const { chat_id } of results) {
     try {
@@ -214,8 +226,8 @@ export async function digestView(env, chatId, firingIds, now = Date.now()) {
 
 // 8am local: one summary of the day's chores per chat. Skipped when there is
 // nothing due today and nothing still nagging.
-export async function sendDigests(env, now) {
-  const paused = await pausedChats(env, now);
+export async function sendDigests(env, now, paused = null) {
+  paused ??= await pausedChats(env, now);
   const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all();
   for (const { chat_id } of results) {
     try {
@@ -269,12 +281,13 @@ export async function sendDigests(env, now) {
   }
 }
 
-async function fireDueReminders(env, now) {
+async function fireDueReminders(env, now, paused = null) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?'
   ).bind(now).all();
+  if (!results.length) return;
 
-  const paused = await pausedChats(env, now);
+  paused ??= await pausedChats(env, now);
   for (const r of results) {
     try {
       if (paused.has(r.chat_id)) continue;
@@ -288,14 +301,15 @@ async function fireDueReminders(env, now) {
 
 // Exported so the expiry claims below can be pinned directly, without driving
 // eight unrelated cron steps to reach them.
-export async function renagPending(env, now) {
+export async function renagPending(env, now, paused = null) {
   // Due re-nags, plus anything past the 24h deadline regardless of snoozes —
   // expiry must not wait for the next nag slot to come due.
   const { results } = await env.DB.prepare(
     "SELECT * FROM firings WHERE state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)"
   ).bind(now, now - EXPIRE_AFTER_MS).all();
+  if (!results.length) return;
 
-  const paused = await pausedChats(env, now);
+  paused ??= await pausedChats(env, now);
   for (const f of results) {
     try {
       if (paused.has(f.chat_id)) continue; // vacation freezes nags and expiry

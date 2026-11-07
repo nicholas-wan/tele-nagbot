@@ -101,7 +101,10 @@ export async function fireReminder(env, r, now, tz) {
     sent = await sendPrivate(env, ctx, nagHtml(r, 0, 'both'), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);
   }
-  if (!ref) {
+  // A private send that timed out may well have arrived; going public then
+  // could hand the group the chore its nag was keeping private. The firing
+  // stays with no card, and the next re-nag sends one.
+  if (!ref && !(sent && sent.timedOut)) {
     s = await sendRandomSticker(env, r.chat_id, firingId);
     sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);

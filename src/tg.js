@@ -1,5 +1,18 @@
 // Thin Telegram Bot API client.
 
+// Bounded, as squashbot's are: a fetch that never resolves is worse than one
+// that fails. It dies with the isolate's grace period, past every catch — no
+// log, no apology, half-written state — and everything queued behind it in
+// the same update (the board redraw, the bookkeeping) never happens. Fifteen
+// seconds is far beyond any healthy Telegram round trip.
+const TELEGRAM_TIMEOUT_MS = 15 * 1000;
+
+// A call cut off by that bound may still have reached Telegram: the request
+// went, only the answer never came. A private send that times out is
+// therefore never retried in public — that could show the whole group a
+// message meant for one person, twice.
+const isTimeout = (e) => Boolean(e && (e.name === 'TimeoutError' || e.name === 'AbortError'));
+
 export async function tg(env, method, body) {
   for (let attempt = 0; ; attempt++) {
     let data;
@@ -8,12 +21,13 @@ export async function tg(env, method, body) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
       });
       // Telegram 5xx pages are HTML; degrade to {ok:false} instead of throwing.
       data = await res.json();
     } catch (e) {
       console.log(`telegram ${method} failed: ${e}`);
-      return { ok: false, description: String(e) };
+      return { ok: false, description: String(e), timedOut: isTimeout(e) };
     }
     if (data.ok) return data;
     // Rate limited: honor retry_after once (capped, to fit Worker limits).
@@ -280,6 +294,7 @@ export async function sendPrivate(env, ctx, html, replyMarkup, opts = {}) {
     return recordSentMessage(env, ctx.chatId, res,
       { receiverUserId: ctx.userId, ttlMs: opts.ttl || SENT_TTL_MS });
   }
+  if (res.timedOut) return res;
   console.log(`ephemeral send failed, falling back to public: ${res.description || ''}`);
   return sendMessage(env, ctx.chatId, html, replyMarkup, opts);
 }
@@ -312,15 +327,16 @@ export async function sendDocument(env, ctx, filename, content, caption, opts = 
       const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN.trim()}/sendDocument`, {
         method: 'POST',
         body: form,
+        signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
       });
       return await res.json();
     } catch (e) {
       console.log(`telegram sendDocument failed: ${e}`);
-      return { ok: false, description: String(e) };
+      return { ok: false, description: String(e), timedOut: isTimeout(e) };
     }
   };
   let res = await upload(ctx.ephemeral);
-  if (!res.ok && ctx.ephemeral) {
+  if (!res.ok && ctx.ephemeral && !res.timedOut) {
     console.log(`ephemeral document failed, falling back to public: ${res.description || ''}`);
     res = await upload(false);
   }

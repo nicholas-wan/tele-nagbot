@@ -12,6 +12,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
 import { sendDigests, renagPending } from '../src/cron.js';
 import { wakeChat, setReminderPaused } from '../src/chores.js';
+import { d1 } from './d1.js';
 
 const TZ = 'Asia/Singapore';
 const HOUR = 3600000;
@@ -26,22 +27,8 @@ beforeEach(() => {
   sql.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
   sql.exec('INSERT INTO settings (chat_id, dashboard_msg_id) VALUES (1, 99)');
   runs = [];
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: {
-    prepare(query) {
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => {
-          runs.push({ sql: query, args });
-          const r = stmt.run(...args);
-          return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } };
-        },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', // Every write is recorded, batched or not.
+    DB: d1(sql, (query, args) => { if (!/^\s*SELECT/i.test(query)) runs.push({ sql: query, args }); }) };
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const body = JSON.parse(init.body);

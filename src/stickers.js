@@ -99,12 +99,14 @@ export async function sendCelebrationSticker(env, chatId, seed) {
     const fav = stickers.filter((s) => CELEBRATION_UIDS.has(s.uid));
     const pool = fav.length ? fav : stickers;
     const pick = pool[Math.abs(seed) % pool.length];
-    // Celebration stickers are pure décor — a couple of hours is plenty.
-    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id }),
-      { ttlMs: RECEIPT_TTL_MS });
-    const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
-      .bind(pick.uid).first();
-    return { cat: (tag && tag.cat) || 'both' };
+    // Celebration stickers are pure décor — a couple of hours is plenty. The
+    // send and the cat lookup are independent, so they run together.
+    const [, tag] = await Promise.all([
+      tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id })
+        .then((sent) => recordSentMessage(env, chatId, sent, { ttlMs: RECEIPT_TTL_MS })),
+      stickerCat(env, pick.uid),
+    ]);
+    return { cat: tag };
   } catch (e) {
     console.log(`sendCelebrationSticker failed: ${e}`);
     return { cat: 'both' };
@@ -125,6 +127,12 @@ export async function deleteSticker(env, chatId, index) {
   const res = await tg(env, 'deleteStickerFromSet', { sticker: stickers[index - 1].file_id });
   if (res.ok) fileIdCache.delete(name);
   return { ...res, remaining: stickers.length - 1 };
+}
+
+// Which cat is on a sticker, by its stable id; 'both' when untagged.
+async function stickerCat(env, uid) {
+  const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?').bind(uid).first();
+  return (tag && tag.cat) || 'both';
 }
 
 // Sends a random Latte & Mocha sticker; silently does nothing if the set
@@ -245,13 +253,14 @@ export async function sendRandomSticker(env, chatId, seed) {
     const stickers = await setStickers(env, name);
     if (!stickers) return { cat: 'both', messageId: null };
     const pick = stickers[Math.abs(seed) % stickers.length];
-    const sent = await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id });
     // The nag lifecycle usually deletes this itself; the sweep is the backstop
     // for any path that loses track of it. Deleting twice is harmless.
-    await recordSentMessage(env, chatId, sent);
-    const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
-      .bind(pick.uid).first();
-    return { cat: (tag && tag.cat) || 'both', messageId: sent.ok ? sent.result.message_id : null };
+    const [sent, cat] = await Promise.all([
+      tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id })
+        .then((res) => recordSentMessage(env, chatId, res)),
+      stickerCat(env, pick.uid),
+    ]);
+    return { cat, messageId: sent.ok ? sent.result.message_id : null };
   } catch (e) {
     console.log(`sendRandomSticker failed: ${e}`);
     return { cat: 'both', messageId: null };

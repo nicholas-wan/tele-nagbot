@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { handleUpdate } from '../src/handlers.js';
 import { buildIcs } from '../src/invite.js';
+import { withBatch } from './d1.js';
 
 const REMINDER = {
   id: 10, chat_id: 1, text: 'clear poop', paused: 0, scored: 1,
@@ -17,7 +18,7 @@ const NAGGING = {
 // A DB fake whose `members` rows are the household — the same table
 // rememberMember writes on every update.
 function db({ members = [], runs = [], firing = NAGGING, known = true, reminder = REMINDER }) {
-  return {
+  return withBatch({
     runs,
     prepare(sql) {
       return {
@@ -49,7 +50,7 @@ function db({ members = [], runs = [], firing = NAGGING, known = true, reminder 
         },
       };
     },
-  };
+  });
 }
 
 const HOUSEHOLD = [
@@ -107,7 +108,7 @@ describe('household roster comes from members, not from past credits', () => {
     const base = db({ members: HOUSEHOLD });
     const env = {
       BOT_TOKEN: 'token', ALLOWED_CHATS: '1',
-      DB: { prepare(sql) { seen.push(sql); return base.prepare(sql); } },
+      DB: withBatch({ prepare(sql) { seen.push(sql); return base.prepare(sql); } }),
     };
     await handleUpdate(env, doneReply('done together'));
     expect(seen.some((s) => s.includes('DISTINCT done_by'))).toBe(false);
@@ -528,7 +529,7 @@ describe('/resume on a chore that was never paused', () => {
 
   function choreDb(runs, paused) {
     const r = { ...REMINDER, display_num: 1, paused };
-    return {
+    return withBatch({
       prepare(sql) {
         return {
           bind(...args) {
@@ -546,7 +547,7 @@ describe('/resume on a chore that was never paused', () => {
           },
         };
       },
-    };
+    });
   }
 
   const cmd = (text) => ({

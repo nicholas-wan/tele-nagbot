@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { sendDigests } from '../src/cron.js';
 import { handleUpdate } from '../src/handlers.js';
+import { d1 } from './d1.js';
 
 const EIGHT_AM = Date.UTC(2026, 8, 5, 0); // 08:00 Asia/Singapore
 let sql, env, calls;
@@ -20,18 +21,7 @@ beforeEach(() => {
     INSERT INTO firings (id, reminder_id, chat_id, reminder_text, fired_at, next_nag_at, nag_user_id, last_message_ephemeral, last_message_id, scored)
     VALUES (5, 10, 1, 'singlife', ${EIGHT_AM - 90000000}, NULL, 2, 1, 777, 0),
            (6, 11, 1, 'clear poop', ${EIGHT_AM - 40000000}, ${EIGHT_AM + 60000}, NULL, 0, 778, 1);`);
-  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: {
-    prepare(query) {
-      const stmt = sql.prepare(query);
-      const bound = (args = []) => ({
-        bind: (...values) => bound(values),
-        first: async () => stmt.get(...args) || null,
-        all: async () => ({ results: stmt.all(...args) }),
-        run: async () => { const r = stmt.run(...args); return { meta: { changes: r.changes, last_row_id: r.lastInsertRowid } }; },
-      });
-      return bound();
-    },
-  } };
+  env = { BOT_TOKEN: 'test', ALLOWED_CHATS: '1', DB: d1(sql) };
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const body = JSON.parse(init.body);
