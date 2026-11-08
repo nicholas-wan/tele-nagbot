@@ -10,7 +10,35 @@ const DAY_INDEX = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 const DAY_WORD =
   '(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)';
 
+// "tmr" is how people type tomorrow, and so are its usual slips: a typo'd
+// "tomorow" used to stay in the chore's name while the chore landed today.
+const TOMORROW = '(?:tomorrow|tmr|tmrw|tmw|tmro|tmrow|tomorow|tommorow|tommorrow|tomorrw|tomoro|tomorro|2moro|2morrow|2mrw)';
+
+// A list of weekdays as people write it: "tue,fri", "tue and fri", "tue & fri",
+// "tue/fri", "mon wed fri", "mon, wed and fri". A plural ("tuesdays") counts
+// as its day.
+const DAY_SEP = '(?:\\s*[,&/+]\\s*(?:and\\s+)?|\\s+and\\s+|\\s+)';
+const DAY_ITEM = `${DAY_WORD}s?`;
+const daysIn = (list) => [...new Set(list.split(/[^a-z]+/i)
+  .filter((w) => w && w.toLowerCase() !== 'and')
+  .map((w) => DAY_INDEX[w.slice(0, 3).toLowerCase()]))].sort();
+
+// "every three days": the counts people spell out.
+const NUMBER_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+  ten: 10, eleven: 11, twelve: 12 };
+
 export class ParseError extends Error {}
+
+// A refusal as the chat shows it: escaped, and led by a cat like every other
+// line the bot sends. Most refusals were bare text ("Which chore? …", "No
+// chore 4 here"), which read as a different bot from the 😿 lines beside them.
+// A refusal that needs markup (a command to tap-copy) carries it as `html`.
+export function refusalHtml(err) {
+  if (err && err.html) return err.html;
+  const message = err instanceof Error ? err.message : err;
+  const text = String(message).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return /^\p{Extended_Pictographic}/u.test(text) ? text : `😿 ${text}`;
+}
 
 // Thrown when everything parsed except a time; .partial carries what did,
 // so the bot can offer time-choice buttons instead of failing.
@@ -48,6 +76,24 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   // poop for yx 9pm". Only a whole word counts (the "nic" in "picnic" is
   // text), an explicit mention still wins, and the earliest shortcut in the
   // message is the one meant. A leading "for" goes with it.
+  // Two shortcuts named together ("nic and yx clean house") mean the chore is
+  // everyone's, which is what no assignee already means: both names leave the
+  // text, and nobody is singled out. Assigning the first used to leave "and yx
+  // clean house" as the chore, nagging one person about a shared job.
+  if (!assigneeName && nicknames && nicknames.size > 1) {
+    const alt = [...nicknames.keys()].map(escapeRe).join('|');
+    const pair = args.match(new RegExp(
+      `(^|\\s)((?:for\\s+)?(?:${alt})(?:\\s*(?:,|&|\\+|\\band\\b)\\s*(?:${alt}))+)(?=\\s|$)`, 'i'));
+    if (pair) {
+      const named = new Set(pair[2].replace(/^for\s+/i, '').split(/\s*(?:,|&|\+|\band\b)\s*/i)
+        .map((n) => nicknames.get(n.toLowerCase())).filter(Boolean));
+      if (named.size > 1) {
+        const at = pair.index + pair[1].length;
+        args = `${args.slice(0, at)} ${args.slice(at + pair[2].length)}`;
+        nicknames = null;
+      }
+    }
+  }
   if (!assigneeName && nicknames && nicknames.size) {
     let hit = null;
     for (const [nick, spelling] of nicknames) {
@@ -72,6 +118,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     nagIntervals = [n];
     args = args.replace(nagM[0], ' ');
   }
+
+  // A spelled-out count after "every" or "in" is the number: "every three
+  // days", "in five minutes". Elsewhere a number word is chore text.
+  args = args.replace(new RegExp(`\\b(every|in)\\s+(${Object.keys(NUMBER_WORDS).join('|')})\\b(?=\\s+[a-z])`, 'gi'),
+    (all, lead, word) => `${lead} ${NUMBER_WORDS[word.toLowerCase()]}`);
 
   // Schedule kind.
   let kind = 'once';
@@ -137,15 +188,31 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   // The count is optional: "every month" is the way people say "every 1
   // month", and leaving it out used to drop the whole phrase into the chore
   // text — "rent every month" became a one-off named "rent every month".
-  const monthsM = args.match(/\bevery\s+(?:(\d+)\s+)?months?\b/i);
+  // "monthly" and "each month" say the same; "yearly" is every 12 months.
+  const monthsM = args.match(/\b(?:(?:every|each)\s+(?:(\d+)\s+)?months?|monthly)\b/i);
+  const yearlyM = args.match(/\b(?:(?:every|each)\s+year|yearly|annually)\b/i);
   const weekdaysM = args.match(/\b(?:every\s+|on\s+)?(weekdays?|weekends?)\b/i);
-  const periodM = args.match(/\bevery\s+(morning|afternoon|evening|night)\b/i);
-  const dailyM = args.match(/\b(?:daily|every\s*day)\b/i);
+  const periodM = args.match(/\b(?:every|each)\s+(morning|afternoon|evening|night)\b/i)
+    || args.match(/\b(nightly)\b/i);
+  const dailyM = args.match(/\b(?:daily|every\s*day|each\s+day)\b/i);
   const intervalM = args.match(/\bevery\s+(\d+)\s+(days?|weeks?)\b/i);
-  const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_WORD}(?:\\s*,\\s*${DAY_WORD})*)\\b`, 'i'));
+  // "every week" and "weekly" are a seven-day interval: it starts at the next
+  // slot (or on a day named beside it) and keeps that weekday. A fortnight is
+  // fourteen.
+  const weekM = args.match(/\b(?:(?:every|each)\s+week|weekly)\b/i);
+  const fortnightM = args.match(/\b(?:(?:every|each)\s+fortnight|fortnightly|bi-?weekly)\b/i);
+  // "every tue and fri", "every mon, wed and fri", "every tue/fri"; without
+  // "every", two or more days ("bins tue and fri") or a plural ("on tuesdays")
+  // still repeat — no one-off falls on two days, or on "tuesdays".
+  const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})*)\\b`, 'i'))
+    || args.match(new RegExp(`\\b(?:on\\s+)?(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})+)\\b`, 'i'))
+    || args.match(/\b(?:on\s+)?((?:sun|mon|tues|wednes|thurs|fri|satur)days)\b/i);
   // Bare "on the Nth" only counts as a schedule when what follows can't be
-  // prose ("on the 2nd floor" stays chore text); "monthly on the Nth" always.
+  // prose ("on the 2nd floor" stays chore text); "monthly on the Nth" always,
+  // and so do "the 1st of every month" and "every 1st".
   const monthlyM = args.match(/\bmonthly\s+on\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b/i)
+    || args.match(/\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(?:every|each|the)\s+month\b/i)
+    || args.match(/\bevery\s+(\d{1,2})(?:st|nd|rd|th)\b(?!\s+(?:days?|weeks?|months?)\b)/i)
     || args.match(/\bon\s+the\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!\s+(?!at\b|nag:)[a-z])/i);
 
   // A day-of-month can qualify a month interval as well as stand on its own:
@@ -155,14 +222,17 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   if (requestedDom != null && (requestedDom < 1 || requestedDom > 31)) {
     throw new ParseError('Day of month must be 1–31.');
   }
+  // The cadence phrase a bare weekday abbreviation may follow ("every 6 weeks
+  // sat"), for the start-day anchor below.
+  let cadenceM = null;
 
   if (otherM) {
     kind = 'interval';
     // Any weekday form means fortnightly; only "every other day" is 2 days.
     detail.days = otherM[1].toLowerCase() === 'day' ? 2 : 14;
     args = args.replace(otherM[0], ' ');
-  } else if (monthsM) {
-    const months = monthsM[1] ? +monthsM[1] : 1;
+  } else if (monthsM || yearlyM) {
+    const months = monthsM ? (monthsM[1] ? +monthsM[1] : 1) : 12;
     if (months < 1 || months > 24) throw new ParseError('Every how many months? 1–24.');
     // A monthly cadence on a named calendar day is the calendar rule itself.
     // Longer cadences remain anchored month intervals (for example, every
@@ -175,15 +245,18 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
       detail.months = months;
       if (requestedDom != null) detail.dom = requestedDom;
     }
-    args = args.replace(monthsM[0], ' ');
+    // The day-of-month phrase first: "monthly on the 1st" holds the cadence's
+    // own word, and removing that first left the rest behind as chore text.
     if (monthlyM) args = args.replace(monthlyM[0], ' ');
+    const cad = monthsM || yearlyM;
+    if (args.includes(cad[0])) args = args.replace(cad[0], ' ');
   } else if (weekdaysM) {
     kind = 'weekly';
     detail.days = /weekend/i.test(weekdaysM[1]) ? [0, 6] : [1, 2, 3, 4, 5];
     args = args.replace(weekdaysM[0], ' ');
   } else if (periodM) {
     kind = 'daily';
-    defaultH = { morning: 8, afternoon: 15, evening: 19, night: 21 }[periodM[1].toLowerCase()];
+    defaultH = { morning: 8, afternoon: 15, evening: 19, night: 21, nightly: 21 }[periodM[1].toLowerCase()];
     args = args.replace(periodM[0], ' ');
   } else if (dailyM) {
     kind = 'daily';
@@ -194,12 +267,15 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     kind = days === 1 ? 'daily' : 'interval';
     if (kind === 'interval') detail.days = days;
     args = args.replace(intervalM[0], ' ');
+    cadenceM = intervalM;
+  } else if (weekM || fortnightM) {
+    kind = 'interval';
+    detail.days = fortnightM ? 14 : 7;
+    cadenceM = fortnightM || weekM;
+    args = args.replace(cadenceM[0], ' ');
   } else if (weeklyM) {
     kind = 'weekly';
-    const days = [...new Set(
-      weeklyM[1].split(',').map((d) => DAY_INDEX[d.trim().slice(0, 3).toLowerCase()])
-    )].sort();
-    detail.days = days;
+    detail.days = daysIn(weeklyM[1]);
     args = args.replace(weeklyM[0], ' ');
   } else if (monthlyM) {
     kind = 'monthly';
@@ -217,7 +293,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   if (kind === 'interval' && fromDay == null && !fromDate) {
     const anchorM = args.match(new RegExp(`\\bon\\s+(${DAY_WORD})s?\\b`, 'i'))
       || args.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b/i)
-      || (intervalM && intervalM.input.slice(intervalM.index + intervalM[0].length)
+      || (cadenceM && cadenceM.input.slice(cadenceM.index + cadenceM[0].length)
         .match(new RegExp(`^\\s+(${DAY_WORD})\\b`, 'i')));
     if (anchorM) {
       fromDay = DAY_INDEX[anchorM[1].slice(0, 3).toLowerCase()];
@@ -261,10 +337,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     });
   }
 
-  // Time of day: "7pm", "9:30am", "7.30pm", "at 19:00".
+  // Time of day: "7pm", "9:30am", "7.30pm", "730pm", "at 19:00", "at 1930".
   let h = null, mi = 0;
-  const t12 = args.match(/\b(?:at\s+)?(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b/i);
-  const t24 = t12 ? null : args.match(/\b(?:at\s+)?(\d{1,2}):(\d{2})\b/);
+  const t12 = args.match(/\b(?:at\s+)?(\d{1,2})(?:[:.]?(\d{2}))?\s*(am|pm)\b/i);
+  const t24 = t12 ? null : args.match(/\b(?:at\s+)?(\d{1,2}):(\d{2})\b/)
+    || args.match(/\bat\s+([01]\d|2[0-3])([0-5]\d)\b/);
   if (t12) {
     // Range-check so "30pm" (a mangled "7 30pm") errors instead of silently
     // becoming 6pm via the % 12.
@@ -280,6 +357,15 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     if (h > 23 || mi > 59) throw new ParseError(`"${t24[0].trim()}" is not a valid time.`);
     args = args.replace(t24[0], ' ');
   }
+  // A chore nags at one time of day. "take meds 8am and 8pm daily" used to
+  // become a chore called "take meds and 8pm" at 8am; a second time is
+  // refused instead, so it can be added as its own chore.
+  if (h !== null) {
+    const second = args.match(/\b\d{1,2}(?:[:.]?\d{2})?\s*(?:am|pm)\b/i) || args.match(/\b\d{1,2}:\d{2}\b/);
+    if (second) {
+      throw new ParseError(`One time per chore, please — add the ${second[0].trim()} one as a chore of its own.`);
+    }
+  }
   // Word times: "noon", "midnight"; then the implied hour from "every morning".
   if (h === null) {
     const wordT = args.match(/\b(?:at\s+)?(noon|midday|midnight)\b/i);
@@ -290,7 +376,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   }
   // "tomorrow morning", "sat afternoon": a part of day is a usable time.
   if (h === null) {
-    const dayPart = args.match(/\b(morning|afternoon|evening|tonight|night)\b/i);
+    const dayPart = args.match(/\b(?:this\s+)?(morning|afternoon|evening|tonight|night)\b/i);
     if (dayPart) {
       h = { morning: 9, afternoon: 15, evening: 19, tonight: 21, night: 21 }[dayPart[1].toLowerCase()];
       args = args.replace(dayPart[0], ' ');
@@ -313,7 +399,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     // Relative dates become calendar dates now, not when tomorrow's reply lands.
     let startDay = fromDay;
     let onDate = null;
-    const relativeDay = args.match(/\b(?:this\s+)?(tomorrow|tmr|today)\b/i);
+    const relativeDay = args.match(new RegExp(`\\b(?:this\\s+)?(${TOMORROW}|today)\\b`, 'i'));
     if (relativeDay) {
       const p = localParts(nowMs, tz);
       const date = new Date(Date.UTC(p.y, p.mo - 1, p.d + (/today/i.test(relativeDay[1]) ? 0 : 1)));
@@ -409,7 +495,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     // "tmr" is ordinary chat shorthand for tomorrow. Consume a directly
     // attached "this" too, so "train ticket this tmr" does not leave a task
     // named "train ticket this"; a meaningful "this" elsewhere is untouched.
-    const tomorrowM = args.match(/\b(?:this\s+)?(?:tomorrow|tmr)\b/i);
+    const tomorrowM = args.match(new RegExp(`\\b(?:this\\s+)?${TOMORROW}\\b`, 'i'));
     const todayM = args.match(/\btoday\b/i);
     // A weekday only counts as a date when marked ("on/next/this fri") or
     // left dangling at the end — "buy sun hat" keeps its sun. The marker is
@@ -435,7 +521,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   } else {
     // "tomorrow 7pm daily" starts tomorrow; strip the tokens from the text.
     let after = nowMs;
-    const tm = args.match(/\b(?:this\s+)?(?:tomorrow|tmr)\b/i);
+    const tm = args.match(new RegExp(`\\b(?:this\\s+)?${TOMORROW}\\b`, 'i'));
     if (tm) {
       args = args.replace(tm[0], ' ');
       const p = localParts(nowMs, tz);
@@ -482,7 +568,9 @@ function cleanText(args) {
   // edges only: "please remind me to buy milk" becomes "buy milk", while a
   // meaningful word in the middle of a title is left alone. Repeat because
   // people naturally stack wrappers ("could you please remind me to ...").
-  const leadingFiller = /^(?:(?:please|pls|plz|kindly)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|remind\s+me\s+to\s+|remember\s+to\s+|i\s+(?:need|have|want)\s+to\s+|help\s+me\s+(?:to\s+)?)/i;
+  // "remind yx to feed cats" leaves "remind to feed cats" once the shortcut
+  // has gone, and "/remind to pay tax" a leading "to": neither is the chore.
+  const leadingFiller = /^(?:(?:please|pls|plz|kindly)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|remind\s+(?:me\s+(?:to\s+)?|to\s+)|me\s+to\s+|to\s+|remember\s+to\s+|i\s+(?:need|have|want)\s+to\s+|help\s+me\s+(?:to\s+)?)/i;
   const trailingFiller = /\s+(?:please|pls|plz|thanks|thank\s+you)[.!]*$/i;
   let before;
   do {

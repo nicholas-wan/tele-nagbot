@@ -174,7 +174,7 @@ describe('an exact chore name wins', () => {
     await say(6, '/chore trash 8pm daily');
     calls.length = 0;
     await say(7, '/done trash');
-    expect(sent(/matches/)[0].body.text).toBe('"trash" matches: trash (/done 1), trash (/done 2) — use the number.');
+    expect(sent(/matches/)[0].body.text).toBe('😿 "trash" matches: trash (/done 1), trash (/done 2) — use the number.');
   });
 });
 

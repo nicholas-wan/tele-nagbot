@@ -441,7 +441,7 @@ describe('moving next_fire_at is a compare-and-swap', () => {
     await Promise.all([runCron(env), say(anne, '/skip clear poop')]);
     const fired = sql.prepare('SELECT COUNT(*) AS n FROM firings').get().n === 1;
     const refused = sent('sendMessage').some((c) => /just fired/.test(c.body.text));
-    const skipped = sent('sendMessage').some((c) => /Skipping next/.test(c.body.text));
+    const skipped = sent('sendMessage').some((c) => /Skipped/.test(c.body.text));
     expect(refused).toBe(fired);
     expect(skipped).toBe(!fired);
   });

@@ -137,7 +137,7 @@ describe('the chore list', () => {
     ]);
     expect(res.chores[0].status).toBe('🔔 nagging since 6:30 PM');
     expect(res.chores[0].scored).toBe(false);
-    expect(res.chores[1].cadence).toBe('every 1 week');
+    expect(res.chores[1].cadence).toBe('weekly');
     expect(res.members.map((m) => m.name)).toEqual(['@Dodgerblueee', '@nicholaswan']);
     expect(res.me).toEqual({ id: 2, name: '@nicholaswan' });
     const board = await choreListHtml(env, 1, TZ);
@@ -147,7 +147,7 @@ describe('the chore list', () => {
   it('gives each chore the editor\'s values, and offers what the board\'s Manage offers', async () => {
     const { chore } = await call('chore/8');
     expect(chore).toMatchObject({
-      time: '19:00', timed: true, scheduleKey: null, schedule: 'every 1 week at 7pm',
+      time: '19:00', timed: true, scheduleKey: null, schedule: 'weekly at 7pm',
       paceKey: 'default', done: 'early', canSkip: true,
     });
     const nagging = (await call('chore/9')).chore;

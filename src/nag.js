@@ -325,7 +325,10 @@ export function readNested(env, chatId) {
 // true rather than after the sticker, the card and the board.
 // `claimed` is a claim the caller already won in a batch of its own (doneClaim:
 // a nag button sends it with the reads it needs).
-export async function completeFiring(env, firing, reminder, byName, tz, { onClaim, claimed = null } = {}) {
+// `receipt: false`: the message the Done came from already records it — the
+// 8am digest, which redraws the chore as a struck line with ↩️ Not done — so
+// a privately nagged chore sends no second, public receipt beside it.
+export async function completeFiring(env, firing, reminder, byName, tz, { onClaim, claimed = null, receipt: publicReceipt = true } = {}) {
   let now = Date.now();
   if (!claimed) {
     // Only the winner of this state transition performs the side effects: a
@@ -398,6 +401,7 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
     // So does one with no card left to edit — a parked chore whose 😴 card was
     // put away with OK, then finished from the board.
     const receipt = async () => {
+      if (!publicReceipt) return;
       if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
         await sendMessage(env, firing.chat_id, line, receiptButtons(firing.id),
           { silent: true, ttl: RECEIPT_TTL_MS });

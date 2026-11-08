@@ -3,19 +3,19 @@
 // also serves /edit as its own message. Handles the m: and e: callbacks.
 
 import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
-import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
+import { nextOccurrence, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
 import { getTz, householdRoster, householdMembers, membersFrom, senderName, creditTogether, isScored } from './household.js';
 import { completeFiring, editNag, firingCard, deleteNag, nagChat } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons,
-         boardDrawn, loadBoard } from './dashboard.js';
+         boardDrawn, loadBoard, fmtWhen } from './dashboard.js';
 import { setReminderPaused, deleteReminder, completeEarly, chatPaused, redrawNag } from './chores.js';
 
 export function editorText(r, tz) {
   const d = JSON.parse(r.schedule_detail);
   const nags = JSON.parse(r.nag_intervals).join('/');
   const assignee = r.assignee_name ? esc(r.assignee_name) : 'Anyone';
-  const next = r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : 'nagging now';
+  const next = r.next_fire_at != null ? fmtWhen(r.next_fire_at, tz) : 'nagging now';
   return `✏️ <b>Edit: ${esc(r.text)}</b>\n` +
     `Schedule: ${esc(describeSchedule(r))}\n` +
     `Next: ${next}\n` +
@@ -519,7 +519,7 @@ export async function handleManageCallback(env, cb) {
     const next = await skipNext(env, r, tz);
     if (next === 'once') return answerCallback(env, cb.id, 'One-off chores cannot be skipped.');
     if (next == null) return answerCallback(env, cb.id, JUST_FIRED);
-    return answerCallback(env, cb.id, `Next: ${fmtLocal(next, tz)}`);
+    return answerCallback(env, cb.id, `Skipped ⏭️ — next ${fmtWhen(next, tz)}`);
   }
   if (action === 'done' || action === 'doneall' || action === 'doneas') {
     let credit = senderName(cb.from);

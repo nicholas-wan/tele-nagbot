@@ -206,7 +206,7 @@ describe('chat UX', () => {
 
   it('answers instead of ignoring a snooze it could not read', async () => {
     const runs = [];
-    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: nagReplyDb(runs) }, nagReply('snooze until 6pm'));
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: nagReplyDb(runs) }, nagReply('snooze until the cows come home'));
     expect(runs.some((u) => u.sql.includes('snoozes_used'))).toBe(false);
     const hint = calls.find((c) => c.url.endsWith('/sendMessage'));
     expect(hint.body.text).toContain('snooze 2h');
@@ -973,7 +973,7 @@ describe('the wizard keeps a stated start date', () => {
       },
     });
     const wizard = calls.find((c) => /When should Latte/.test((c.body && c.body.text) || ''));
-    expect(wizard.body.text).toContain('every 1 month');
+    expect(wizard.body.text).toContain('(monthly, starting 31 Jan)');
     expect(wizard.body.text).not.toContain('undefined');
     // The draft carries the anchor the wizard will need: the day of month for
     // the cadence, and the start date for the first fire.

@@ -6,8 +6,8 @@
 import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc, okButton,
          replyCtx, sendPrivate, editRef, deleteRef, callbackRef,
          isPublicMessage, sendPrivateLong, keepSourceMessage, tg } from './tg.js';
-import { parseRemind, ParseError, NoTimeError } from './parse.js';
-import { nextOccurrence, fmtLocal, fmtShort, deferQuietHours } from './time.js';
+import { parseRemind, ParseError, NoTimeError, refusalHtml } from './parse.js';
+import { nextOccurrence, fmtLocal, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, householdNames, householdNamesFrom, canonName,
          creditTogether, rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firingCard,
@@ -30,6 +30,11 @@ import { coveredStatement, coveredNamesFrom } from './nesting.js';
 let botUsername = null;
 
 const NOT_YOUR_NAG = 'That nag is someone else\'s 🙈';
+
+// A typed Done, as a reply to a nag or on its own: "done", "Done!", "done 👍",
+// "done together", "done with yx", or a bare ✅ (only as a reply). Only the
+// whole phrase counts — "done?" and "not done ✅?" are people talking.
+const DONE_TEXT = /^(?:done(?:\s+(?:together|both)\b|\s+with\s+.+?)?|✅)[\s!.✅👍]*$/iu;
 
 // New members (or the bot itself) joining get a short intro.
 async function handleNewMembers(env, msg) {
@@ -189,7 +194,15 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
     else if (cmd === 'pause') result = await cmdPauseResume(env, ctx, args, tz, true, by);
     else if (cmd === 'resume') result = await cmdPauseResume(env, ctx, args, tz, false, by);
     else if (cmd === 'skip') result = await cmdSkip(env, ctx, args, tz);
-    else if (cmd === 'done') result = await cmdDone(env, ctx, args, by, tz);
+    else if (cmd === 'done' && /^(?:together|both)?$/i.test(String(args).trim())) {
+      // A bare /done means what a typed "done" does: the one nag in front of
+      // the typer, or a "which one?" — not "Which chore? e.g. /done nails".
+      // The command itself is tidied below, so the copy carries no id to delete.
+      const asText = { ...msg, message_id: 0, text: `done ${String(args).trim()}`.trim() };
+      if (!await bareDone(env, asText, ctx)) {
+        result = await sendPrivate(env, ctx, '😺 Nothing is nagging right now — <code>/done trash</code> finishes a chore early.');
+      }
+    } else if (cmd === 'done') result = await cmdDone(env, ctx, args, by, tz);
     else if (cmd === 'poke' || cmd === 'nagall') result = await cmdPoke(env, ctx);
     else if (cmd === 'stats') result = await cmdStats(env, ctx, tz, args);
     // chrono-node is the biggest dependency and only /invite uses it, so the
@@ -206,7 +219,7 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
     if (!handled) return sendPrivate(env, ctx, `😿 Unknown command /${esc(cmd)}. Try /help.`);
     return result;
   } catch (err) {
-    if (err instanceof ParseError) return sendPrivate(env, ctx, esc(err.message));
+    if (err instanceof ParseError) return sendPrivate(env, ctx, refusalHtml(err));
     console.log(`command /${cmd} failed: ${err.stack || err}`);
     return sendPrivate(env, ctx, '🙀 The cats knocked something over — that didn\'t work. Try again?');
   } finally {
@@ -214,25 +227,33 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
   }
 }
 
-function helpText(section = 'home', nicks = []) {
+// The pinned board's one button, by the name it shows today.
+const boardButtonName = (env) => (env && env.MINI_APP_URL ? '🐾 Chores' : '⚙️ Manage chores');
+
+function helpText(section = 'home', nicks = [], board = '🐾 Chores') {
+  // An example assignee from this household, when it has shortcuts.
+  const who = nicks.length ? esc(nicks[nicks.length - 1]) : '@jane';
   if (section === 'schedule') return '⏰ <b>Scheduling examples</b>\n\n' +
     '<code>/chore trash 7pm daily</code>\n' +
-    '<code>/chore @jane dishes now</code>\n' +
-    '<code>/chore plants every mon,thu 8am</code>\n' +
+    '<code>/chore bins every tue and fri 8pm</code>\n' +
+    `<code>/chore ${who} feed cats tmr 7am</code>\n` +
+    '<code>/chore rent on the 1st 10am</code>\n' +
     '<code>/chore filter every 3 months from friday</code>\n' +
     '<code>/remind plumber in 20m nag:10m</code> — a reminder, no points\n\n' +
+    'Also: <code>weekdays</code>, <code>every other sat</code>, <code>every 2 weeks</code>, ' +
+    '<code>monthly</code>, <code>yearly</code>, <code>starting 29 aug</code>, <code>tonight</code>, <code>noon</code>.\n' +
     'Leave out the time for a guided picker. Add <code>rotate</code> for fair-share assignment.' +
     // Shortcuts are per-household config, so the help only mentions the ones
     // this deployment actually has.
-    (nicks.length ? `\nAssign with @name or a shortcut: ${nicks.map((n) => `<code>${esc(n)}</code>`).join(', ')}` +
-      ` — e.g. <code>/chore ${esc(nicks[0])} dishes 9pm</code>.` : '');
+    (nicks.length ? `\nAssign with @name or a shortcut: ${nicks.map((n) => `<code>${esc(n)}</code>`).join(', ')}.` : '');
   if (section === 'more') return '🧰 <b>More controls</b>\n\n' +
     '/edit · /delete · /pause · /resume · /skip — by chore name\n' +
     '/poke — re-send everything outstanding\n' +
     '/pause all 14 · /resume all — vacation mode\n' +
     '/stats — leaderboard with This week / Last week / 6 months tabs\n' +
     '/invite dentist tomorrow 3pm at Mount E — get a calendar file to add\n\n' +
-    'Reply <code>done</code>, <code>done together</code>, or <code>snooze 2h</code> to a nag, or react 👍.';
+    'Reply to a nag with <code>done</code>, <code>done together</code>, ' +
+    `<code>done with ${nicks.length ? esc(nicks[0]) : 'jane'}</code>, <code>snooze 2h</code> or <code>snooze till 9pm</code> — or react 👍.`;
   if (section === 'stickers') return '🐾 <b>Sticker tools</b>\n\n' +
     '/usepack &lt;link&gt; · /makestickers · /tags\n' +
     '/tagsticker N latte · /autotag · /delsticker N';
@@ -240,8 +261,8 @@ function helpText(section = 'home', nicks = []) {
     '<code>/chore trash 7pm daily</code> — add a chore (counts on the leaderboard)\n' +
     '<code>/remind pick up parcel 5pm</code> — plain reminder, no points\n' +
     '/list — see the chore board\n' +
-    '/done trash — mark it done\n\n' +
-    'Tap 🐾 Chores on the pinned board for everything else, or use the buttons under a nag.';
+    '/done trash — mark it done, even before it nags\n\n' +
+    `Tap ${board} on the pinned board for everything else, or use the buttons under a nag.`;
 }
 
 // Removes the command a confirmation kept on show (keepSourceMessage), when
@@ -306,7 +327,7 @@ async function helpMarkup(env, chatId, section) {
 async function cmdHelp(env, ctx, args = '') {
   const raw = String(args).trim().toLowerCase();
   const section = ['schedule', 'more', 'stickers'].includes(raw) ? raw : 'home';
-  await sendPrivate(env, ctx, helpText(section, [...nicknames(env).keys()]),
+  await sendPrivate(env, ctx, helpText(section, [...nicknames(env).keys()], boardButtonName(env)),
     await helpMarkup(env, ctx.chatId, section));
 }
 
@@ -339,7 +360,7 @@ async function cmdRemind(env, ctx, args, msg, tz, by, scored) {
     // confirmation's does. The dispatcher's plain OK could not, which left the
     // command standing until the daily sweep.
     if (err instanceof ParseError) {
-      return sendPrivate(env, ctx, esc(err.message), { inline_keyboard: [[okButton(sourceMsgId)]] });
+      return sendPrivate(env, ctx, refusalHtml(err), { inline_keyboard: [[okButton(sourceMsgId)]] });
     }
     throw err;
   }
@@ -371,31 +392,56 @@ async function handlePlainText(env, msg) {
   // can see count — the same nagBelongsTo rule as the buttons — or a "done"
   // meant for something else quietly finished another member's private chore
   // in their name, and the "which one?" list named chores they cannot see.
-  if (/^done(?:\s+(?:together|both|with\s+.+?))?\s*!*$/i.test(msg.text)) {
-    const all = await env.DB.prepare(
-      "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
-    ).bind(chatId).all();
-    const mine = all.results.filter((f) => nagBelongsTo(f, msg.from));
-    if (mine.length === 1) return handleNagReply(env, msg, mine[0], ctx);
-    if (mine.length > 1) {
-      const rows = await env.DB.prepare(
-        `SELECT id, text FROM reminders WHERE id IN (${mine.map(() => '?').join(',')}) ORDER BY id`
-      ).bind(...mine.map((f) => f.reminder_id)).all();
-      const names = new Map(rows.results.map((r) => [r.id, r.text]));
-      const together = /^done\s+(?:together|both)\b/i.test(msg.text);
-      const named = /^done\s+with\b/i.test(msg.text);
-      const buttons = mine.filter((f) => names.has(f.reminder_id)).sort((a, b) => a.reminder_id - b.reminder_id)
-        .map((f) => [{
-          text: `${together ? '🤝' : '✅'} ${clip(names.get(f.reminder_id), 30)}`,
-          callback_data: `${together ? 'b' : 'd'}:${f.id}`,
-        }]);
-      return sendPrivate(env, ctx, named
-        ? '😺 Mrow — which one? To credit someone with you, reply to that nag with <code>done with …</code>.'
-        : '😺 Mrow — which one?', { inline_keyboard: [...buttons, [okButton()]] });
-    }
-  }
+  if (DONE_TEXT.test(msg.text.trim()) && !/^✅/u.test(msg.text.trim()) && await bareDone(env, msg, ctx)) return;
   // The only other text that means anything here is a time for a pending draft.
   return tryDraftTime(env, msg, ctx, replyRef);
+}
+
+// A "done" that names no chore — typed on its own, or a bare /done — finishes
+// the one nag the typer can see, asks which when there are several, and says
+// so when the nags out are someone else's. False when nothing is nagging.
+async function bareDone(env, msg, ctx) {
+  const chatId = msg.chat.id;
+  const all = await env.DB.prepare(
+    "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
+  ).bind(chatId).all();
+  const mine = all.results.filter((f) => nagBelongsTo(f, msg.from));
+  // A chore the household parked (snoozed or postponed to a time still ahead)
+  // is not what a bare "done" is about while something else is nagging, and
+  // on its own it is asked about rather than taken: the digest leaves parked
+  // chores out for the same reason — a ✅ meant for nothing in particular once
+  // finished a chore that was not even due.
+  const live = mine.filter((f) => !isHouseholdDeferred(f));
+  if (live.length === 1) {
+    await handleNagReply(env, msg, live[0], ctx);
+    return true;
+  }
+  // Something is nagging, just not at them: an assigned chore nags its
+  // assignee privately, so the other housemate typing "done" for it used to
+  // get silence. The board is where anyone can finish anyone's chore.
+  if (!mine.length) {
+    if (!all.results.length) return false;
+    await sendPrivate(env, ctx, '😺 Nothing of yours is nagging — to finish someone else’s, use the pinned board.');
+    return true;
+  }
+  const rows = await env.DB.prepare(
+    `SELECT id, text FROM reminders WHERE id IN (${mine.map(() => '?').join(',')}) ORDER BY id`
+  ).bind(...mine.map((f) => f.reminder_id)).all();
+  const names = new Map(rows.results.map((r) => [r.id, r.text]));
+  const together = /^dones+(?:together|both)/i.test(msg.text);
+  const named = /^dones+with/i.test(msg.text);
+  const buttons = mine.filter((f) => names.has(f.reminder_id)).sort((x, y) => x.reminder_id - y.reminder_id)
+    .map((f) => [{
+      text: `${together ? '🤝' : '✅'} ${clip(names.get(f.reminder_id), 30)}`,
+      callback_data: `${together ? 'b' : 'd'}:${f.id}`,
+    }]);
+  await sendPrivate(env, ctx, named
+    ? '😺 Mrow — which one? To credit someone with you, reply to that nag with <code>done with …</code>.'
+    : '😺 Mrow — which one?', { inline_keyboard: [...buttons, [okButton()]] });
+  // The typed "done" has been answered by the buttons, so it goes, as it does
+  // when there is only one nag to finish; it used to stay in the chat.
+  if (isPublicMessage(msg)) await deleteMessage(env, chatId, msg.message_id);
+  return true;
 }
 
 // The live nag a message is, and its chore, in one round trip — what a reply
@@ -443,6 +489,38 @@ function expiresBefore(firing, until, r) {
   return !r || r.schedule_kind !== 'once';
 }
 
+// A typed snooze, as people say one: "snooze" (an hour), "snooze 20",
+// "snooze 2h", "snooze for 1 hour", "snooze an hour", "snooze half an hour",
+// "snooze till 9pm", "snooze tomorrow". "snooze 1 hour" used to be refused —
+// "hour" was not one of the units. Null when it is not one of these.
+export function typedSnooze(text, now, tz) {
+  const t = String(text).trim().replace(/\s+/g, ' ');
+  if (!/^snooze\b/i.test(t)) return null;
+  const rest = t.replace(/^snooze\s*(?:for\s+)?/i, '').replace(/[.!]+$/, '').trim();
+  if (!rest) return { until: now + 3600000 };
+  if (/^(?:till\s+|until\s+)?(?:tomorrow|tmr|tmrw)$/i.test(rest)) {
+    return { until: deferQuietHours(now + 86400000, tz), postpone: true };
+  }
+  const word = rest.match(/^(half an?|an?|one) hour$/i);
+  if (word) return { until: now + (/^half/i.test(word[1]) ? 30 : 60) * 60000 };
+  const n = rest.match(/^(\d+)\s*(m|mins?|minutes?|h|hrs?|hours?)?$/i);
+  if (n) {
+    const ms = n[2] && /^h/i.test(n[2]) ? +n[1] * 3600000 : +n[1] * 60000;
+    return +n[1] > 0 ? { until: now + Math.min(ms, 24 * 3600000) } : null;
+  }
+  const clock = rest.match(/^(?:till|until|to)\s+(.+)$/i);
+  if (clock) {
+    // The time reads as a chore's would ("9pm", "9:30", "at 7"): the next one.
+    try {
+      const p = parseRemind(`x ${clock[1]}`, `x ${clock[1]}`, [], now, tz);
+      if (p.kind === 'once' && p.text === 'x' && p.firstFireAt > now && p.firstFireAt - now <= 24 * 3600000) {
+        return { until: p.firstFireAt };
+      }
+    } catch { /* not a time */ }
+  }
+  return null;
+}
+
 // `known`: the firing's chore, when the caller read it alongside the firing.
 async function handleNagReply(env, msg, firing, ctx, known = undefined) {
   const text = msg.text.trim();
@@ -452,14 +530,14 @@ async function handleNagReply(env, msg, firing, ctx, known = undefined) {
   ctx = ctx || replyCtx(env, msg.chat.id, msg.from && msg.from.id);
   // Only a complete done-phrase counts — "done?", "not done ✅?" are chat
   // between people, and completing on those would credit the asker.
-  if (/^(?:done(?:\s+(?:together|both)\b|\s+with\s+.+?)?|✅)[\s!.✅]*$/i.test(text)) {
+  if (DONE_TEXT.test(text)) {
     const reminder = await chore();
     if (!reminder) return;
     let by = senderName(msg.from);
     // "done together"/"done both" credits the whole roster; "done with @jane"
     // credits the replier plus the named helpers.
     const together = /^done\s+(?:together|both)\b/i.test(text);
-    const withM = text.match(/^done\s+with\s+(.+?)[\s!.✅]*$/i);
+    const withM = text.match(/^done\s+with\s+(.+?)[\s!.✅👍]*$/iu);
     let roster = null;
     const unknown = [];
     if (together || withM) {
@@ -474,8 +552,15 @@ async function handleNagReply(env, msg, firing, ctx, known = undefined) {
         // as answering to it — the roster spells Jane "@janedoe", but nobody
         // types that — unless two housemates share it, which is a guess.
         others = [];
+        // The household's shortcuts count too: "done with nic" is how the
+        // NICKNAMES map says they are typed, and it once came back as
+        // "Not in this household: nic".
+        const shortcuts = nicknames(env);
         for (const typed of withM[1].split(/\s*(?:,|&|\+|\band\b)\s*/i).map((s) => s.trim()).filter(Boolean)) {
-          const hit = canonName(roster, typed, household.aliases);
+          let hit = canonName(roster, typed, household.aliases);
+          if (!roster.has(hit) && shortcuts.has(typed.toLowerCase())) {
+            hit = canonName(roster, shortcuts.get(typed.toLowerCase()), household.aliases);
+          }
           if (roster.has(hit)) others.push(hit);
           else unknown.push(typed);
         }
@@ -496,40 +581,42 @@ async function handleNagReply(env, msg, firing, ctx, known = undefined) {
     if (isPublicMessage(msg)) await deleteMessage(env, msg.chat.id, msg.message_id);
     return;
   }
-  const sn = text.match(/^snooze(?:\s+(\d+)\s*(m|min|mins|minutes|h|hr|hrs|hours)?)?\s*$/i);
+  const sn = typedSnooze(text, Date.now(), tz);
   if (sn) {
     if (firing.snoozes_used >= MAX_SNOOZES) {
       return sendPrivate(env, ctx, `😾 No snoozes left (${MAX_SNOOZES} used) — time to do it.`);
     }
-    const n = sn[1] ? +sn[1] : 60;
-    const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
-    let until = Date.now() + Math.min(ms, 24 * 3600000);
+    let until = sn.until;
     const reminder = await chore();
     // Never promise a nag past a recurring chore's 24h expiry — cap at one
     // last call before it. A one-off never expires, so it has nothing to cap.
-    if (expiresBefore(firing, until, reminder)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
+    // "snooze tomorrow" is a postponement, as 📅 Tomorrow is: fired_at moves
+    // with the nag, so the expiry window moves too.
+    if (!sn.postpone && expiresBefore(firing, until, reminder)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
     // snoozed_until is the household's choice on record; resume and the
     // editor honour it only while next_nag_at still equals it. snoozed_by
     // is who chose it, for any later redraw of the 😴 card.
     const res = await env.DB.prepare(
       `UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ?, snoozed_until = ?, snoozed_by = ?
+         ${sn.postpone ? ', fired_at = ?' : ''}
        WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
-    ).bind(until, until, senderName(msg.from), firing.id, MAX_SNOOZES).run();
+    ).bind(until, until, senderName(msg.from), ...(sn.postpone ? [until] : []), firing.id, MAX_SNOOZES).run();
     if (!res.meta.changes) return sendPrivate(env, ctx, '😼 That one was already handled.');
     await updateDashboard(env, firing.chat_id); // the board shows it parked
     if (reminder && firing.last_message_id) {
-      await editNag(env, firing,
-        snoozedHtml(reminder, until, senderName(msg.from), tz), snoozedButtons(firing.id, isScored(firing)));
+      await editNag(env, firing, snoozedHtml(reminder, until, senderName(msg.from), tz, sn.postpone),
+        snoozedButtons(firing.id, isScored(firing)));
       if (isPublicMessage(msg)) await deleteMessage(env, msg.chat.id, msg.message_id);
       return;
     }
-    return sendPrivate(env, ctx, `😴 Snoozed until ${fmtLocal(until, tz)}.`);
+    return sendPrivate(env, ctx, `😴 Snoozed until ${fmtWhen(until, tz)}.`);
   }
   // A reply that starts with "snooze" but didn't parse must not die silently —
   // the person walks away sure it's snoozed while the re-nag stays scheduled.
   if (/^snooze\b/i.test(text)) {
     return sendPrivate(env, ctx,
-      '😿 The cats couldn\'t read that snooze — try <code>snooze 2h</code> or <code>snooze 30m</code>, or tap 😴 Snooze… under the nag.');
+      '😿 The cats couldn\'t read that snooze — try <code>snooze 2h</code>, <code>snooze till 9pm</code> or ' +
+      '<code>snooze tomorrow</code>, or tap 😴 Snooze… under the nag.');
   }
 }
 
@@ -604,18 +691,19 @@ async function cmdPauseResume(env, ctx, args, tz, pause, by) {
     return sendPrivate(env, ctx, `😺 <b>${esc(r.text)}</b> isn't paused.`);
   }
   const state = await setReminderPaused(env, r, pause, tz, by);
-  if (state.firing && !pause) {
-    return sendPrivate(env, ctx, `▶️ Resumed <b>${esc(r.text)}</b> — it's nagging again.`);
-  }
   if (pause) {
-    await sendPrivate(env, ctx, `⏸️ Paused <b>${esc(r.text)}</b>. /resume ${esc(r.text)} to re-enable.`);
-  } else {
-    if (state.next != null) {
-      return sendPrivate(env, ctx, `▶️ Resumed <b>${esc(r.text)}</b> — next ${fmtLocal(state.next, tz)}`);
-    }
-    await sendPrivate(env, ctx,
-      `😼 <b>${esc(r.text)}</b> already fired and has nothing scheduled — /delete it, or add it again with /chore.`);
+    // The way back is a tap, not a command to retype.
+    return sendPrivate(env, ctx, `⏸️ Paused <b>${esc(r.text)}</b> — no nags until it's resumed.`,
+      { inline_keyboard: [[{ text: '▶️ Resume', callback_data: `rs:${r.id}` }, okButton()]] });
   }
+  return sendPrivate(env, ctx, resumedLine(r, state, tz));
+}
+
+// What a resume did, as /resume and a ▶️ Resume tap on its reply both say it.
+function resumedLine(r, state, tz) {
+  if (state.firing) return `▶️ Resumed <b>${esc(r.text)}</b> — it's nagging again.`;
+  if (state.next != null) return `▶️ Resumed <b>${esc(r.text)}</b> — next ${fmtWhen(state.next, tz)}.`;
+  return `😼 <b>${esc(r.text)}</b> already fired and has nothing scheduled — /delete it, or add it again with /chore.`;
 }
 
 async function cmdSkip(env, ctx, args, tz) {
@@ -634,7 +722,9 @@ async function cmdSkip(env, ctx, args, tz) {
     return sendPrivate(env, ctx, `😼 <b>${esc(r.text)}</b> just fired — it is nagging now, so there is nothing to skip.`);
   }
   await updateDashboard(env, chatId);
-  await sendPrivate(env, ctx, `⏭️ Skipping next <b>${esc(r.text)}</b> — next ${fmtLocal(next, tz)}`);
+  // Which one went, and when the chore comes back, both as the board says them.
+  await sendPrivate(env, ctx,
+    `⏭️ Skipped <b>${esc(r.text)}</b> (${fmtWhen(r.next_fire_at, tz)})\nNext: ${fmtWhen(next, tz)}`);
 }
 
 async function cmdDone(env, ctx, args, by, tz) {
@@ -737,7 +827,7 @@ async function handleCallback(env, cb) {
     // Nothing to decide: the spinner stops at once, the page turns after.
     await answerCallback(env, cb.id, '');
     await editRef(env, ctx, cb.message.chat.id, ref,
-      helpText(help[1], [...nicknames(env).keys()]), await helpMarkup(env, cb.message.chat.id, help[1]));
+      helpText(help[1], [...nicknames(env).keys()], boardButtonName(env)), await helpMarkup(env, cb.message.chat.id, help[1]));
     return;
   }
 
@@ -830,6 +920,9 @@ async function handleCallback(env, cb) {
       await completeFiring(env, firing, r, by, tz, {
         claimed: got,
         onClaim: () => answerCallback(env, cb.id, 'Purrs 😻 — ↩️ Not done is right there if that was a slip'),
+        // The digest is redrawn below with the chore struck through and its
+        // ↩️ Not done: that is the receipt, so a private nag gets no second one.
+        receipt: false,
       });
     } else {
       if (firing && firing.state === 'nagging' && !r) return answerCallback(env, cb.id, 'That one is gone.');
@@ -991,7 +1084,7 @@ async function handleCallback(env, cb) {
     await deleteRef(env, ctx, cb.message.chat.id, ref);
     if (!ownCard) return answerCallback(env, cb.id, '');
     const tz = await getTz(env, firing.chat_id);
-    return answerCallback(env, cb.id, `Hidden — back ${fmtShort(firing.next_nag_at, tz)} 😴`);
+    return answerCallback(env, cb.id, `Hidden — back ${fmtWhen(firing.next_nag_at, tz)} 😴`);
   }
 
   // The spinner stops at once; the message itself goes a moment later, and the
@@ -1034,7 +1127,13 @@ async function handleCallback(env, cb) {
     if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
     if (!r.paused) return answerCallback(env, cb.id, 'It isn’t paused.');
     await answerCallback(env, cb.id, 'Resumed ▶️');
-    await setReminderPaused(env, r, false, await getTz(env, r.chat_id), senderName(cb.from));
+    const tz = await getTz(env, r.chat_id);
+    const state = await setReminderPaused(env, r, false, tz, senderName(cb.from));
+    // The ⏸️ card is redrawn as the nag it is again; any other message the
+    // button sat on — /pause's own reply — becomes the resumed line.
+    const f = state.firing;
+    const onCard = f && ref && f.last_message_id === ref.id && Boolean(f.last_message_ephemeral) === ref.ephemeral;
+    if (!onCard) await editRef(env, ctx, r.chat_id, ref, resumedLine(r, state, tz), { inline_keyboard: [[okButton()]] });
     return;
   }
 
