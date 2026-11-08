@@ -247,7 +247,7 @@ function detail(snap, id, tz) {
     parents: parentChoicesIn(loaded.reminders, r),
     family: family(board, r),
     schedule: describeSchedule(r),
-    next: r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : null,
+    next: r.next_fire_at != null ? fmtWhen(r.next_fire_at, tz) : null,
     // Time and schedule are the next slot's, so a chore nagging with nothing
     // scheduled has neither to change, as in the editor.
     timed: r.next_fire_at != null,
