@@ -7,8 +7,9 @@ import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
-         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashStatement, OVERDUE_NAG_MIN } from './nag.js';
-import { updateDashboard, cadence, fmtWhen } from './dashboard.js';
+         completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashStatement, readNested,
+         OVERDUE_NAG_MIN } from './nag.js';
+import { updateDashboard, later, cadence, fmtWhen } from './dashboard.js';
 import { fireReminder } from './firing.js';
 import { coverChildren, uncoverChildren, coverLine } from './nesting.js';
 
@@ -172,10 +173,10 @@ export async function removeReminder(env, r) {
     env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id),
     stashStatement(env, r),
   ]);
-  await Promise.all(firings.results.flatMap((f) => [
+  await later(env, () => Promise.all(firings.results.flatMap((f) => [
     f.last_message_id ? deleteNag(env, f) : null,
     f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
-  ]));
+  ])));
   return stash.meta.last_row_id;
 }
 
@@ -324,8 +325,8 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } 
   const html = by
     ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
-  if (ctx) await sendPrivate(env, ctx, html, undo);
-  else await sendMessage(env, chatId, html, undo, { silent: true });
+  await later(env, () => (ctx ? sendPrivate(env, ctx, html, undo)
+    : sendMessage(env, chatId, html, undo, { silent: true })));
   await updateDashboard(env, chatId);
 }
 
@@ -440,7 +441,7 @@ export async function setReminderPaused(env, r, pause, tz, by) {
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
-  if (firing) {
+  if (firing) await later(env, async () => {
     if (pause) {
       await showPausedCard(env, firing, r, by, tz);
     } else if (firing.last_message_id) {
@@ -454,7 +455,7 @@ export async function setReminderPaused(env, r, pause, tz, by) {
       const [html, markup] = firingCard(r, patch ? { ...firing, ...patch } : firing, tz, now);
       await redrawNag(env, firing, html, markup);
     }
-  }
+  });
   await updateDashboard(env, r.chat_id);
   return { firing, next };
 }
@@ -482,6 +483,7 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
         .bind(r.id, r.next_fire_at)
     : env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
         .bind(nextFireAt, r.id, r.next_fire_at);
+  const nested = readNested(env, r.chat_id);
   const [claim, ins] = await env.DB.batch([
     consume,
     env.DB.prepare(
@@ -504,10 +506,10 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
   if (onClaim) await onClaim();
   // The receipt is the shared record — there is no nag message to edit. The
   // next slot is the one this batch just wrote.
-  const covered = await coverChildren(env, r, firingId, tz);
+  const covered = await coverChildren(env, r, firingId, tz, { nested: await nested });
   const next = r.schedule_kind === 'once' ? null : { next_fire_at: nextFireAt };
   const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId, covered);
-  await sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS });
+  await later(env, () => sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS }));
   await updateDashboard(env, r.chat_id);
   return firingId;
 }

@@ -114,11 +114,33 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null, { onPin =
 export const JUST_FIRED = 'That one just fired — see its nag.';
 export const NAG_PACES = ['10', 'default', '30', '60'];
 export async function applyEditorChoice(env, r, kind, value, tz, { members = null } = {}) {
+  return runPlan(env, await editorPlan(env, r, kind, value, tz, { members }));
+}
+
+// A change as the statements that make it, the refusal its answers may carry,
+// and the Telegram work that follows: the chat sends the statements on their
+// own (runPlan), and the Mini App inside the batch its reply reads, so the
+// answer is the one round trip after its gate.
+//   { problem }  — refused before anything is written
+//   { statements, check(results) → problem | null, after() }
+export async function runPlan(env, plan) {
+  if (plan.problem) return plan.problem;
+  const results = plan.statements.length ? await env.DB.batch(plan.statements) : [];
+  const problem = plan.check(results);
+  if (problem) return problem;
+  await plan.after();
+  return null;
+}
+
+const NOTHING_AFTER = async () => {};
+const write = (statements, check = () => null, after = NOTHING_AFTER) => ({ statements, check, after });
+
+export async function editorPlan(env, r, kind, value, tz, { members = null } = {}) {
   if (kind === 'time') {
     const clock = String(value).match(/^(\d{1,2})(?::(\d{2}))?$/);
     const hour = clock ? Number(clock[1]) : NaN;
     const minute = clock && clock[2] ? Number(clock[2]) : 0;
-    if (!clock || hour > 23 || minute > 59) return 'Not a valid hour or time.';
+    if (!clock || hour > 23 || minute > 59) return { problem: 'Not a valid hour or time.' };
     const detail = { ...JSON.parse(r.schedule_detail), h: hour, mi: minute };
     let next;
     if (r.schedule_kind === 'once' || (r.schedule_kind === 'interval' && r.next_fire_at)) {
@@ -133,40 +155,42 @@ export async function applyEditorChoice(env, r, kind, value, tz, { members = nul
       // daily / weekly / monthly regenerate their own next slot from the rule.
       next = nextOccurrence(r.schedule_kind, detail, Date.now(), tz);
     }
-    const res = await env.DB.prepare(
+    return write([env.DB.prepare(
       'UPDATE reminders SET schedule_detail = ?, next_fire_at = ? WHERE id = ? AND next_fire_at IS ?'
-    ).bind(JSON.stringify(detail), next, r.id, r.next_fire_at).run();
-    if (!res.meta.changes) return JUST_FIRED;
-  } else if (kind === 'schedule') {
-    if (!['daily', 'weekdays', 'weekends'].includes(value)) return 'Not a schedule the editor offers.';
+    ).bind(JSON.stringify(detail), next, r.id, r.next_fire_at)], ([res]) => (res.meta.changes ? null : JUST_FIRED));
+  }
+  if (kind === 'schedule') {
+    if (!['daily', 'weekdays', 'weekends'].includes(value)) return { problem: 'Not a schedule the editor offers.' };
     const old = JSON.parse(r.schedule_detail);
     const base = { h: old.h ?? 9, mi: old.mi ?? 0, ...(old.rotate ? { rotate: true } : {}) };
     const schedule = value === 'daily'
       ? { kind: 'daily', detail: base }
       : { kind: 'weekly', detail: { ...base, days: value === 'weekdays' ? [1, 2, 3, 4, 5] : [0, 6] } };
     const next = nextOccurrence(schedule.kind, schedule.detail, Date.now(), tz);
-    const res = await env.DB.prepare(
+    return write([env.DB.prepare(
       'UPDATE reminders SET schedule_kind = ?, schedule_detail = ?, next_fire_at = ? WHERE id = ? AND next_fire_at IS ?'
-    ).bind(schedule.kind, JSON.stringify(schedule.detail), next, r.id, r.next_fire_at).run();
-    if (!res.meta.changes) return JUST_FIRED;
-  } else if (kind === 'nag') {
+    ).bind(schedule.kind, JSON.stringify(schedule.detail), next, r.id, r.next_fire_at)],
+    ([res]) => (res.meta.changes ? null : JUST_FIRED));
+  }
+  if (kind === 'nag') {
     const minutes = Number(value);
     if (value !== 'default' && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) {
-      return 'Not a nag pace the editor offers.';
+      return { problem: 'Not a nag pace the editor offers.' };
     }
     const intervals = value === 'default' ? DEFAULT_NAGS : [minutes];
-    await env.DB.prepare('UPDATE reminders SET nag_intervals = ? WHERE id = ?')
-      .bind(JSON.stringify(intervals), r.id).run();
-  } else if (kind === 'assign') {
+    return write([env.DB.prepare('UPDATE reminders SET nag_intervals = ? WHERE id = ?')
+      .bind(JSON.stringify(intervals), r.id)]);
+  }
+  if (kind === 'assign') {
     const member = value === '0' ? null
       : (members || await householdMembers(env, r.chat_id)).find((m) => String(m.userId) === value);
-    if (value !== '0' && !member) return 'That household member is no longer here.';
-    await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = ? WHERE id = ?')
-      .bind(member ? member.name : null, member ? member.userId : null, r.id).run();
-    await moveAssignedNag(env, { ...r, assignee_name: member ? member.name : null,
-      assignee_user_id: member ? member.userId : null }, tz);
+    if (value !== '0' && !member) return { problem: 'That household member is no longer here.' };
+    return write([env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = ? WHERE id = ?')
+      .bind(member ? member.name : null, member ? member.userId : null, r.id)], () => null,
+    () => moveAssignedNag(env, { ...r, assignee_name: member ? member.name : null,
+      assignee_user_id: member ? member.userId : null }, tz));
   }
-  return null;
+  return write([]);
 }
 
 // Move the active occurrence too. Clearing its old reference first invalidates
@@ -226,26 +250,27 @@ async function redrawLiveNag(env, r, scored, tz) {
 // before somebody else's tap cannot flip it back. Setting what is already
 // there changes nothing.
 export async function setEditorFlag(env, r, kind, on, tz) {
+  await runPlan(env, flagPlan(env, r, kind, on, tz));
+}
+
+export function flagPlan(env, r, kind, on, tz) {
   if (kind === 'rotate') {
     const detail = JSON.parse(r.schedule_detail);
-    if (Boolean(detail.rotate) === Boolean(on)) return;
+    if (Boolean(detail.rotate) === Boolean(on)) return write([]);
     if (on) detail.rotate = true;
     else delete detail.rotate;
-    await env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
-      .bind(JSON.stringify(detail), r.id).run();
-    return;
+    return write([env.DB.prepare('UPDATE reminders SET schedule_detail = ? WHERE id = ?')
+      .bind(JSON.stringify(detail), r.id)]);
   }
   const scored = on ? 1 : 0;
-  if (Boolean(r.scored) === Boolean(scored)) return;
-  await env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?')
-    .bind(scored, r.id).run();
+  if (Boolean(r.scored) === Boolean(scored)) return write([]);
   // A firing snapshots scored at fire time, so a nag already on screen
   // would keep its old "(reminder — no points)" line, its old button label
   // and its old credit until the next occurrence. Move the live one too.
-  await env.DB.prepare(
-    "UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'"
-  ).bind(scored, r.id).run();
-  await redrawLiveNag(env, r, scored, tz);
+  return write([
+    env.DB.prepare('UPDATE reminders SET scored = ? WHERE id = ?').bind(scored, r.id),
+    env.DB.prepare("UPDATE firings SET scored = ? WHERE reminder_id = ? AND state = 'nagging'").bind(scored, r.id),
+  ], () => null, () => redrawLiveNag(env, r, scored, tz));
 }
 
 // ⏭️ Skip next: the chore's upcoming slot goes by unnagged. Returns the new

@@ -6,7 +6,7 @@ import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
 import { nextOccurrence, fmtLocal, fmtClock, localParts } from './time.js';
 import { pickCelebration, sendCelebration } from './stickers.js';
 import { isScored } from './household.js';
-import { coverChildren, coverLine } from './nesting.js';
+import { coverChildren, coverLine, nestedReads } from './nesting.js';
 import { updateDashboard, later, fmtWhen, fmtSince } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
@@ -305,15 +305,19 @@ export function doneClaim(env, firingId, byName, now,
 // walks, are read alongside rather than inside it: the same wall time, and a
 // read that fails (a database without parent_id yet) can never cost the Done.
 export async function runDoneClaim(env, claim) {
-  const nestedRead = claim.chatId == null ? Promise.resolve(null)
-    : Promise.resolve().then(() => env.DB.prepare(
-      'SELECT * FROM reminders WHERE chat_id = ? AND parent_id IS NOT NULL ORDER BY id'
-    ).bind(claim.chatId).all()).then((res) => res.results || [], (e) => {
-      console.log(`nested chores read failed: ${e}`);
-      return null;
-    });
-  const [results, nested] = await Promise.all([env.DB.batch(claim.statements), nestedRead]);
+  const [results, nested] = await Promise.all([
+    env.DB.batch(claim.statements),
+    claim.chatId == null ? null : readNested(env, claim.chatId),
+  ]);
   return { ...claim.read(results), nested };
+}
+
+// nestedReads, never rejecting: a failure leaves the cover to try for itself.
+export function readNested(env, chatId) {
+  return Promise.resolve().then(() => nestedReads(env, chatId)).catch((e) => {
+    console.log(`nested chores read failed: ${e}`);
+    return null;
+  });
 }
 
 // `onClaim` runs the moment the Done is won, before any of the redrawing: it

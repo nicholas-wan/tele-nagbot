@@ -4,6 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Nag-Bot</title>
+<script>
+// The first screen's request, started before Telegram's SDK has loaded. The
+// SDK is a blocking script (the page needs its theme colours before it
+// draws), and every fetch used to wait behind it; the signed launch data is
+// already in the URL, so the list is asked for here, alongside it. The page
+// uses this answer only when the SDK's own initData matches it exactly, and
+// asks again if it was refused, so a misread here costs nothing. Squashbot's
+// page does the same.
+window.earlyFetch = (() => {
+  try {
+    const initData = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData');
+    if (!initData) return null;
+    const path = 'chores';
+    const response = fetch(`/api/app/${path}`, { headers: { Authorization: `tma ${initData}` } });
+    response.catch(() => {});
+    return { initData, path, response };
+  } catch { return null; }
+})();
+</script>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   /* Telegram hands the page its own theme as --tg-theme-* variables, so the
@@ -296,19 +315,46 @@ function closeApp() {
 }
 
 // ---- API
+// The request the head started, handed over once and only for the screen it
+// was for, signed with exactly what the SDK now holds. start() drops it once
+// the first screen is up, so it can never stand in for a later reload.
+function takeEarlyFetch(method, path) {
+  const early = window.earlyFetch;
+  if (!early || method !== 'GET' || early.path !== path) return null;
+  window.earlyFetch = null;
+  if (!inTelegram || early.initData !== tg.initData) return null;
+  return early.response.catch(() => null);
+}
+
+// When Telegram does not answer the bot's membership check in time, the bot
+// says 503 with retry rather than shutting the person out; the page asks
+// again a moment later, twice at most.
+const RETRY_WAITS_MS = [600, 1500];
+
 async function api(method, path, body) {
   if (preview) return previewApi(method, path, body);
-  const response = await fetch(`/api/app/${path}`, {
-    method,
-    headers: {
-      Authorization: `tma ${inTelegram ? tg.initData : ''}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let data = {};
-  try { data = await response.json(); } catch { /* an empty body reads as a failure */ }
-  return { status: response.status, ...data };
+  const early = takeEarlyFetch(method, path);
+  let response = early && await early;
+  for (let attempt = 0; ; attempt++) {
+    if (!response || response.status === 401) {
+      response = await fetch(`/api/app/${path}`, {
+        method,
+        headers: {
+          Authorization: `tma ${inTelegram ? tg.initData : ''}`,
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    }
+    let data = {};
+    try { data = await response.json(); } catch { /* an empty body reads as a failure */ }
+    if (response.status === 503 && data.retry && attempt < RETRY_WAITS_MS.length) {
+      await new Promise((resolve) => setTimeout(resolve, RETRY_WAITS_MS[attempt]));
+      response = null;
+      continue;
+    }
+    return { status: response.status, ...data };
+  }
 }
 
 // Work that waits on the bot. Only the button that was tapped is held — and
@@ -971,6 +1017,7 @@ async function start() {
     return;
   }
   await loadList(false);
+  window.earlyFetch = null;
 }
 
 // ---- Preview data. Only ever used at localhost, outside Telegram.

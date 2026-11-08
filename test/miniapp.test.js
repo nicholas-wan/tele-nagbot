@@ -47,7 +47,12 @@ beforeEach(() => {
   memberStatus = 'left';
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body) });
-    const result = String(url).endsWith('/getChatMember') ? { status: memberStatus } : { message_id: 99 };
+    // Telegram's answer about membership: the two housemates are in the chat;
+    // anyone else answers memberStatus (asked on every request since 8 Nov
+    // 2026, beside the request's reads).
+    const body = JSON.parse(init.body);
+    const result = String(url).endsWith('/getChatMember')
+      ? { status: [2, 3].includes(body.user_id) ? 'member' : memberStatus } : { message_id: 99 };
     return new Response(JSON.stringify({ ok: true, result }));
   }));
 });

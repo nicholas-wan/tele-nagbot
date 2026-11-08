@@ -19,6 +19,7 @@ import { deleteMessage, esc } from './tg.js';
 import { nextOccurrence, deferQuietHours } from './time.js';
 import { deleteNag, nagChat, firingCard } from './nag.js';
 import { redrawNag } from './chores.js';
+import { later } from './dashboard.js';
 
 // Every chore that sits under `parentId`, at any depth, in tier order. One
 // read of the chat's nested chores, walked here: a query per tier used to put
@@ -57,61 +58,84 @@ export function descendantsIn(reminders, parentId) {
   return out;
 }
 
-async function coverOne(env, r, now, tz) {
-  if (r.paused || r.schedule_kind === 'once') return null;
-  const { results: live } = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
-  ).bind(r.id).all();
-  const removed = [];
-  for (const f of live) {
-    const gone = await env.DB.prepare("DELETE FROM firings WHERE id = ? AND state = 'nagging'").bind(f.id).run();
-    if (!gone.meta.changes) continue;
-    if (f.last_message_id) await deleteNag(env, f);
-    if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-    removed.push(f);
-  }
-  const detail = JSON.parse(r.schedule_detail);
-  let after = null;
-  if (r.schedule_kind === 'interval' && r.next_fire_at != null) {
-    const restart = nextOccurrence('interval', detail, now, tz);
-    // Never pulls a chore earlier: one already skipped or postponed past the
-    // restart keeps its later slot.
-    if (restart != null && restart > r.next_fire_at) {
-      const moved = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(restart, r.id, r.next_fire_at).run();
-      if (moved.meta.changes) after = restart;
-    }
-  }
-  if (!removed.length && after == null) return null;
-  return { id: r.id, text: r.text, before: r.next_fire_at, after, firings: removed };
+// What a cover needs to know, in one round trip: the chat's nested chores and
+// the live nags among them. A Done reads it alongside its own claim, so a
+// chore with nothing under it pays nothing more.
+export async function nestedReads(env, chatId) {
+  const [reminders, live] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ? AND parent_id IS NOT NULL ORDER BY id').bind(chatId),
+    env.DB.prepare(
+      `SELECT f.* FROM firings f JOIN reminders r ON r.id = f.reminder_id
+       WHERE r.chat_id = ? AND r.parent_id IS NOT NULL AND f.state = 'nagging'`
+    ).bind(chatId),
+  ]);
+  return { reminders: reminders.results || [], live: live.results || [] };
 }
 
 // Covers every chore under `parent` after its completion won. Returns the
 // names of the chores it reset, for the receipt; [] when there are none.
 // Never throws: the parent's Done has already been claimed, and a reset that
 // failed must not leave that Done without its receipt.
+//
+// Every child's writes — its live nags taken down, an interval restarted —
+// are conditional and independent, so they go in one batch, each judged by
+// its own change count. The cards come down after (later), as a Done's own
+// card does.
 export async function coverChildren(env, parent, parentFiringId, tz, { nested = null } = {}) {
   const covered = [];
   const now = Date.now();
   try {
-    // `nested`: the chat's nested chores, when the claim's batch read them.
-    const children = nested ? descendantsIn(nested, parent.id) : await descendants(env, parent.chat_id, parent.id);
-    for (const child of children) {
-      const rec = await coverOne(env, child, now, tz);
-      if (rec) covered.push(rec);
+    // `nested`: nestedReads' answer, when the claim read it alongside.
+    const known = nested || await nestedReads(env, parent.chat_id);
+    const children = descendantsIn(known.reminders, parent.id)
+      .filter((r) => !r.paused && r.schedule_kind !== 'once');
+    const statements = [];
+    const steps = [];
+    for (const r of children) {
+      const rec = { r, removed: [], after: null };
+      for (const f of known.live.filter((x) => x.reminder_id === r.id)) {
+        statements.push(env.DB.prepare("DELETE FROM firings WHERE id = ? AND state = 'nagging'").bind(f.id));
+        steps.push({ rec, firing: f });
+      }
+      if (r.schedule_kind === 'interval' && r.next_fire_at != null) {
+        const restart = nextOccurrence('interval', JSON.parse(r.schedule_detail), now, tz);
+        // Never pulls a chore earlier: one already skipped or postponed past
+        // the restart keeps its later slot.
+        if (restart != null && restart > r.next_fire_at) {
+          statements.push(env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+            .bind(restart, r.id, r.next_fire_at));
+          steps.push({ rec, restart });
+        }
+      }
+      covered.push(rec);
+    }
+    const results = statements.length ? await env.DB.batch(statements) : [];
+    steps.forEach((step, i) => {
+      if (!results[i].meta.changes) return;
+      if (step.firing) step.rec.removed.push(step.firing);
+      else step.rec.after = step.restart;
+    });
+    const gone = covered.flatMap((c) => c.removed);
+    if (gone.length) {
+      await later(env, () => Promise.all(gone.flatMap((f) => [
+        f.last_message_id ? deleteNag(env, f) : null,
+        f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+      ])));
     }
   } catch (e) {
     console.log(`covering the chores under ${parent.id} failed: ${e.stack || e}`);
   }
-  if (covered.length && parentFiringId) {
+  const reset = covered.filter((c) => c.removed.length || c.after != null)
+    .map(({ r, removed, after }) => ({ id: r.id, text: r.text, before: r.next_fire_at, after, firings: removed }));
+  if (reset.length && parentFiringId) {
     try {
       await env.DB.prepare('INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)')
-        .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: covered }), now).run();
+        .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: reset }), now).run();
     } catch (e) {
       console.log(`stashing the reset under ${parent.id} failed: ${e.stack || e}`);
     }
   }
-  return covered.map((c) => c.text);
+  return reset.map((c) => c.text);
 }
 
 // The names a parent's done reset, read back from its stash, for a receipt

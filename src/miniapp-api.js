@@ -11,20 +11,20 @@
 // been made.
 
 import { verifyInitData } from './miniapp-auth.js';
-import { chatAllowed, IN_CHAT } from './handlers.js';
-import { tg } from './tg.js';
+import { chatAllowed } from './handlers.js';
 import { fmtLocal, fmtShort, weekStart } from './time.js';
 import {
-  getTz, householdMembers, householdRoster, senderName, creditTogether, rememberMember, nicknames,
-  isScored, membersFrom, CREDIT_SEP,
+  getTz, senderName, creditTogether, nicknames, isScored, membersFrom, householdNamesFrom,
+  chatMemberRole, rememberMemberStatement, CREDIT_SEP,
 } from './household.js';
 import {
-  choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, deferBoards, flushBoards,
+  choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, boardStatements, boardFrom,
+  deferBoards, flushBoards, later,
 } from './dashboard.js';
-import { applyEditorChoice, completeNow, setEditorFlag, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
+import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
 import { createReminder, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { choreStats, winnerStreak } from './stats.js';
+import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
 import { parentChoicesIn, setParent } from './nesting.js';
 
 function json(body, status = 200) {
@@ -41,33 +41,78 @@ function chatFromStartParam(env, startParam) {
   return chatAllowed(env, match[1]) ? Number(match[1]) : null;
 }
 
-// In the household means in the chat now. `members` is pruned when somebody
-// leaves, so a row there is enough; a housemate the bot has not seen yet —
-// joined, never typed — is asked about once, and remembered as an update
-// would remember them.
-//
-// One round trip carries the check and, for a chore's routes, the chore
-// itself. A POST also refreshes the name the household sees for this person,
-// since credits are written in it — what a tap in the chat does first — and
-// the refresh doubles as the check: it changes a row only for a member.
-// Returns { member, chore }.
-async function gate(env, chatId, user, { write, choreId }) {
-  if (user.is_bot) return { member: false, chore: null };
-  const check = write
-    ? env.DB.prepare('UPDATE members SET username = ?, first_name = ?, last_seen = ? WHERE chat_id = ? AND user_id = ?')
-      .bind(user.username || null, user.first_name || null, Date.now(), chatId, user.id)
-    : env.DB.prepare('SELECT 1 AS x FROM members WHERE chat_id = ? AND user_id = ?').bind(chatId, user.id);
-  const statements = [check];
-  if (choreId != null) {
-    statements.push(env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(choreId, chatId));
+// In the household means in the chat now, as Telegram says it
+// (chatMemberRole, remembered a few minutes per isolate). The question goes
+// out beside the request's reads, not in front of them, and nothing is
+// written until it has been answered. When Telegram gives no answer, a
+// `members` row — someone the bot has seen in the chat — is let in as before;
+// anyone else is asked to try again rather than shut out (503, retry).
+// Returns null to go on, or the refusal to send.
+function admit(role, user, rows) {
+  if (user.is_bot || role === 'none') {
+    return json({ ok: false, message: 'Only the household can see its chores.' }, 403);
   }
-  const [seen, chore] = await env.DB.batch(statements);
-  const found = chore ? (chore.results || [])[0] || null : null;
-  if (write ? seen.meta.changes : (seen.results || []).length) return { member: true, chore: found };
-  const member = await tg(env, 'getChatMember', { chat_id: chatId, user_id: user.id });
-  if (!member.ok || !IN_CHAT.has(member.result.status)) return { member: false, chore: null };
-  await rememberMember(env, chatId, user);
-  return { member: true, chore: found };
+  if (role === 'member') return null;
+  if ((rows || []).some((m) => m.user_id === user.id)) return null;
+  return json({ ok: false, retry: true, message: 'Telegram did not answer in time. Trying again…' }, 503);
+}
+
+// The reads a route answers from, sent as the gate's one batch. GET routes
+// draw the board, so the gate is the board's own read and the whole answer is
+// one round trip. A chore's POST reads the roster (who to credit, who to
+// assign), the settings (timezone), the chore and its live nag. Stats read
+// the week. Each returns { statements, read(results) }.
+function boardGate(env, chatId) {
+  return {
+    statements: boardStatements(env, chatId, { members: true }),
+    read: (results) => {
+      const loaded = boardFrom(results);
+      return { loaded, rows: loaded.members, settings: loaded.settings };
+    },
+  };
+}
+
+function choreGate(env, chatId, choreId) {
+  const statements = [
+    env.DB.prepare('SELECT user_id, username, first_name FROM members WHERE chat_id = ?').bind(chatId),
+    env.DB.prepare('SELECT paused_until, dashboard_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
+  ];
+  if (choreId != null) {
+    statements.push(
+      env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(choreId, chatId),
+      env.DB.prepare(
+        "SELECT * FROM firings WHERE reminder_id = ? AND chat_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+      ).bind(choreId, chatId),
+    );
+  }
+  return {
+    statements,
+    read: ([members, settings, chore, live]) => ({
+      rows: members.results || [],
+      settings: (settings.results || [])[0] || null,
+      chore: chore ? (chore.results || [])[0] || null : null,
+      live: live ? (live.results || [])[0] || null : null,
+    }),
+  };
+}
+
+// The leaderboard needs the week's bounds, which need the timezone first —
+// cached per isolate, so nearly always free.
+function statsGate(env, chatId, tz, view) {
+  const now = Date.now();
+  const thisWeek = weekStart(now, tz);
+  const since = view === 'last' ? thisWeek - 7 * 86400000 : thisWeek;
+  return {
+    statements: [
+      env.DB.prepare('SELECT user_id, username, first_name FROM members WHERE chat_id = ?').bind(chatId),
+      ...choreStatsStatements(env, chatId, since, view === 'last' ? thisWeek : now),
+      ...(view === 'week' ? [streakStatement(env, chatId, tz)] : []),
+    ],
+    read: ([members, expired, history, past]) => ({
+      rows: members.results || [],
+      week: { since, stats: choreStatsFrom(expired, history), past: past ? past.results || [] : null },
+    }),
+  };
 }
 
 async function readBody(request) {
@@ -98,10 +143,17 @@ function summary({ r, state, lead, live, cadence }, names = new Map()) {
 // The chores, the board's view of them and the roster, from one D1 batch:
 // everything a reply draws. A reply used to build the board twice — once for
 // the list, once for the chore — at three round trips apiece.
-async function snapshot(env, chatId, tz) {
-  const loaded = await loadBoard(env, chatId, { members: true });
+// `before`: writes that ride in the same batch, ahead of the reads (an edit,
+// the roster refresh), answered in `before`.
+async function snapshot(env, chatId, tz, before = []) {
+  const loaded = await loadBoard(env, chatId, { members: true, before });
+  return snapshotFrom(env, chatId, tz, loaded);
+}
+
+async function snapshotFrom(env, chatId, tz, loaded) {
   return {
     loaded,
+    before: loaded.before || [],
     board: await choreBoard(env, chatId, tz, loaded),
     members: membersFrom(loaded.members),
   };
@@ -188,8 +240,10 @@ function detail(snap, id, tz) {
 // Every action answers with the chore as it now stands — null once it has
 // gone, as a deleted chore or a finished one-off has — and the whole list, so
 // the page never has to guess what its own tap did.
-async function choreReply(env, chatId, id, tz, user, extra) {
-  const snap = await snapshot(env, chatId, tz);
+// The roster refresh (see the gate) rides in this batch when the route gets
+// this far; `pending` hands it over, and anything left is written after.
+async function choreReply(env, chatId, id, tz, user, extra, pending = [], snap = null) {
+  snap = snap || await snapshot(env, chatId, tz, pending.splice(0));
   return json({ ok: true, ...extra, chore: detail(snap, id, tz), ...listing(snap, tz, user) });
 }
 
@@ -198,11 +252,12 @@ const EDIT_FIELDS = new Set(['time', 'schedule', 'nag', 'assign', 'rotate', 'sco
 
 // Who a Done credits: the person tapping, everyone on the roster with them,
 // or one housemate chosen by user_id, as the board's 👤 Done early by… does.
-async function creditFor(env, chatId, user, body) {
+// The roster is the gate's read.
+function creditFor(rows, user, body) {
   const me = senderName(user);
-  if (body.how === 'together') return creditTogether(me, [...await householdRoster(env, chatId)]);
+  if (body.how === 'together') return creditTogether(me, [...householdNamesFrom(rows).roster]);
   if (body.how === 'as') {
-    const member = (await householdMembers(env, chatId)).find((m) => String(m.userId) === String(body.member));
+    const member = membersFrom(rows).find((m) => String(m.userId) === String(body.member));
     return member ? member.name : null;
   }
   return me;
@@ -214,33 +269,34 @@ const DONE_MESSAGES = {
 };
 
 const routes = [
-  ['GET', /^chores$/, async ({ env, chatId, tz, user }) => (
-    json({ ok: true, ...listing(await snapshot(env, chatId, tz), tz, user) })
-  )],
+  ['GET', /^chores$/, async ({ env, chatId, tz, user, gate }) => (
+    json({ ok: true, ...listing(await snapshotFrom(env, chatId, tz, gate.loaded), tz, user) })
+  ), { gate: 'board' }],
 
-  ['GET', /^chore\/(\d+)$/, async ({ env, chatId, tz, match }) => {
-    const snap = await snapshot(env, chatId, tz);
+  ['GET', /^chore\/(\d+)$/, async ({ env, chatId, tz, match, gate }) => {
+    const snap = await snapshotFrom(env, chatId, tz, gate.loaded);
     const chore = detail(snap, Number(match[1]), tz);
     if (!chore) return json(GONE);
     return json({ ok: true, chore, members: snap.members });
-  }],
+  }, { gate: 'board' }],
 
-  ['POST', /^chore\/(\d+)\/done$/, async ({ env, chatId, tz, user, r, body }) => {
-    const credit = await creditFor(env, chatId, user, body);
+  ['POST', /^chore\/(\d+)\/done$/, async ({ env, chatId, tz, user, r, body, gate, pending }) => {
+    const credit = creditFor(gate.rows, user, body);
     if (!credit) return json({ ok: false, message: 'That household member is no longer here.' });
-    const outcome = await completeNow(env, r, credit, tz, { expect: body.expect === 'now' ? 'now' : undefined });
+    const outcome = await completeNow(env, r, credit, tz,
+      { expect: body.expect === 'now' ? 'now' : undefined, live: gate.live });
     if (outcome === 'idle') return json({ ok: false, message: DONE_MESSAGES.idle });
-    return choreReply(env, chatId, r.id, tz, user, { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome] });
+    return choreReply(env, chatId, r.id, tz, user, { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome] }, pending);
   }, { chore: true }],
 
-  ['POST', /^chore\/(\d+)\/skip$/, async ({ env, chatId, tz, user, r }) => {
+  ['POST', /^chore\/(\d+)\/skip$/, async ({ env, chatId, tz, user, r, pending }) => {
     const next = await skipNext(env, r, tz);
     if (next === 'once') return json({ ok: false, message: 'One-off chores cannot be skipped.' });
     if (next == null) return json({ ok: false, message: JUST_FIRED });
-    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtLocal(next, tz)}` });
+    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtLocal(next, tz)}` }, pending);
   }, { chore: true }],
 
-  ['POST', /^chore\/(\d+)\/(pause|resume)$/, async ({ env, chatId, tz, user, r, match }) => {
+  ['POST', /^chore\/(\d+)\/(pause|resume)$/, async ({ env, chatId, tz, user, r, match, pending }) => {
     const pause = match[2] === 'pause';
     if (pause && r.paused) return json({ ok: false, message: 'It is already paused.' });
     if (!pause && !r.paused) return json({ ok: false, message: 'It isn\'t paused.' });
@@ -249,40 +305,50 @@ const routes = [
       : state.next != null ? `▶️ Resumed — next ${fmtLocal(state.next, tz)}`
       : state.firing ? '▶️ Resumed — it is nagging again'
       : '▶️ Resumed, but it already fired and has nothing scheduled.';
-    return choreReply(env, chatId, r.id, tz, user, { message });
+    return choreReply(env, chatId, r.id, tz, user, { message }, pending);
   }, { chore: true }],
 
   // A deletion changes the household's board, so its log goes to the group,
   // with the Undo that brings the chore back for a day.
-  ['POST', /^chore\/(\d+)\/delete$/, async ({ env, chatId, tz, user, r }) => {
+  ['POST', /^chore\/(\d+)\/delete$/, async ({ env, chatId, tz, user, r, pending }) => {
     await deleteReminder(env, r, null, senderName(user));
-    return choreReply(env, chatId, r.id, tz, user, { message: '🗑️ Deleted — Undo is in the chat for a day.' });
+    return choreReply(env, chatId, r.id, tz, user, { message: '🗑️ Deleted — Undo is in the chat for a day.' }, pending);
   }, { chore: true }],
 
-  ['POST', /^chore\/(\d+)\/edit$/, async ({ env, chatId, tz, user, r, body }) => {
+  // An edit's write goes in the batch the reply reads, so the answer is one
+  // round trip after the gate; what Telegram has to show of it (a moved or
+  // re-labelled nag) follows the reply.
+  ['POST', /^chore\/(\d+)\/edit$/, async ({ env, chatId, tz, user, r, body, gate, pending }) => {
     const field = String(body.field || '');
     if (!EDIT_FIELDS.has(field)) return json({ ok: false, message: 'Not something the editor changes.' });
+    let plan;
     if (field === 'rotate' || field === 'score') {
-      await setEditorFlag(env, r, field, Boolean(body.value), tz);
+      plan = flagPlan(env, r, field, Boolean(body.value), tz);
     } else if (field === 'parent') {
       const problem = await setParent(env, r, body.value == null ? null : String(body.value));
       if (problem) return json({ ok: false, message: problem });
+      plan = { statements: [], check: () => null, after: async () => {} };
     } else {
       if ((field === 'time' || field === 'schedule') && r.next_fire_at == null) {
         return json({ ok: false, message: 'It is nagging now — change its time once it is done.' });
       }
-      const problem = await applyEditorChoice(env, r, field, String(body.value ?? ''), tz);
-      if (problem) return json({ ok: false, message: problem });
+      plan = await editorPlan(env, r, field, String(body.value ?? ''), tz, { members: membersFrom(gate.rows) });
     }
+    if (plan.problem) return json({ ok: false, message: plan.problem });
+    const snap = await snapshot(env, chatId, tz, [...plan.statements, ...pending.splice(0)]);
+    const problem = plan.check(snap.before.slice(0, plan.statements.length));
+    if (problem) return json({ ok: false, message: problem });
+    await later(env, plan.after);
     await updateDashboard(env, chatId);
-    return choreReply(env, chatId, r.id, tz, user, { message: 'Updated ✓' });
+    return choreReply(env, chatId, r.id, tz, user, { message: 'Updated ✓' }, [], snap);
   }, { chore: true }],
 
   // Adding takes what /chore takes after the command — "trash 7pm daily" —
   // through the same parser. The chat's no-time wizard has no place in a form,
   // so a missing time is asked for instead. The page shows the confirmation
   // the chat would have posted, and the board lists the chore for everyone.
-  ['POST', /^chores$/, async ({ env, chatId, tz, user, body, now }) => {
+  // A chore due now fires after the reply.
+  ['POST', /^chores$/, async ({ env, chatId, tz, user, body, now, gate, pending }) => {
     const args = String(body.text || '').trim();
     if (!args) return json({ ok: false, message: 'Say what to nag about and when — e.g. trash 7pm daily.' });
     let p;
@@ -295,28 +361,25 @@ const routes = [
       throw error;
     }
     if (body.assignee) {
-      const member = (await householdMembers(env, chatId)).find((m) => String(m.userId) === String(body.assignee));
+      const member = membersFrom(gate.rows).find((m) => String(m.userId) === String(body.assignee));
       if (!member) return json({ ok: false, message: 'That household member is no longer here.' });
       p.assigneeName = member.name;
       p.assigneeUserId = member.userId;
     }
     p.scored = body.scored !== false;
     const { id } = await createReminder(env, chatId, p, senderName(user), tz);
-    await fireIfDue(env, id, tz, { dueAt: p.firstFireAt });
+    await later(env, () => fireIfDue(env, id, tz, { dueAt: p.firstFireAt }));
     return choreReply(env, chatId, id, tz, user, {
       message: `📝 Added — first reminder ${fmtLocal(p.firstFireAt, tz)}`,
-    });
+    }, pending);
   }],
 
-  // The leaderboard's two weekly tabs, counted as /stats counts them.
-  ['GET', /^stats\/(week|last)$/, async ({ env, chatId, tz, match }) => {
+  // The leaderboard's two weekly tabs, counted as /stats counts them, read in
+  // the gate's batch.
+  ['GET', /^stats\/(week|last)$/, async ({ tz, match, gate }) => {
     const view = match[1];
-    const now = Date.now();
-    const thisWeek = weekStart(now, tz);
-    const since = view === 'last' ? thisWeek - 7 * 86400000 : thisWeek;
-    const s = await choreStats(env, chatId, since, view === 'last' ? thisWeek : now);
-    const streak = view === 'week' && s.people.length
-      ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
+    const { since, stats: s, past } = gate.week;
+    const streak = view === 'week' && s.people.length ? streakFrom(past || [], tz, s.people[0][0]) : 0;
     const recent = [...s.together, ...[...s.solo.values()].flat()]
       .sort((a, b) => b.done_at - a.done_at).slice(0, 15)
       .map((h) => ({
@@ -330,12 +393,15 @@ const routes = [
       })),
       together: s.together.length, expired: s.expired, total: s.total, recent,
     });
-  }],
+  }, { gate: 'stats' }],
 ];
 
 // The pinned board is the group's, not the page's: the page draws its answer
 // from the database, so the pin's redraw (a D1 read and a Telegram edit) goes
-// after the response, through ctx.waitUntil, instead of in front of it.
+// after the response, through ctx.waitUntil, instead of in front of it. So does
+// everything else Telegram has to show of a change (later, in dashboard.js) —
+// a card edited, a receipt, a sticker, a log line — and the sweep records of
+// whatever was sent.
 export async function handleMiniAppApi(request, env, path, now = Date.now(), ctx = null) {
   const header = request.headers.get('Authorization') || '';
   const session = header.startsWith('tma ')
@@ -344,26 +410,46 @@ export async function handleMiniAppApi(request, env, path, now = Date.now(), ctx
   const chatId = chatFromStartParam(env, session.startParam);
   if (!chatId) return json({ ok: false, message: 'This link is not for a Nag-Bot household.' }, 403);
   const { user } = session;
-  for (const [method, pattern, handler, { chore = false } = {}] of routes) {
+  for (const [method, pattern, handler, { chore = false, gate: kind = 'chore' } = {}] of routes) {
     const match = path.match(pattern);
     if (!match || request.method !== method) continue;
-    const [allowed, body, tz] = await Promise.all([
-      gate(env, chatId, user, { write: method === 'POST', choreId: chore ? Number(match[1]) : null }),
-      method === 'POST' ? readBody(request) : {},
-      getTz(env, chatId),
-    ]);
-    if (!allowed.member) {
-      return json({ ok: false, message: 'Only the household can see its chores.' }, 403);
-    }
-    const scoped = deferBoards(env);
+    const scoped = deferBoards(env, { afterReply: true });
+    const pending = [];
     try {
-      if (chore && !allowed.chore) return json(GONE);
-      return await handler({ env: scoped, chatId, tz, match, body, user, r: allowed.chore, now });
+      const statsTz = kind === 'stats' ? await getTz(env, chatId) : null;
+      const reads = kind === 'board' ? boardGate(env, chatId)
+        : kind === 'stats' ? statsGate(env, chatId, statsTz, match[1])
+        : choreGate(env, chatId, chore ? Number(match[1]) : null);
+      // The membership question, the route's reads and the body all at once.
+      const [role, results, body] = await Promise.all([
+        user.is_bot ? 'none' : chatMemberRole(env, chatId, user.id),
+        env.DB.batch(reads.statements),
+        method === 'POST' ? readBody(request) : {},
+      ]);
+      const gate = reads.read(results);
+      const refused = admit(role, user, gate.rows);
+      if (refused) return refused;
+      // Let in: the name the household sees for this person is refreshed, since
+      // credits are written in it — what a tap in the chat does first. A POST
+      // sends it with its reply's batch; a GET writes it after, and only for a
+      // housemate the roster has not met yet.
+      const known = (gate.rows || []).some((m) => m.user_id === user.id);
+      if (method === 'POST' || !known) pending.push(rememberMemberStatement(scoped, chatId, user, now));
+      const tz = statsTz || (gate.settings && gate.settings.tz) || 'Asia/Singapore';
+      if (chore && !gate.chore) return json(GONE);
+      return await handler({
+        env: scoped, chatId, tz, match, body, user, r: gate.chore, now, gate, pending,
+      });
     } catch (error) {
       if (error instanceof ParseError) return json({ ok: false, message: error.message });
       console.log(`Mini App ${method} ${path} failed: ${error.stack || error}`);
       return json({ ok: false, message: 'Something went wrong. Please try again.' }, 500);
     } finally {
+      // A refresh no reply carried is written after, never before the check.
+      if (pending.length) {
+        const rest = pending.splice(0);
+        await later(scoped, () => scoped.DB.batch(rest));
+      }
       const boards = flushBoards(scoped);
       if (ctx) ctx.waitUntil(boards);
       else await boards;

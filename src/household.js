@@ -1,6 +1,8 @@
 // Who is in this household: chat settings, member tracking, display names,
 // and the combined-credit format the roster and leaderboard share.
 
+import { tg } from './tg.js';
+
 // A chat's timezone is read on nearly every command and tap, and nothing in
 // the bot ever changes it — so each isolate remembers it for a while instead
 // of paying a D1 round trip for the same answer every time. Keyed by the
@@ -165,6 +167,43 @@ export function rememberMemberStatement(env, chatId, from, now = Date.now(), { g
 export async function forgetMember(env, chatId, userId) {
   await env.DB.prepare('DELETE FROM members WHERE chat_id = ? AND user_id = ?')
     .bind(chatId, userId).run();
+}
+
+// Whether Telegram says this person is in the chat now: 'member', 'none', or
+// 'unknown' when it gave no real answer. Squashbot's check (chatRole). The
+// Mini App asks on every request, alongside its reads, because a `members`
+// row only says the person was seen once — a missed chat_member update left
+// someone who had walked out with the household's chores. Remembered per
+// isolate for a few minutes; only Telegram's own answers are, since a rate
+// limit, a 5xx or a timeout says nothing about the person. Never rejects.
+const ROLE_TTL_MS = 3 * 60000;
+const MAX_ROLES = 200;
+const roleCache = new WeakMap(); // DB -> "chat:user" -> { role, at }
+
+export async function chatMemberRole(env, chatId, userId) {
+  let byKey = roleCache.get(env.DB);
+  if (!byKey) roleCache.set(env.DB, byKey = new Map());
+  const key = `${chatId}:${userId}`;
+  const now = Date.now();
+  const hit = byKey.get(key);
+  if (hit && now - hit.at < ROLE_TTL_MS) return hit.role;
+  const res = await tg(env, 'getChatMember', { chat_id: chatId, user_id: userId });
+  let role = 'unknown';
+  if (res && res.ok && res.result) {
+    const { status, is_member: present } = res.result;
+    if (status === 'member' || status === 'administrator' || status === 'creator') role = 'member';
+    else if (status === 'restricted') role = present === false ? 'none' : 'member';
+    else if (status === 'left' || status === 'kicked') role = 'none';
+  } else if (res && (res.error_code === 400 || res.error_code === 403)) {
+    // No such member, or the bot itself is out of the group: Telegram's answer.
+    role = 'none';
+  }
+  if (role === 'unknown') return role;
+  byKey.set(key, { role, at: now });
+  if (byKey.size > MAX_ROLES) {
+    for (const [k, v] of byKey) if (now - v.at >= ROLE_TTL_MS || byKey.size > MAX_ROLES) byKey.delete(k);
+  }
+  return role;
 }
 
 export async function isMember(env, userId) {

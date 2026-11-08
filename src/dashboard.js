@@ -136,7 +136,17 @@ export function clip(text, max = 42) {
 // Everything the board is drawn from, in one D1 batch — one round trip where
 // it used to be three (four with the pin's own settings read). `members` adds
 // the roster, for the Mini App, which shows both.
-export async function loadBoard(env, chatId, { members = false } = {}) {
+// `before`: writes to send in the same batch, ahead of the reads, so the board
+// they return already shows them (the Mini App's edit, its roster refresh);
+// their answers come back as `before`.
+export async function loadBoard(env, chatId, { members = false, before = [] } = {}) {
+  const results = await env.DB.batch([...before, ...boardStatements(env, chatId, { members })]);
+  return { ...boardFrom(results.slice(before.length)), before: results.slice(0, before.length) };
+}
+
+// loadBoard's reads as statements, and their answers, for a caller that sends
+// them in a batch of its own (the Mini App's gate).
+export function boardStatements(env, chatId, { members = false } = {}) {
   const statements = [
     env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ? ORDER BY id').bind(chatId),
     env.DB.prepare('SELECT paused_until, dashboard_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
@@ -147,7 +157,10 @@ export async function loadBoard(env, chatId, { members = false } = {}) {
   if (members) {
     statements.push(env.DB.prepare('SELECT user_id, username, first_name FROM members WHERE chat_id = ?').bind(chatId));
   }
-  const [reminders, settings, live, roster] = await env.DB.batch(statements);
+  return statements;
+}
+
+export function boardFrom([reminders, settings, live, roster]) {
   return {
     reminders: reminders.results || [],
     settings: (settings.results || [])[0] || null,
