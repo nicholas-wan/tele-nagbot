@@ -99,17 +99,51 @@ export const RECEIPT_TTL_MS = 2 * 3600000;
 
 // Put a message on the daily sweep. Also the backstop for a kept command
 // message (see okButton): if nobody taps OK, it still goes with the day.
+//
+// Inside a webhook update, a Mini App request or a cron tick (deferBoards in
+// dashboard.js) the records are queued and written in one batch when the work
+// is done (flushSweepRecords), instead of one round trip after every send —
+// each sent message used to cost its sender a D1 write before it could move
+// on. Nothing reads a record in the request that made it: the sweep only takes
+// rows a day old, a kept command's OK is a later tap, and a retime of a queued
+// record changes the queued copy.
+export const SWEEP_QUEUE = Symbol('sweep');
+
 export async function recordForSweep(env, chatId, messageId, { ephemeral = false, receiverUserId = null, ttlMs = SENT_TTL_MS } = {}) {
   if (!env.DB || !messageId) return;
+  const row = {
+    chatId, messageId, ephemeral, receiverUserId: ephemeral ? receiverUserId : null,
+    deleteAfter: Date.now() + ttlMs, createdAt: Date.now(),
+  };
+  if (env[SWEEP_QUEUE]) {
+    env[SWEEP_QUEUE].push(row);
+    return;
+  }
   try {
-    await env.DB.prepare(
-      `INSERT INTO sent_messages (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(chatId, ephemeral ? receiverUserId : null, messageId, ephemeral ? 1 : 0,
-      Date.now() + ttlMs, Date.now()).run();
+    await sweepStatement(env, row).run();
   } catch (e) {
     // A message that outlives its day is a nuisance, not a failure.
     console.log(`recordForSweep failed: ${e}`);
+  }
+}
+
+function sweepStatement(env, row) {
+  return env.DB.prepare(
+    `INSERT INTO sent_messages (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(row.chatId, row.receiverUserId, row.messageId, row.ephemeral ? 1 : 0, row.deleteAfter, row.createdAt);
+}
+
+// Writes the queued records in one batch. Awaited by flushBoards, which runs
+// inside the request's waitUntil (or the cron tick) after every send is done.
+export async function flushSweepRecords(env) {
+  const queue = env[SWEEP_QUEUE];
+  if (!queue || !queue.length) return;
+  const rows = queue.splice(0);
+  try {
+    await env.DB.batch(rows.map((row) => sweepStatement(env, row)));
+  } catch (e) {
+    console.log(`recording ${rows.length} sent messages failed: ${e}`);
   }
 }
 
@@ -124,9 +158,13 @@ export async function recordSentMessage(env, chatId, res, { receiverUserId = nul
 }
 
 // Re-time an already-recorded message — a nag that just turned into a done
-// receipt shouldn't keep the nag's full day.
+// receipt shouldn't keep the nag's full day. A record still in the queue is
+// re-timed there.
 export async function retimeSentMessage(env, chatId, ref, ttlMs) {
   if (!env.DB || !ref) return;
+  const queued = (env[SWEEP_QUEUE] || []).filter((row) => row.chatId === chatId
+    && row.messageId === ref.id && row.ephemeral === Boolean(ref.ephemeral));
+  for (const row of queued) row.deleteAfter = Date.now() + ttlMs;
   try {
     await env.DB.prepare(
       'UPDATE sent_messages SET delete_after = ? WHERE chat_id = ? AND message_id = ? AND is_ephemeral = ?'

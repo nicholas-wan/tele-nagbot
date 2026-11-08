@@ -5,10 +5,10 @@
 import { editMessage, editReplyMarkup, editRef, answerCallback, deleteMessage, deleteEphemeral, esc } from './tg.js';
 import { nextOccurrence, fmtLocal, localParts, zonedEpoch } from './time.js';
 import { DEFAULT_NAGS } from './parse.js';
-import { getTz, householdRoster, householdMembers, senderName, creditTogether, isScored } from './household.js';
+import { getTz, householdRoster, householdMembers, membersFrom, senderName, creditTogether, isScored } from './household.js';
 import { completeFiring, editNag, firingCard, deleteNag, nagChat } from './nag.js';
 import { updateDashboard, choreListHtml, buttonText, clip, describeSchedule, dashboardButtons,
-         boardDrawn } from './dashboard.js';
+         boardDrawn, loadBoard } from './dashboard.js';
 import { setReminderPaused, deleteReminder, completeEarly, chatPaused, redrawNag } from './chores.js';
 
 export function editorText(r, tz) {
@@ -83,10 +83,12 @@ async function editorIsDashboard(env, cb) {
 // /edit, which is usually ephemeral. Only the ref knows which id space that
 // second one belongs to — editing an ephemeral message with the public method
 // silently does nothing, leaving a dead screen behind a "Updated ✓" toast.
-async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
+// `onPin` and `loaded`, when the caller already knows where the editor is and
+// has the board's rows in hand, spare the reads.
+async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null, { onPin = null, loaded = null } = {}) {
   const markup = buttons || await editorButtons(env, r);
-  if (await editorIsDashboard(env, cb)) {
-    const html = await choreListHtml(env, r.chat_id, tz);
+  if (onPin ?? await editorIsDashboard(env, cb)) {
+    const html = await choreListHtml(env, r.chat_id, tz, loaded);
     const res = await editMessage(env, r.chat_id, cb.message.message_id, html, markup);
     // This edit is the board's redraw; the deferred one would close the editor.
     boardDrawn(env, r.chat_id);
@@ -111,7 +113,7 @@ async function refreshEditor(env, cb, ctx, ref, r, tz, buttons = null) {
 // Mini App's time field ("19:30").
 export const JUST_FIRED = 'That one just fired — see its nag.';
 export const NAG_PACES = ['10', 'default', '30', '60'];
-export async function applyEditorChoice(env, r, kind, value, tz) {
+export async function applyEditorChoice(env, r, kind, value, tz, { members = null } = {}) {
   if (kind === 'time') {
     const clock = String(value).match(/^(\d{1,2})(?::(\d{2}))?$/);
     const hour = clock ? Number(clock[1]) : NaN;
@@ -157,7 +159,7 @@ export async function applyEditorChoice(env, r, kind, value, tz) {
       .bind(JSON.stringify(intervals), r.id).run();
   } else if (kind === 'assign') {
     const member = value === '0' ? null
-      : (await householdMembers(env, r.chat_id)).find((m) => String(m.userId) === value);
+      : (members || await householdMembers(env, r.chat_id)).find((m) => String(m.userId) === value);
     if (value !== '0' && !member) return 'That household member is no longer here.';
     await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = ? WHERE id = ?')
       .bind(member ? member.name : null, member ? member.userId : null, r.id).run();
@@ -268,8 +270,10 @@ export async function skipNext(env, r, tz) {
 // `expect: 'now'` is a Done tapped on a nag the page showed as live: when the
 // nag has gone meanwhile (finished from the chat, or the same tap twice) it is
 // 'raced', not a Done early on the next occurrence.
-export async function completeNow(env, r, credit, tz, { expect } = {}) {
-  const firing = await env.DB.prepare(
+// `live`: the chore's live firing, or null for none, when the caller read it
+// in a batch of its own (the Mini App's gate).
+export async function completeNow(env, r, credit, tz, { expect, live } = {}) {
+  const firing = live !== undefined ? live : await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) {
@@ -280,33 +284,48 @@ export async function completeNow(env, r, credit, tz, { expect } = {}) {
   return await completeFiring(env, firing, r, credit, tz) ? 'done' : 'raced';
 }
 
-// The e: callback family: editor navigation and value taps.
+// The e: callback family: editor navigation and value taps. The chore, where
+// the editor is (the pin, or its own message) and, for the assignee picker,
+// the roster are one round trip. Navigation is answered at once; a change is
+// answered as soon as it is made, and the editor is redrawn after, from one
+// more read (the board's, when the editor lives on it).
 export async function handleEditorCallback(env, cb, ctx, ref) {
   const editNav = (cb.data || '').match(/^e:(menu|time|schedule|nag|assign|rotate|score|pause|close):(\d+)$/);
   const editSet = (cb.data || '').match(/^e:set(time|schedule|nag|assign):(\d+):([a-z0-9]+)$/);
   if (!editNav && !editSet) return answerCallback(env, cb.id, '');
   const reminderId = +(editNav ? editNav[2] : editSet[2]);
-  let r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-    .bind(reminderId, cb.message.chat.id).first();
+  const chatId = cb.message.chat.id;
+  const roster = (editNav && editNav[1] === 'assign') || (editSet && editSet[1] === 'assign');
+  const [rows, pin, people] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(reminderId, chatId),
+    env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?').bind(chatId),
+    ...(roster ? [env.DB.prepare('SELECT user_id, username, first_name FROM members WHERE chat_id = ?').bind(chatId)] : []),
+  ]);
+  let r = (rows.results || [])[0] || null;
   if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
+  const pinned = (pin.results || [])[0];
+  const onPin = Boolean(cb.message.message_id && pinned && pinned.dashboard_msg_id === cb.message.message_id);
+  const members = people ? membersFrom(people.results) : null;
   const tz = await getTz(env, r.chat_id);
 
   if (editNav) {
     const action = editNav[1];
     if (action === 'close') {
+      await answerCallback(env, cb.id, 'Closed');
       if (ref && ref.ephemeral) await deleteEphemeral(env, ctx, ref.id);
-      else if (await editorIsDashboard(env, cb)) await updateDashboard(env, r.chat_id);
+      else if (onPin) await updateDashboard(env, r.chat_id);
       else await deleteMessage(env, r.chat_id, cb.message.message_id);
-      return answerCallback(env, cb.id, 'Closed');
+      return;
     }
     if (action === 'menu') {
-      await refreshEditor(env, cb, ctx, ref, r, tz);
-      return answerCallback(env, cb.id, '');
+      await answerCallback(env, cb.id, '');
+      await refreshEditor(env, cb, ctx, ref, r, tz, null, { onPin });
+      return;
     }
     if (['time', 'schedule', 'nag', 'assign'].includes(action)) {
-      const members = action === 'assign' ? await householdMembers(env, r.chat_id) : [];
-      await refreshEditor(env, cb, ctx, ref, r, tz, editorSubmenu(action, r, members));
-      return answerCallback(env, cb.id, '');
+      await answerCallback(env, cb.id, '');
+      await refreshEditor(env, cb, ctx, ref, r, tz, editorSubmenu(action, r, members || []), { onPin });
+      return;
     }
     if (action === 'rotate') {
       await setEditorFlag(env, r, 'rotate', !JSON.parse(r.schedule_detail).rotate, tz);
@@ -316,21 +335,23 @@ export async function handleEditorCallback(env, cb, ctx, ref) {
       await setReminderPaused(env, r, !r.paused, tz, senderName(cb.from));
     }
   } else {
-    const problem = await applyEditorChoice(env, r, editSet[1], editSet[3], tz);
+    const problem = await applyEditorChoice(env, r, editSet[1], editSet[3], tz, { members });
     if (problem) return answerCallback(env, cb.id, problem);
   }
+  await answerCallback(env, cb.id, 'Updated ✓');
 
-  r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
-  if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
+  // The chore as it now stands: from the board's own read when the editor is
+  // the board, which the redraw needs anyway.
+  let loaded = null;
+  if (onPin) {
+    loaded = await loadBoard(env, chatId);
+    r = loaded.reminders.find((x) => x.id === r.id) || null;
+  } else {
+    r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(r.id).first();
+  }
+  if (!r) return;
   await updateDashboard(env, r.chat_id);
-  await refreshEditor(env, cb, ctx, ref, r, tz);
-  return answerCallback(env, cb.id, 'Updated ✓');
-}
-
-async function dashboardCallbackAllowed(env, cb) {
-  const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
-    .bind(cb.message.chat.id).first();
-  return row && row.dashboard_msg_id === cb.message.message_id;
+  await refreshEditor(env, cb, ctx, ref, r, tz, null, { onPin, loaded });
 }
 
 async function chorePickerMarkup(env, chatId, tz) {
@@ -387,7 +408,14 @@ export async function handleManageCallback(env, cb) {
   const manageItem = (cb.data || '').match(/^m:(item|edit|pause|resume|skip|done|doneall|doneby|delete|confirm):(\d+)$/)
     || (cb.data || '').match(/^m:(doneas):(\d+):(\d+)$/);
   if (!manage && !manageItem) return answerCallback(env, cb.id, '');
-  if (!await dashboardCallbackAllowed(env, cb)) {
+  // The pin check and the chore are one round trip.
+  const [pin, picked] = await env.DB.batch([
+    env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?').bind(cb.message.chat.id),
+    ...(manageItem ? [env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
+      .bind(+manageItem[2], cb.message.chat.id)] : []),
+  ]);
+  const board = (pin.results || [])[0];
+  if (!board || board.dashboard_msg_id !== cb.message.message_id) {
     return answerCallback(env, cb.id, 'That dashboard is no longer active.');
   }
   if (manage) {
@@ -401,8 +429,7 @@ export async function handleManageCallback(env, cb) {
   }
 
   const action = manageItem[1];
-  const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-    .bind(+manageItem[2], cb.message.chat.id).first();
+  const r = (picked.results || [])[0] || null;
   if (!r) {
     await updateDashboard(env, cb.message.chat.id);
     return answerCallback(env, cb.id, 'That chore is already gone.');

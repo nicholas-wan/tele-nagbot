@@ -8,7 +8,7 @@ import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, fm
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName, nicknames } from './household.js';
-import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
+import { createFromDraft, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
 import { ordinal } from './dashboard.js';
 
 // Bare /chore or /remind — the "/" autocomplete menu sends the command with
@@ -72,15 +72,26 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
   }
   p.scored = scored;
   p.sourceMsgId = sourceMsgId;
-  const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-    .bind(draft.id, chatId).run();
-  if (!claim.meta.changes) return;
+  const by = senderName(msg.from);
+  const made = await createFromDraft(env, draft, p, by, tz);
+  if (!made) return;
   const promptRef = draftRef(draft, 'prompt');
   if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
-  const by = senderName(msg.from);
-  const { id, html } = await createReminder(env, chatId, p, by, tz);
-  await confirmNewChore(env, ctx, by, p, tz, id, html);
-  await fireIfDue(env, id, tz);
+  await confirmNewChore(env, ctx, by, p, tz, made.id, made.html);
+  await fireIfDue(env, made.id, tz, { dueAt: p.firstFireAt });
+}
+
+// How long the wizard waits for Workers AI's guess. The card never waits for
+// it: it goes out at once, and a guess back inside this bound is edited in as
+// the ✨ button on top. Past it the card simply keeps its presets.
+const AI_WAIT_MS = 2500;
+
+function withinMs(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
+  ]);
 }
 
 // No time given: park the parsed pieces as a draft and offer tap-to-choose
@@ -88,17 +99,20 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
 // a valid guess becomes the top button — applied only if someone taps it.
 // sourceMsgId is the public command the chore was typed in; it rides on the
 // draft so the eventual confirmation's ✅ OK can remove it.
+//
+// The guess used to come first, with no bound: the card waited on a language
+// model before the person saw anything. Now the draft and the card go first
+// and the guess runs alongside them; only a guess that arrives in time, for a
+// draft still open, is stored and edited onto the card.
 export async function startWizard(env, ctx, partial, rawArgs, tz, scored, sourceMsgId = null) {
   const chatId = ctx.chatId;
   const now = Date.now();
-  let ai = null;
-  if (rawArgs && env.AI) {
-    try {
-      ai = await suggestSchedule(env, rawArgs, tz, now);
-    } catch (e) {
+  const guess = rawArgs && env.AI
+    ? withinMs(Promise.resolve().then(() => suggestSchedule(env, rawArgs, tz, now)).catch((e) => {
       console.log(`ai suggest failed: ${e}`);
-    }
-  }
+      return null;
+    }), AI_WAIT_MS)
+    : null;
   // A stated start date ("every month starting 31 jan") has to survive the
   // wizard, and drafts have no column for it — so it travels inside
   // schedule_detail as startDate and is stripped back out before the reminder
@@ -119,7 +133,7 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
   ).bind(
     chatId, partial.text, partial.assigneeName, partial.assigneeUserId, partial.kind,
     JSON.stringify(detail), JSON.stringify(partial.nagIntervals),
-    ai ? JSON.stringify(ai) : null, Date.now(), scored ? 1 : 0, sourceMsgId, ctx.userId
+    null, Date.now(), scored ? 1 : 0, sourceMsgId, ctx.userId
   ).run();
   const id = res.meta.last_row_id;
 
@@ -138,8 +152,7 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
         WIZARD_HOURS.map((h) => btn(fmtTime(h, 0), `h${h}`)),
         [btn('✏️ Type a time', 'custom')],
       ];
-  if (ai) keyboard.unshift([btn(`✨ ${ai.label}`, 'ai')]);
-  keyboard.push([btn('✕ Cancel', 'cancel')]);
+  const cancel = [btn('✕ Cancel', 'cancel')];
 
   // An interval is counted in months or in days; reading only .days rendered
   // a monthly chore as "every undefined days".
@@ -150,16 +163,22 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
     ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
         partial.kind === 'monthly' ? 'on the ' + ordinal(partial.detail.dom) :
         partial.kind === 'interval' ? intervalNote : 'daily'})`;
-  const sent = await sendPrivate(env, ctx,
-    `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
-    'Tap an option, or reply with a custom time.',
-    { inline_keyboard: keyboard }
-  );
+  const html = `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
+    'Tap an option, or reply with a custom time.';
+  const sent = await sendPrivate(env, ctx, html, { inline_keyboard: [...keyboard, cancel] });
   const ref = msgRef(sent);
   if (ref) {
     await env.DB.prepare('UPDATE drafts SET wizard_msg_id = ?, wizard_msg_ephemeral = ? WHERE id = ?')
       .bind(ref.id, ref.ephemeral ? 1 : 0, id).run();
   }
+  const ai = guess && await guess;
+  if (!ai || !ref) return;
+  // Stored only while the draft is still open: a tap or a reply that already
+  // claimed it has turned the card into something else.
+  const stored = await env.DB.prepare('UPDATE drafts SET ai_json = ? WHERE id = ? AND chat_id = ?')
+    .bind(JSON.stringify(ai), id, chatId).run();
+  if (!stored.meta.changes) return;
+  await editRef(env, ctx, chatId, ref, html, { inline_keyboard: [[btn(`✨ ${ai.label}`, 'ai')], ...keyboard, cancel] });
 }
 
 // An assigned chore's confirmation is the wizard card itself, edited in place
@@ -355,13 +374,12 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
     nagIntervals: JSON.parse(draft.nag_intervals), kind, detail, firstFireAt, scored: draft.scored,
     sourceMsgId: draft.source_msg_id || null,
   };
-  // Claim the draft before creating anything. A second reply or wizard tap
-  // racing this one loses the conditional delete and cannot create a duplicate.
-  const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-    .bind(draft.id, chatId).run();
-  if (!claim.meta.changes) return;
+  // Claim the draft and create the chore together. A second reply or wizard
+  // tap racing this one loses the conditional delete and creates nothing.
   const by = senderName(msg.from);
-  const { id, html } = await createReminder(env, chatId, p, by, tz);
+  const made = await createFromDraft(env, draft, p, by, tz);
+  if (!made) return;
+  const { id, html } = made;
   const wizardRef = draftRef(draft, 'wizard');
   const promptRef = draftRef(draft, 'prompt');
   if (promptRef) await deleteRef(env, ctx, chatId, promptRef);
@@ -374,7 +392,7 @@ export async function tryDraftTime(env, msg, ctx, replyRef) {
     if (wizardRef) await deleteRef(env, ctx, chatId, wizardRef);
     await confirmNewChore(env, ctx, by, p, tz, id, html);
   }
-  await fireIfDue(env, id, tz);
+  await fireIfDue(env, id, tz, { dueAt: p.firstFireAt });
 }
 
 // The w: callback family: time-choice taps on the wizard message.
@@ -440,23 +458,23 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
     sched = scheduleFromCode(wiz[2], draft, Date.now(), tz);
   }
   if (!sched) return answerCallback(env, cb.id, 'That time has passed — choose another.');
-  // Claim the draft before creating anything. Telegram can deliver multiple
-  // taps close together; only the first conditional delete may proceed.
-  const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')
-    .bind(draft.id, draft.chat_id).run();
-  if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already scheduled.');
+  // Claim the draft and create the chore in one transaction. Telegram can
+  // deliver multiple taps close together; only the first claim creates.
   const wizBy = senderName(cb.from);
   const wizP = {
     text: draft.text, assigneeName: draft.assignee_name, assigneeUserId: draft.assignee_user_id,
     nagIntervals: JSON.parse(draft.nag_intervals), scored: draft.scored, ...sched,
     sourceMsgId: draft.source_msg_id || null,
   };
-  const { id: newId, html } = await createReminder(env, draft.chat_id, wizP, wizBy, tz);
+  const made = await createFromDraft(env, draft, wizP, wizBy, tz);
+  if (!made) return answerCallback(env, cb.id, 'Already scheduled.');
+  // The chore exists: said at once, and the confirmation follows.
+  await answerCallback(env, cb.id, 'Scheduled 📝');
+  const { id: newId, html } = made;
   if (wizP.assigneeName || wizP.assigneeUserId) {
     await confirmOnWizard(env, ctx, draft.chat_id, ref, html, undoButtons(newId, wizP.sourceMsgId));
   } else {
     await deleteRef(env, ctx, draft.chat_id, ref);
     await confirmNewChore(env, ctx, wizBy, wizP, tz, newId, html);
   }
-  return answerCallback(env, cb.id, 'Scheduled 📝');
 }

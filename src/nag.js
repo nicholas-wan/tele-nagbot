@@ -7,7 +7,7 @@ import { nextOccurrence, fmtLocal, fmtClock, localParts } from './time.js';
 import { pickCelebration, sendCelebration } from './stickers.js';
 import { isScored } from './household.js';
 import { coverChildren, coverLine } from './nesting.js';
-import { updateDashboard, fmtWhen, fmtSince } from './dashboard.js';
+import { updateDashboard, later, fmtWhen, fmtSince } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
 export const EXPIRE_AFTER_MS = 24 * 3600000;
@@ -256,25 +256,84 @@ export async function showPausedCard(env, firing, reminder, by, tz, until = null
     : { inline_keyboard: [[{ text: '▶️ Resume', callback_data: `rs:${reminder.id}` }]] });
 }
 
+// The Done claim, so a tap can send it with the reads it needs in one round
+// trip. Conditional on the state, like every transition. `chatId` scopes it to
+// the household the tap came from; `userId` refuses another member's
+// ephemeral nag (nagBelongsTo, in SQL); `needReminder` refuses a firing whose
+// chore has gone. `reminder`, when the caller already holds it, puts a
+// one-off's stash and removal in the same transaction, gated on the claim.
+// After the claim come the firing as it now stands, then any `extra` reads.
+const OWNS = '(last_message_ephemeral = 0 OR nag_user_id IS NULL OR nag_user_id = ?)';
+const HAS_CHORE = 'EXISTS (SELECT 1 FROM reminders r WHERE r.id = firings.reminder_id AND r.chat_id = firings.chat_id)';
+
+export function doneClaim(env, firingId, byName, now,
+  { chatId = null, userId = null, needReminder = false, reminder = null, extra = [] } = {}) {
+  const where = ['id = ?', "state = 'nagging'"];
+  const args = [byName, now, firingId];
+  if (chatId != null) { where.push('chat_id = ?'); args.push(chatId); }
+  if (userId != null) { where.push(OWNS); args.push(userId); }
+  if (needReminder) where.push(HAS_CHORE);
+  const statements = [env.DB.prepare(
+    `UPDATE firings SET state = 'done', done_by = ?, done_at = ?,
+       snoozed_until = CASE WHEN next_nag_at = snoozed_until THEN snoozed_until ELSE NULL END,
+       next_nag_at = NULL WHERE ${where.join(' AND ')}`
+  ).bind(...args)];
+  const stashes = Boolean(reminder && reminder.schedule_kind === 'once');
+  if (stashes) {
+    statements.push(
+      env.DB.prepare(
+        'INSERT INTO trash (chat_id, payload, created_at) SELECT ?, ?, ? WHERE changes() = 1'
+      ).bind(reminder.chat_id, JSON.stringify({ ...reminder, _firing: firingId }), now),
+      env.DB.prepare('DELETE FROM reminders WHERE id = ? AND changes() = 1').bind(reminder.id),
+    );
+  }
+  const at = statements.length;
+  statements.push(env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firingId), ...extra);
+  return {
+    statements,
+    chatId: chatId ?? (reminder && reminder.chat_id),
+    read: (results) => ({
+      won: Boolean(results[0].meta.changes),
+      stashed: stashes,
+      firing: (results[at].results || [])[0] || null,
+      extra: results.slice(at + 1),
+    }),
+  };
+}
+
+// Sends a doneClaim. The chat's nested chores, which the cover of a won Done
+// walks, are read alongside rather than inside it: the same wall time, and a
+// read that fails (a database without parent_id yet) can never cost the Done.
+export async function runDoneClaim(env, claim) {
+  const nestedRead = claim.chatId == null ? Promise.resolve(null)
+    : Promise.resolve().then(() => env.DB.prepare(
+      'SELECT * FROM reminders WHERE chat_id = ? AND parent_id IS NOT NULL ORDER BY id'
+    ).bind(claim.chatId).all()).then((res) => res.results || [], (e) => {
+      console.log(`nested chores read failed: ${e}`);
+      return null;
+    });
+  const [results, nested] = await Promise.all([env.DB.batch(claim.statements), nestedRead]);
+  return { ...claim.read(results), nested };
+}
+
 // `onClaim` runs the moment the Done is won, before any of the redrawing: it
 // is where a tap's toast goes, so the person hears "Purrs" as soon as it is
 // true rather than after the sticker, the card and the board.
-export async function completeFiring(env, firing, reminder, byName, tz, { onClaim } = {}) {
-  const now = Date.now();
-  // Only the winner of this state transition performs the side effects: a
-  // concurrent cron expiry or second Done tap loses here and returns false.
-  // The row is read back in the same batch (one round trip), so message ids
-  // reflect a re-nag that landed after our caller's SELECT.
-  const [claim, after] = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE firings SET state = 'done', done_by = ?, done_at = ?,
-         snoozed_until = CASE WHEN next_nag_at = snoozed_until THEN snoozed_until ELSE NULL END,
-         next_nag_at = NULL WHERE id = ? AND state = 'nagging'`
-    ).bind(byName, now, firing.id),
-    env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id),
-  ]);
-  if (!claim.meta.changes) return false;
-  firing = (after.results || [])[0] || firing;
+// `claimed` is a claim the caller already won in a batch of its own (doneClaim:
+// a nag button sends it with the reads it needs).
+export async function completeFiring(env, firing, reminder, byName, tz, { onClaim, claimed = null } = {}) {
+  let now = Date.now();
+  if (!claimed) {
+    // Only the winner of this state transition performs the side effects: a
+    // concurrent cron expiry or second Done tap loses here and returns false.
+    // The row is read back in the same batch (one round trip), so message ids
+    // reflect a re-nag that landed after our caller's SELECT.
+    claimed = await runDoneClaim(env, doneClaim(env, firing.id, byName, now, { reminder }));
+    if (!claimed.won) return false;
+  } else if (claimed.firing && claimed.firing.done_at != null) {
+    now = claimed.firing.done_at;
+  }
+  firing = claimed.firing || firing;
   if (onClaim) await onClaim();
   // What the receipt says, worked out together: the chores under this one are
   // covered by it (nesting.js) and the receipt names them; the celebration
@@ -282,7 +341,7 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
   const [covered, pick] = await Promise.all([
-    coverChildren(env, reminder, firing.id, tz),
+    coverChildren(env, reminder, firing.id, tz, { nested: claimed.nested }),
     isEphemeralNag(firing) ? null : pickCelebration(env, nagChat(firing), firing.id),
   ]);
   const celebration = { cat: pick ? pick.cat : 'both' };
@@ -291,8 +350,8 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
     : 'The cats purr approvingly.';
   const when = `${fmtClock(now, tz)}. ${purr}`;
-  // The card, the public receipt and a one-off's stash touch different things,
-  // so they go out together rather than one round trip after another.
+  // The card and the public receipt touch different things, so they go out
+  // together rather than one round trip after another.
   const card = async () => {
     if (isEphemeralNag(firing)) {
       // A private nag's card is put away, not turned into a receipt: the public
@@ -329,19 +388,25 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   };
   // A finished one-off goes to the trash rather than straight out, so that
   // ↩️ Not done can bring it back for as long as the trash keeps it. Stash
-  // and removal are one batch, so one round trip.
+  // and removal are one batch: the claim's own, unless the claim was made
+  // before the chore was known (a nag button), and then right after it.
   const stash = async () => {
-    if (reminder.schedule_kind !== 'once') return;
+    if (reminder.schedule_kind !== 'once' || claimed.stashed) return;
     await env.DB.batch([
       stashStatement(env, reminder, firing.id),
       env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id),
     ]);
   };
-  // The nag's own sticker goes and the celebration arrives alongside.
+  // The nag's own sticker goes and the celebration arrives alongside. In the
+  // Mini App these wait for the page's answer (later): the database already
+  // says the chore is done, and they only show it.
   await Promise.all([
-    card(), receipt(), stash(),
-    pick ? sendCelebration(env, nagChat(firing), pick) : null,
-    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+    stash(),
+    later(env, () => Promise.all([
+      card(), receipt(),
+      pick ? sendCelebration(env, nagChat(firing), pick) : null,
+      firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+    ])),
   ]);
   await updateDashboard(env, firing.chat_id);
   return true;

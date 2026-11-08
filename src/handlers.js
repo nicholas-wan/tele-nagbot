@@ -8,23 +8,24 @@ import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc, okBut
          isPublicMessage, sendPrivateLong, keepSourceMessage, tg } from './tg.js';
 import { parseRemind, ParseError, NoTimeError } from './parse.js';
 import { nextOccurrence, fmtLocal, fmtShort, deferQuietHours } from './time.js';
-import { getTz, senderName, isScored, householdRoster, householdNames, canonName, creditTogether,
-         rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
+import { getTz, senderName, isScored, householdRoster, householdNames, householdNamesFrom, canonName,
+         creditTogether, rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firingCard,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          isHouseholdDeferred, nagBelongsTo,
-         completeFiring, showPausedCard, MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
+         completeFiring, doneClaim, runDoneClaim, showPausedCard,
+         MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
 import { updateDashboard, choreListHtml, fmtWhen, clip } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
-         setReminderPaused, completeEarly, wakeChat, skipPastPostponement } from './chores.js';
+         setReminderPaused, completeEarly, wakeChat, skipPastPostponement, undoReads } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats, handleStatsCallback } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { cmdInvite } from './invite.js';
 import { digestView } from './cron.js';
-import { coveredNames } from './nesting.js';
+import { coveredStatement, coveredNamesFrom } from './nesting.js';
 
 // Cached getMe username, fetched only when a /cmd@bot suffix needs checking.
 let botUsername = null;
@@ -361,11 +362,8 @@ async function handlePlainText(env, msg) {
   // nags ephemerally, so the reply target may be in either id space — the flag
   // has to be part of the match, since the two sequences can collide.
   if (replyRef) {
-    const firing = await env.DB.prepare(
-      `SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?)
-         AND last_message_id = ? AND last_message_ephemeral = ? AND state = 'nagging'`
-    ).bind(chatId, chatId, replyRef.id, replyRef.ephemeral ? 1 : 0).first();
-    if (firing && nagBelongsTo(firing, msg.from)) return handleNagReply(env, msg, firing);
+    const { firing, reminder } = await nagByMessage(env, chatId, replyRef);
+    if (firing && nagBelongsTo(firing, msg.from)) return handleNagReply(env, msg, firing, null, reminder);
   }
   // Bare "done" works when exactly one chore is nagging; with several, the
   // cats ask which instead of staying confusingly silent. Only nags the typer
@@ -374,8 +372,8 @@ async function handlePlainText(env, msg) {
   // in their name, and the "which one?" list named chores they cannot see.
   if (/^done(?:\s+(?:together|both|with\s+.+?))?\s*!*$/i.test(msg.text)) {
     const all = await env.DB.prepare(
-      "SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?) AND state = 'nagging'"
-    ).bind(chatId, chatId).all();
+      "SELECT * FROM firings WHERE chat_id = ? AND state = 'nagging'"
+    ).bind(chatId).all();
     const mine = all.results.filter((f) => nagBelongsTo(f, msg.from));
     if (mine.length === 1) return handleNagReply(env, msg, mine[0], ctx);
     if (mine.length > 1) {
@@ -399,6 +397,21 @@ async function handlePlainText(env, msg) {
   return tryDraftTime(env, msg, ctx, replyRef);
 }
 
+// The live nag a message is, and its chore, in one round trip — what a reply
+// or a reaction to a nag acts on. Ephemeral and public ids come from separate
+// sequences, so the flag is part of the match.
+async function nagByMessage(env, chatId, ref) {
+  const where = `f.last_message_id = ? AND f.chat_id = ? AND f.last_message_ephemeral = ? AND f.state = 'nagging'`;
+  const args = [ref.id, chatId, ref.ephemeral ? 1 : 0];
+  const [f, r] = await env.DB.batch([
+    env.DB.prepare(`SELECT f.* FROM firings f WHERE ${where} ORDER BY f.id DESC LIMIT 1`).bind(...args),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id WHERE ${where} ORDER BY f.id DESC LIMIT 1`
+    ).bind(...args),
+  ]);
+  return { firing: (f.results || [])[0] || null, reminder: (r.results || [])[0] || null };
+}
+
 // Any thumbs-up-ish reaction on a live nag message counts as ✅ Done.
 const DONE_REACTIONS = new Set(['👍', '✅', '👌', '💯', '🫡', '💪', '❤', '🔥', '🎉']);
 
@@ -413,12 +426,8 @@ async function handleReaction(env, rx) {
   const ref = rx.ephemeral_message_id
     ? { id: rx.ephemeral_message_id, ephemeral: true }
     : { id: rx.message_id, ephemeral: false };
-  const firing = await env.DB.prepare(
-    `SELECT * FROM firings WHERE (chat_id = ? OR nag_chat_id = ?)
-       AND last_message_id = ? AND last_message_ephemeral = ? AND state = 'nagging'`
-  ).bind(rx.chat.id, rx.chat.id, ref.id, ref.ephemeral ? 1 : 0).first();
+  const { firing, reminder } = await nagByMessage(env, rx.chat.id, ref);
   if (!firing || !nagBelongsTo(firing, rx.user)) return;
-  const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!reminder) return;
   const tz = await getTz(env, rx.chat.id);
   await completeFiring(env, firing, reminder, senderName(rx.user), tz);
@@ -433,14 +442,17 @@ function expiresBefore(firing, until, r) {
   return !r || r.schedule_kind !== 'once';
 }
 
-async function handleNagReply(env, msg, firing, ctx) {
+// `known`: the firing's chore, when the caller read it alongside the firing.
+async function handleNagReply(env, msg, firing, ctx, known = undefined) {
   const text = msg.text.trim();
+  const chore = async () => (known !== undefined ? known
+    : env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first());
   const tz = await getTz(env, msg.chat.id);
   ctx = ctx || replyCtx(env, msg.chat.id, msg.from && msg.from.id);
   // Only a complete done-phrase counts — "done?", "not done ✅?" are chat
   // between people, and completing on those would credit the asker.
   if (/^(?:done(?:\s+(?:together|both)\b|\s+with\s+.+?)?|✅)[\s!.✅]*$/i.test(text)) {
-    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+    const reminder = await chore();
     if (!reminder) return;
     let by = senderName(msg.from);
     // "done together"/"done both" credits the whole roster; "done with @jane"
@@ -491,7 +503,7 @@ async function handleNagReply(env, msg, firing, ctx) {
     const n = sn[1] ? +sn[1] : 60;
     const ms = sn[2] && /^h/i.test(sn[2]) ? n * 3600000 : n * 60000;
     let until = Date.now() + Math.min(ms, 24 * 3600000);
-    const reminder = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+    const reminder = await chore();
     // Never promise a nag past a recurring chore's 24h expiry — cap at one
     // last call before it. A one-off never expires, so it has nothing to cap.
     if (expiresBefore(firing, until, reminder)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
@@ -721,9 +733,11 @@ async function handleCallback(env, cb) {
 
   const help = data.match(/^h:(home|schedule|more|stickers)$/);
   if (help) {
+    // Nothing to decide: the spinner stops at once, the page turns after.
+    await answerCallback(env, cb.id, '');
     await editRef(env, ctx, cb.message.chat.id, ref,
       helpText(help[1], [...nicknames(env).keys()]), await helpMarkup(env, cb.message.chat.id, help[1]));
-    return answerCallback(env, cb.id, '');
+    return;
   }
 
   // Undo a just-created reminder: remove it and any live nag it produced. The
@@ -816,16 +830,16 @@ async function handleCallback(env, cb) {
   const nd = data.match(/^nd:([0-9]+)$/);
   if (nd) {
     const chatId = cb.message.chat.id;
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
-      .bind(+nd[1], chatId).first();
+    // The firing, its chore and its stash in one round trip (undoReads).
+    const [{ firing, read }, tz] = await Promise.all([undoReads(env, +nd[1], chatId), getTz(env, chatId)]);
     if (!firing || firing.state !== 'done') return answerCallback(env, cb.id, 'Nothing to take back.');
-    const tz = await getTz(env, chatId);
     const by = senderName(cb.from);
     const digest = String(cb.message.text || '').startsWith('☀️');
     const card = ref && ref.id === firing.last_message_id && ref.ephemeral === Boolean(firing.last_message_ephemeral);
     const res = await undoCompletion(env, firing, by, tz, {
       onClaim: () => answerCallback(env, cb.id, 'Taken back ↩️'),
       announce: digest || card,
+      read,
     });
     if (!res.ok) {
       return answerCallback(env, cb.id,
@@ -846,13 +860,13 @@ async function handleCallback(env, cb) {
   const ne = data.match(/^ne:([0-9]+)$/);
   if (ne) {
     const chatId = cb.message.chat.id;
-    const firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?')
-      .bind(+ne[1], chatId).first();
+    const [{ firing, read }, tz] = await Promise.all([undoReads(env, +ne[1], chatId), getTz(env, chatId)]);
     if (!firing || firing.state !== 'done') return answerCallback(env, cb.id, 'Nothing to take back.');
     const by = senderName(cb.from);
-    const res = await undoEarly(env, firing, by, await getTz(env, chatId), {
+    const res = await undoEarly(env, firing, by, tz, {
       onClaim: () => answerCallback(env, cb.id, 'Taken back ↩️'),
       announce: false,
+      read,
     });
     if (!res.ok) {
       return answerCallback(env, cb.id,
@@ -867,15 +881,21 @@ async function handleCallback(env, cb) {
   // Undo a /delete: restore the stashed reminder row.
   const tr = data.match(/^t:(\d+)$/);
   if (tr) {
-    const row = await env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?')
-      .bind(+tr[1], cb.message.chat.id).first();
+    // The stash is read and claimed in one round trip: two taps on the same
+    // Undo used to restore twice. Only a stashed chore can be claimed — a
+    // nested chore's reset record (`_cover`, nesting.js) lives in trash too,
+    // and ↩️ Not done needs it.
+    const [read, claim] = await env.DB.batch([
+      env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?').bind(+tr[1], cb.message.chat.id),
+      env.DB.prepare(
+        `DELETE FROM trash WHERE id = ? AND chat_id = ? AND json_extract(payload, '$._cover') IS NULL
+           AND json_extract(payload, '$.id') IS NOT NULL`
+      ).bind(+tr[1], cb.message.chat.id),
+    ]);
+    const row = (read.results || [])[0];
     if (!row) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
     const r = JSON.parse(row.payload);
-    // Only a stashed chore can be restored. A nested chore's reset record
-    // (`_cover`, nesting.js) lives in trash too, and ↩️ Not done needs it.
     if (r._cover != null || r.id == null) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
-    // Claim the stash first: two taps on the same Undo used to restore twice.
-    const claim = await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(row.id).run();
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already restored.');
     await restoreReminder(env, r);
     await answerCallback(env, cb.id, 'Restored 😺');
@@ -892,21 +912,27 @@ async function handleCallback(env, cb) {
   if (gm) {
     // Scoped to the chat the tap came from, like every other firing lookup
     // here: an id from another household must not be actionable.
-    const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE id = ? AND chat_id = ? AND state = 'done'"
-    ).bind(+gm[1], cb.message.chat.id).first();
+    // Everything the widened receipt needs comes back with the firing, in one
+    // round trip; the credit's write is the second, and the toast follows it.
+    const chatId = cb.message.chat.id;
+    const [[f, m, n, c], tz] = await Promise.all([env.DB.batch([
+      env.DB.prepare("SELECT * FROM firings WHERE id = ? AND chat_id = ? AND state = 'done'").bind(+gm[1], chatId),
+      env.DB.prepare('SELECT username, first_name FROM members WHERE chat_id = ?').bind(chatId),
+      env.DB.prepare(
+        'SELECT r.next_fire_at FROM reminders r JOIN firings f ON f.reminder_id = r.id WHERE f.id = ? AND f.chat_id = ?'
+      ).bind(+gm[1], chatId),
+      coveredStatement(env, chatId, +gm[1]),
+    ]), getTz(env, chatId)]);
+    const firing = (f.results || [])[0];
     if (!firing) return answerCallback(env, cb.id, 'That one is gone.');
     const names = String(firing.done_by || '').split(CREDIT_SEP).filter(Boolean);
-    const roster = await householdRoster(env, firing.chat_id);
+    const { roster } = householdNamesFrom(m.results);
     const credit = creditTogether(names[0] || senderName(cb.from), [...names.slice(1), ...roster]);
     await env.DB.prepare("UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done'")
       .bind(credit, firing.id).run();
     await answerCallback(env, cb.id, 'Shared credit 🤝');
-    const [tz, next, covered] = await Promise.all([
-      getTz(env, firing.chat_id),
-      env.DB.prepare('SELECT next_fire_at FROM reminders WHERE id = ?').bind(firing.reminder_id).first(),
-      coveredNames(env, firing.chat_id, firing.id),
-    ]);
+    const next = (n.results || [])[0] || null;
+    const covered = coveredNamesFrom((c.results || [])[0] || null);
     // Same receipt as the one being widened, so ↩️ Not done stays on it.
     const receipt = earlyReceipt(firing.reminder_text || 'chore', credit, next && next.next_fire_at, tz, firing.id,
       covered);
@@ -995,10 +1021,10 @@ async function handleCallback(env, cb) {
   const zm = data.match(/^z:(\d+):(\w+)$/);
   if (zm) {
     if (!SNOOZE_CODES.includes(zm[2])) return answerCallback(env, cb.id, 'That option is not on this menu.');
-    const { firing, reminder } = await tappedFiring(env, +zm[1], cb.message.chat.id);
-    if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
-    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
     if (zm[2] === 'b') {
+      const { firing, reminder } = await tappedFiring(env, +zm[1], cb.message.chat.id);
+      if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
+      if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
       // Back to whatever the firing is now — decided from its state, like
       // every other redraw, not from the card's own text: a 😴 card whose
       // snooze the cron had already spent read as still snoozed, and a card
@@ -1013,56 +1039,12 @@ async function handleCallback(env, cb) {
       }
       return answerCallback(env, cb.id, '');
     }
-    if (firing.snoozes_used >= MAX_SNOOZES) {
-      return answerCallback(env, cb.id, `😾 No snoozes left (${MAX_SNOOZES} used) — time to do it.`);
-    }
-    const tz = await getTz(env, firing.chat_id);
-    // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
-    // to the 24h expiry, which would collapse a full day down to "just before
-    // this expires". Carrying fired_at forward moves the expiry window with the
-    // nag, so the chore survives the night and still gets its own 24h once it
-    // comes back. Asia/Singapore has no DST, so +24h is the same clock time.
-    // 📅 1 week and 📅 2 weeks are the same move, further out.
-    const days = POSTPONE_DAYS[zm[2]];
-    const postpone = days != null;
-    let until = postpone ? deferQuietHours(Date.now() + days * 86400000, tz)
-      : zm[2] === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, Date.now(), tz)
-      : Date.now() + (+zm[2]) * 60000;
-    const capped = !postpone && expiresBefore(firing, until, reminder);
-    if (capped) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
-    // snoozed_until records the household's choice; it holds only while
-    // next_nag_at still equals it (see isHouseholdDeferred).
-    const by = senderName(cb.from);
-    const res = postpone
-      ? await env.DB.prepare(
-        `UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ?, fired_at = ?, snoozed_until = ?, snoozed_by = ?
-         WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
-      ).bind(until, until, until, by, firing.id, MAX_SNOOZES).run()
-      : await env.DB.prepare(
-        `UPDATE firings SET snoozes_used = snoozes_used + 1, next_nag_at = ?, snoozed_until = ?, snoozed_by = ?
-         WHERE id = ? AND state = 'nagging' AND snoozes_used < ?`
-      ).bind(until, until, by, firing.id, MAX_SNOOZES).run();
-    if (!res.meta.changes) return answerCallback(env, cb.id, 'Already handled 👍');
-    // Tomorrow keeps its old rule (the next occurrence, if it comes first,
-    // supersedes it); a week or two out moves the schedule past it.
-    const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, until, tz) : 0;
-    // The toast as soon as the snooze is decided; the card and the board follow.
-    const left = MAX_SNOOZES - firing.snoozes_used - 1;
-    const remaining = left > 0 ? ` · ${left} ${left === 1 ? 'snooze' : 'snoozes'} left` : ' · last snooze';
-    await answerCallback(env, cb.id, (postpone
-      ? `Postponed — back ${fmtWhen(until, tz)} 📅` +
-        (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : '')
-      : `Snoozed until ${fmtWhen(until, tz)} 😴${capped ? ' — as late as it goes before it expires' : ''}`) + remaining);
-    if (reminder && firing.last_message_id) {
-      await editNag(env, firing, snoozedHtml(reminder, until, by, tz, postpone), snoozedButtons(firing.id, isScored(firing)));
-    }
-    // The board shows a parked chore by when it comes back.
-    await updateDashboard(env, firing.chat_id);
-    return;
+    return snoozeTapped(env, cb, +zm[1], zm[2]);
   }
 
   const m = data.match(/^([dsb]):(\d+)$/);
   if (!m) return answerCallback(env, cb.id, '');
+  if (m[1] === 'd' || m[1] === 'b') return doneTapped(env, cb, +m[2], m[1] === 'b');
   const { firing, reminder } = await tappedFiring(env, +m[2], cb.message.chat.id);
   if (!firing || firing.state !== 'nagging') {
     return answerCallback(env, cb.id, 'Already handled 👍');
@@ -1077,22 +1059,6 @@ async function handleCallback(env, cb) {
     return answerCallback(env, cb.id, 'That reminder was deleted.');
   }
   const tz = await getTz(env, firing.chat_id);
-  const by = senderName(cb.from);
-
-  if (m[1] === 'd' || m[1] === 'b') {
-    let credit = by;
-    if (m[1] === 'b') {
-      const roster = await householdRoster(env, firing.chat_id);
-      credit = creditTogether(by, [...roster]);
-    }
-    // "Purrs" goes out the moment the Done is won (onClaim), not after the
-    // sticker, the receipt and the board.
-    const won = await completeFiring(env, firing, reminder, credit, tz, {
-      onClaim: () => answerCallback(env, cb.id, 'Purrs 😻'),
-    });
-    if (!won) return answerCallback(env, cb.id, 'Already handled 👍');
-    return;
-  }
 
   // Snooze tapped: swap the keyboard for duration presets.
   if (firing.snoozes_used >= MAX_SNOOZES) {
@@ -1110,4 +1076,138 @@ async function handleCallback(env, cb) {
     await editReplyMarkup(env, nagChat(firing), cb.message.message_id, snoozeButtons(firing.id, tz));
   }
   return answerCallback(env, cb.id, '');
+}
+
+// ✅ Done and 🤝 Done together on a nag: the claim goes with the reads it
+// needs, so the toast is one round trip after the webhook's own intake. The
+// claim itself refuses what the old reads refused — another household's
+// firing, another member's private nag, a chore that has gone — and only when
+// it loses are the rows it read back looked at to say why. Together's credit
+// needs the roster, which rides in the batch; the claim records the tapper
+// and the wider credit is written straight after the toast, before anything
+// reads it back.
+async function doneTapped(env, cb, firingId, together) {
+  const chatId = cb.message.chat.id;
+  const by = senderName(cb.from);
+  const claim = doneClaim(env, firingId, by, Date.now(), {
+    chatId, userId: cb.from.id, needReminder: true,
+    extra: [
+      env.DB.prepare(
+        `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+         WHERE f.id = ? AND f.chat_id = ?`
+      ).bind(firingId, chatId),
+      ...(together ? [env.DB.prepare('SELECT username, first_name FROM members WHERE chat_id = ?').bind(chatId)] : []),
+    ],
+  });
+  const [got, tz] = await Promise.all([runDoneClaim(env, claim), getTz(env, chatId)]);
+  // The read-back is by id alone; a firing from another chat is not this tap's.
+  const firing = got.firing && got.firing.chat_id === chatId ? got.firing : null;
+  const reminder = (got.extra[0].results || [])[0] || null;
+  if (!got.won || !firing) {
+    if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
+    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
+    if (!reminder) {
+      // Same compare-and-swap as every other state change: the row was read a
+      // moment ago, and a cron tick or a second tap may have moved it since.
+      await env.DB.prepare(
+        "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging'"
+      ).bind(firing.id).run();
+      return answerCallback(env, cb.id, 'That reminder was deleted.');
+    }
+    return answerCallback(env, cb.id, 'Already handled 👍');
+  }
+  if (!reminder) {
+    // Cannot happen — the claim required the chore, in the same transaction.
+    await answerCallback(env, cb.id, 'Purrs 😻');
+    return updateDashboard(env, chatId);
+  }
+  const credit = together ? creditTogether(by, [...householdNamesFrom(got.extra[1].results).roster]) : by;
+  // "Purrs" goes out the moment the Done is won (onClaim), not after the
+  // sticker, the receipt and the board.
+  await completeFiring(env, firing, reminder, credit, tz, {
+    claimed: got,
+    onClaim: async () => {
+      await answerCallback(env, cb.id, 'Purrs 😻');
+      if (credit !== by) {
+        await env.DB.prepare(
+          "UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done' AND done_by = ? AND done_at = ?"
+        ).bind(credit, firing.id, by, firing.done_at).run();
+      }
+    },
+  });
+}
+
+// A snooze or postponement preset. The write is decided in SQL from the row
+// as it stands — the expiry cap needs the firing's fired_at and whether its
+// chore is a one-off — and read back in the same batch with the chore, so the
+// toast is one round trip after the intake, as Done's is. The refusals the old
+// reads made (another chat, another member's private nag, no snoozes left,
+// already handled) are the claim's conditions, and its read-back says which.
+async function snoozeTapped(env, cb, firingId, code) {
+  const chatId = cb.message.chat.id;
+  const tz = await getTz(env, chatId);
+  const now = Date.now();
+  // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
+  // to the 24h expiry, which would collapse a full day down to "just before
+  // this expires". Carrying fired_at forward moves the expiry window with the
+  // nag, so the chore survives the night and still gets its own 24h once it
+  // comes back. Asia/Singapore has no DST, so +24h is the same clock time.
+  // 📅 1 week and 📅 2 weeks are the same move, further out.
+  const days = POSTPONE_DAYS[code];
+  const postpone = days != null;
+  const want = postpone ? deferQuietHours(now + days * 86400000, tz)
+    : code === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, now, tz)
+    : now + (+code) * 60000;
+  // Never promise a nag past a recurring chore's 24h expiry — capped at one
+  // last call before it (expiresBefore, in SQL). A one-off never expires.
+  const until = `CASE WHEN ? >= fired_at + ${EXPIRE_AFTER_MS}
+      AND COALESCE((SELECT schedule_kind FROM reminders WHERE id = firings.reminder_id), '') <> 'once'
+    THEN fired_at + ${EXPIRE_AFTER_MS - 60000} ELSE ? END`;
+  const by = senderName(cb.from);
+  // snoozed_until records the household's choice; it holds only while
+  // next_nag_at still equals it (see isHouseholdDeferred).
+  const set = postpone
+    ? { sql: 'next_nag_at = ?, fired_at = ?, snoozed_until = ?', args: [want, want, want] }
+    : { sql: `next_nag_at = ${until}, snoozed_until = ${until}`, args: [want, want, want, want] };
+  const [res, f, r] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE firings SET snoozes_used = snoozes_used + 1, ${set.sql}, snoozed_by = ?
+       WHERE id = ? AND chat_id = ? AND state = 'nagging' AND snoozes_used < ?
+         AND (last_message_ephemeral = 0 OR nag_user_id IS NULL OR nag_user_id = ?)`
+    ).bind(...set.args, by, firingId, chatId, MAX_SNOOZES, cb.from.id),
+    env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?').bind(firingId, chatId),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+       WHERE f.id = ? AND f.chat_id = ?`
+    ).bind(firingId, chatId),
+  ]);
+  const firing = (f.results || [])[0] || null;
+  const reminder = (r.results || [])[0] || null;
+  if (!res.meta.changes || !firing) {
+    if (!firing || firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍');
+    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
+    if (firing.snoozes_used >= MAX_SNOOZES) {
+      return answerCallback(env, cb.id, `😾 No snoozes left (${MAX_SNOOZES} used) — time to do it.`);
+    }
+    return answerCallback(env, cb.id, 'Already handled 👍');
+  }
+  // What the write chose, worked out again from the row it wrote (the cap
+  // reads only fired_at, which a snooze leaves alone, and the chore's kind).
+  const capped = !postpone && expiresBefore(firing, want, reminder);
+  const at = capped ? firing.fired_at + EXPIRE_AFTER_MS - 60000 : want;
+  // Tomorrow keeps its old rule (the next occurrence, if it comes first,
+  // supersedes it); a week or two out moves the schedule past it.
+  const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, at, tz) : 0;
+  // The toast as soon as the snooze is decided; the card and the board follow.
+  const left = MAX_SNOOZES - firing.snoozes_used;
+  const remaining = left > 0 ? ` · ${left} ${left === 1 ? 'snooze' : 'snoozes'} left` : ' · last snooze';
+  await answerCallback(env, cb.id, (postpone
+    ? `Postponed — back ${fmtWhen(at, tz)} 📅` +
+      (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : '')
+    : `Snoozed until ${fmtWhen(at, tz)} 😴${capped ? ' — as late as it goes before it expires' : ''}`) + remaining);
+  if (reminder && firing.last_message_id) {
+    await editNag(env, firing, snoozedHtml(reminder, at, by, tz, postpone), snoozedButtons(firing.id, isScored(firing)));
+  }
+  // The board shows a parked chore by when it comes back.
+  await updateDashboard(env, chatId);
 }

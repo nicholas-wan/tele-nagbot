@@ -1,7 +1,8 @@
 // The pinned dashboard: the chore-list card shared by /list and the pin, and
 // the schedule/emoji text helpers everything renders chores with.
 
-import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage, messageIsGone } from './tg.js';
+import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage, messageIsGone,
+         SWEEP_QUEUE, flushSweepRecords } from './tg.js';
 import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './time.js';
 import { isScored } from './household.js';
 // A function declaration, so the import cycle with nag.js (which refreshes the
@@ -231,11 +232,27 @@ export async function choreListHtml(env, chatId, tz, loaded = null) {
 // cron tick use one; anything without one (/admin, the tests that call
 // handlers directly) draws at once.
 const BOARDS = Symbol('boards');
+const AFTER = Symbol('after');
 
-export function deferBoards(env) {
+// `afterReply`: the Mini App's scope. Work handed to later() — the Telegram
+// edits, receipts and stickers that only show what the database already says
+// — waits until the page has its answer, then runs before the boards. Without
+// it (the webhook, where the toast has already gone, and the cron) later()
+// runs the work at once, in order.
+export function deferBoards(env, { afterReply = false } = {}) {
   const scoped = Object.create(env);
   scoped[BOARDS] = new Set();
+  scoped[SWEEP_QUEUE] = [];
+  if (afterReply) scoped[AFTER] = [];
   return scoped;
+}
+
+export async function later(env, task) {
+  if (env[AFTER]) {
+    env[AFTER].push(task);
+    return;
+  }
+  await task();
 }
 
 // For a caller that has just drawn the board message itself, chore list and
@@ -245,14 +262,26 @@ export function boardDrawn(env, chatId) {
   if (env[BOARDS]) env[BOARDS].delete(chatId);
 }
 
+// Everything the scope put off, in order: the after-reply work, each board
+// once, then the sweep records of every message sent along the way.
 export async function flushBoards(env) {
-  const chats = env[BOARDS];
-  if (!chats) return;
-  while (chats.size) {
-    const [chatId] = chats;
-    chats.delete(chatId);
-    await drawDashboard(env, chatId);
+  const after = env[AFTER];
+  while (after && after.length) {
+    try {
+      await after.shift()();
+    } catch (e) {
+      console.log(`after-reply work failed: ${e.stack || e}`);
+    }
   }
+  const chats = env[BOARDS];
+  if (chats) {
+    while (chats.size) {
+      const [chatId] = chats;
+      chats.delete(chatId);
+      await drawDashboard(env, chatId);
+    }
+  }
+  await flushSweepRecords(env);
 }
 
 // One pinned message per chat, silently edited in place: the full chore list

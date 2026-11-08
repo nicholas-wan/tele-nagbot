@@ -4,6 +4,7 @@ import { handleUpdate } from '../src/handlers.js';
 import { fireReminder } from '../src/firing.js';
 import { runCron } from '../src/cron.js';
 import worker from '../src/index.js';
+import { withBatch } from './d1.js';
 
 const REMINDER = {
   id: 10, chat_id: 1, display_num: 3, text: 'Water plants', paused: 0,
@@ -12,7 +13,7 @@ const REMINDER = {
 };
 
 function db(reminder = REMINDER) {
-  return {
+  return withBatch({
     prepare(sql) {
       return {
         bind() {
@@ -32,7 +33,7 @@ function db(reminder = REMINDER) {
         },
       };
     },
-  };
+  });
 }
 
 const env = () => ({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db() });
@@ -279,7 +280,7 @@ describe('ephemeral interactions', () => {
                   // One ephemeral nag with id 77: a correct lookup binds the
                   // ephemeral flag alongside the id and only matches on 1.
                   if (!sql.includes('last_message_ephemeral')) return firing;
-                  return args[3] === 1 ? firing : null;
+                  return args.at(-1) === 1 ? firing : null;
                 }
                 if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
                 if (sql.includes('FROM reminders')) return REMINDER;
@@ -292,7 +293,7 @@ describe('ephemeral interactions', () => {
         };
       },
     };
-    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB }, {
+    await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: withBatch(DB) }, {
       message_reaction: {
         chat: { id: 1 }, message_id: 77, user: { id: 2, first_name: 'Nick' },
         new_reaction: [{ type: 'emoji', emoji: '👍' }],

@@ -94,6 +94,12 @@ export async function householdNames(env, chatId) {
   const { results } = await env.DB.prepare(
     'SELECT username, first_name FROM members WHERE chat_id = ?'
   ).bind(chatId).all();
+  return householdNamesFrom(results);
+}
+
+// householdNames over member rows already read, for a caller that read them
+// in a batch of its own.
+export function householdNamesFrom(results) {
   const roster = new Set();
   const aliases = new Map();
   for (const r of results || []) {

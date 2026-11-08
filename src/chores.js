@@ -69,18 +69,36 @@ const FREE_NUMBER = `(SELECT MIN(candidate) FROM (
 ) WHERE NOT EXISTS (SELECT 1 FROM reminders WHERE chat_id = ? AND display_num = candidate))`;
 
 export async function createReminder(env, chatId, p, by, tz) {
-  const res = await env.DB.prepare(
-    `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
-       schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)
-     VALUES (?, ${FREE_NUMBER}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    chatId, chatId, chatId, p.text, p.assigneeName, p.assigneeUserId, p.kind,
-    JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now(),
-    p.scored != null ? (p.scored ? 1 : 0) : 1
-  ).run();
+  const res = await reminderInsert(env, chatId, p, by).run();
   const id = res.meta.last_row_id;
   await updateDashboard(env, chatId);
   return { id, html: confirmHtml(by, p, tz) };
+}
+
+// The chore's INSERT. `gated` makes it a no-op unless the statement before it
+// in the batch changed a row — a draft's claim (createFromDraft).
+function reminderInsert(env, chatId, p, by, { gated = false } = {}) {
+  const cols = `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
+       schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)`;
+  const values = `?, ${FREE_NUMBER}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`;
+  return env.DB.prepare(gated ? `${cols} SELECT ${values} WHERE changes() = 1` : `${cols} VALUES (${values})`).bind(
+    chatId, chatId, chatId, p.text, p.assigneeName, p.assigneeUserId, p.kind,
+    JSON.stringify(p.detail), p.firstFireAt, JSON.stringify(p.nagIntervals), by, Date.now(),
+    p.scored != null ? (p.scored ? 1 : 0) : 1
+  );
+}
+
+// A wizard's draft becomes its chore: the draft is claimed (a second tap or
+// reply racing this one loses the conditional delete) and the chore inserted
+// in one transaction, one round trip. Null when the claim was lost.
+export async function createFromDraft(env, draft, p, by, tz) {
+  const [claim, ins] = await env.DB.batch([
+    env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?').bind(draft.id, draft.chat_id),
+    reminderInsert(env, draft.chat_id, p, by, { gated: true }),
+  ]);
+  if (!claim.meta.changes || !ins.meta.changes) return null;
+  await updateDashboard(env, draft.chat_id);
+  return { id: ins.meta.last_row_id, html: confirmHtml(by, p, tz) };
 }
 
 // The one confirmation shape, public or private: who added what, for whom,
@@ -186,6 +204,29 @@ export async function restoreReminder(env, r, { nextFireAt } = {}) {
   return r.id;
 }
 
+// A ↩️ tap's reads in one round trip: the done firing (scoped to the chat the
+// tap came from), its chore, the stash its completion left, and whether a
+// later occurrence has fired since. Returns { firing, read } for undoCompletion
+// and undoEarly.
+export async function undoReads(env, firingId, chatId) {
+  const [f, r, t, l] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?').bind(firingId, chatId),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id
+       WHERE f.id = ? AND f.chat_id = ?`
+    ).bind(firingId, chatId),
+    env.DB.prepare(
+      "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$._firing') = ? ORDER BY id DESC LIMIT 1"
+    ).bind(chatId, firingId),
+    env.DB.prepare(
+      `SELECT 1 AS x FROM firings later JOIN firings f ON later.reminder_id = f.reminder_id
+       WHERE f.id = ? AND later.id > f.id LIMIT 1`
+    ).bind(firingId),
+  ]);
+  const one = (res) => (res.results || [])[0] || null;
+  return { firing: one(f), read: { reminder: one(r), trashed: one(t), later: one(l) } };
+}
+
 // How long a Done can be taken back. The trash that holds a finished one-off
 // is pruned after a day, so that is the bound for every kind.
 export const UNDO_WINDOW_MS = 86400000;
@@ -197,18 +238,21 @@ export const UNDO_WINDOW_MS = 86400000;
 // the time the household chose; an overdue one-off nags again within the hour.
 // Every step is bound to the done row that was read, so a second tap loses.
 // Returns { ok } or { ok: false, why: 'late' | 'gone' }.
-export async function undoCompletion(env, firing, by, tz, { onClaim, announce = true } = {}) {
+// `read`: the chore and the completion's stash, when the caller read them in
+// its own batch (undoReads) — { reminder, trashed }, each a row or null.
+export async function undoCompletion(env, firing, by, tz, { onClaim, announce = true, read = null } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
   }
-  let r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  let r = read ? read.reminder
+    : await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   let trashed = null;
   if (!r) {
     // Only a finished one-off is stashed by its completion, under this
     // firing's id. A chore missing for any other reason was deleted since, and
     // bringing it back is the delete's Undo's job, not this one's.
-    trashed = await env.DB.prepare(
+    trashed = read ? read.trashed : await env.DB.prepare(
       "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$._firing') = ? ORDER BY id DESC LIMIT 1"
     ).bind(firing.chat_id, firing.id).first();
     if (!trashed) return { ok: false, why: 'gone' };
@@ -489,24 +533,27 @@ export function earlyReceipt(text, credit, nextFireAt, tz, firingId, covered = [
 // next_fire_at, or the whole one-off. Refused once a later occurrence has
 // fired, since the slot would then be history, and after a day like every
 // undo. The firing claim comes first, so a second tap has nothing to take.
-export async function undoEarly(env, firing, by, tz, { onClaim, announce = true } = {}) {
+// `read`: what undoReads fetched with the firing — { trashed, later,
+// reminder } — so a tap pays one round trip for all of it.
+export async function undoEarly(env, firing, by, tz, { onClaim, announce = true, read = null } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
   }
-  const trashed = await env.DB.prepare(
+  const trashed = read ? read.trashed : await env.DB.prepare(
     "SELECT * FROM trash WHERE chat_id = ? AND json_extract(payload, '$._firing') = ? ORDER BY id DESC LIMIT 1"
   ).bind(firing.chat_id, firing.id).first();
   if (!trashed) return { ok: false, why: 'gone' };
   const before = JSON.parse(trashed.payload);
-  const later = await env.DB.prepare('SELECT 1 AS x FROM firings WHERE reminder_id = ? AND id > ?')
+  const later = read ? read.later : await env.DB.prepare('SELECT 1 AS x FROM firings WHERE reminder_id = ? AND id > ?')
     .bind(firing.reminder_id, firing.id).first();
   if (later) return { ok: false, why: 'late' };
   // Checked before the claim, which cannot be put back: a one-off done early
   // is missing because that is what done early does to it, but a recurring
   // chore that is missing was deleted since — and the delete's Undo, not this,
   // is what brings it back.
-  const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
+  const r = read ? read.reminder
+    : await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(firing.reminder_id).first();
   if (!r && before.schedule_kind !== 'once') return { ok: false, why: 'gone' };
   const claim = await env.DB.prepare(
     "DELETE FROM firings WHERE id = ? AND state = 'done' AND done_at = ?"

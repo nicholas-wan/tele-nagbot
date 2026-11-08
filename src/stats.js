@@ -13,15 +13,29 @@ const MEDALS = ['🥇', '🥈', '🥉'];
 // Fetches done-history and expired count for a window; shared by the tabs
 // and the Sunday recap. `until` bounds a closed week (defaults to now).
 export async function choreStats(env, chatId, since, until = Date.now()) {
-  const expired = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ? AND fired_at <= ?"
-  ).bind(chatId, since, until).first();
-  const history = await env.DB.prepare(
-    `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
-     FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
-     WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ? AND f.done_at <= ?
-     ORDER BY f.done_at DESC`
-  ).bind(chatId, since, until).all();
+  const [expired, history] = await env.DB.batch(choreStatsStatements(env, chatId, since, until));
+  return choreStatsFrom(expired, history);
+}
+
+// choreStats as statements and their answers, so a caller can send them with
+// reads of its own: the leaderboard's two queries were two round trips.
+export function choreStatsStatements(env, chatId, since, until = Date.now()) {
+  return [
+    env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ? AND fired_at <= ?"
+    ).bind(chatId, since, until),
+    env.DB.prepare(
+      `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
+       FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
+       WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ? AND f.done_at <= ?
+       ORDER BY f.done_at DESC`
+    ).bind(chatId, since, until),
+  ];
+}
+
+export function choreStatsFrom(expiredRes, historyRes) {
+  const expired = (expiredRes.results || [])[0];
+  const history = { results: historyRes.results || [] };
   const byPerson = new Map();
   const together = [];
   const solo = new Map();
@@ -47,11 +61,22 @@ export async function choreStats(env, chatId, since, until = Date.now()) {
 // One query for the whole 26-week window, grouped into weeks here — the old
 // query-per-week loop made /stats up to 26 sequential D1 round trips.
 export async function winnerStreak(env, chatId, tz, leader) {
+  const { results } = await streakStatement(env, chatId, tz).all();
+  return streakFrom(results, tz, leader);
+}
+
+// The streak's read does not depend on who leads, so it can ride with the
+// week's own reads.
+export function streakStatement(env, chatId, tz) {
   const end = weekStart(Date.now(), tz);
   const start = end - 26 * 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
-  const { results } = await env.DB.prepare(
+  return env.DB.prepare(
     "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
-  ).bind(chatId, start, end).all();
+  ).bind(chatId, start, end);
+}
+
+export function streakFrom(results, tz, leader) {
+  const end = weekStart(Date.now(), tz);
   let streak = 0;
   for (let w = 0; w < 26; w++) {
     const hi = end - w * 7 * 86400000;
@@ -122,7 +147,12 @@ async function statsHtml(env, chatId, tz, view) {
     const thisWeek = weekStart(now, tz);
     const since = view === 'last' ? thisWeek - 7 * 86400000 : thisWeek; // fixed-offset tz
     const until = view === 'last' ? thisWeek : now;
-    const s = await choreStats(env, chatId, since, until);
+    // The week, and for this week the streak's history, in one round trip.
+    const [expired, history, past] = await env.DB.batch([
+      ...choreStatsStatements(env, chatId, since, until),
+      ...(view === 'week' ? [streakStatement(env, chatId, tz)] : []),
+    ]);
+    const s = choreStatsFrom(expired, history);
     const ofWeek = `week of ${fmtShort(since, tz).replace(/,.*$/, '')}`;
     if (!s.total && !s.expired) {
       return view === 'last'
@@ -130,7 +160,7 @@ async function statsHtml(env, chatId, tz, view) {
         : '🏆 Fresh week, empty leaderboard — first chore takes the lead! (Resets every Monday.)';
     }
     const streak = view === 'week' && s.people.length
-      ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
+      ? streakFrom(past.results || [], tz, s.people[0][0]) : 0;
     const lines = [view === 'last'
       ? `📅 <b>Last week</b> — ${ofWeek}`
       : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
@@ -168,7 +198,8 @@ export async function handleStatsCallback(env, cb, ctx, ref) {
   const m = (cb.data || '').match(/^st:(week|last|all)$/);
   if (!m) return answerCallback(env, cb.id, '');
   const chatId = cb.message.chat.id;
+  // The tab is a drawing: the spinner stops first, the page turns after.
+  await answerCallback(env, cb.id, '');
   const tz = await getTz(env, chatId);
   await editRef(env, ctx, chatId, ref, await statsHtml(env, chatId, tz, m[1]), statsButtons(m[1]));
-  return answerCallback(env, cb.id, '');
 }

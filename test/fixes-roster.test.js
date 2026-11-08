@@ -43,6 +43,15 @@ function db({ members = [], runs = [], firing = NAGGING, known = true, reminder 
               return { results: [] };
             },
             async run() {
+              // A claim that names its conditions in SQL — the chat the tap
+              // came from, a chore that must still exist — changes nothing
+              // when they fail, as SQLite would, and so is not a write.
+              if (/^\s*UPDATE firings/i.test(sql)) {
+                const at = sql.indexOf('chat_id = ?');
+                const chatArg = at < 0 ? undefined : args[(sql.slice(0, at).match(/\?/g) || []).length];
+                if (at >= 0 && chatArg !== firing.chat_id) return { meta: { changes: 0 } };
+                if (/EXISTS \(SELECT 1 FROM reminders/.test(sql) && !reminder) return { meta: { changes: 0 } };
+              }
               runs.push({ sql, args });
               return { meta: { changes: 1, last_row_id: 1 } };
             },

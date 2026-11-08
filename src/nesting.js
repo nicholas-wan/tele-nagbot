@@ -90,11 +90,12 @@ async function coverOne(env, r, now, tz) {
 // names of the chores it reset, for the receipt; [] when there are none.
 // Never throws: the parent's Done has already been claimed, and a reset that
 // failed must not leave that Done without its receipt.
-export async function coverChildren(env, parent, parentFiringId, tz) {
+export async function coverChildren(env, parent, parentFiringId, tz, { nested = null } = {}) {
   const covered = [];
   const now = Date.now();
   try {
-    const children = await descendants(env, parent.chat_id, parent.id);
+    // `nested`: the chat's nested chores, when the claim's batch read them.
+    const children = nested ? descendantsIn(nested, parent.id) : await descendants(env, parent.chat_id, parent.id);
     for (const child of children) {
       const rec = await coverOne(env, child, now, tz);
       if (rec) covered.push(rec);
@@ -116,9 +117,17 @@ export async function coverChildren(env, parent, parentFiringId, tz) {
 // The names a parent's done reset, read back from its stash, for a receipt
 // that is being redrawn (🤝 Together too).
 export async function coveredNames(env, chatId, parentFiringId) {
-  const row = await env.DB.prepare(
+  return coveredNamesFrom(await coveredStatement(env, chatId, parentFiringId).first());
+}
+
+// The same read as a statement, for a batch, and its answer.
+export function coveredStatement(env, chatId, parentFiringId) {
+  return env.DB.prepare(
     "SELECT payload FROM trash WHERE chat_id = ? AND json_extract(payload, '$._cover') = ? ORDER BY id DESC LIMIT 1"
-  ).bind(chatId, parentFiringId).first();
+  ).bind(chatId, parentFiringId);
+}
+
+export function coveredNamesFrom(row) {
   return row ? JSON.parse(row.payload).children.map((c) => c.text) : [];
 }
 
