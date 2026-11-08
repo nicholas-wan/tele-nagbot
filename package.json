@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predeploy": "vitest run",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute nagbot-eu --remote --file=schema.sql",
     "db:migrate": "wrangler d1 migrations apply nagbot-eu --remote",

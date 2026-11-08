@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS sent_messages (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sent_messages_due ON sent_messages (delete_after);
+CREATE INDEX IF NOT EXISTS idx_sent_messages_message ON sent_messages (chat_id, message_id);
 
 -- Which cat appears in a given sticker (keyed by Telegram's stable file id).
 CREATE TABLE IF NOT EXISTS sticker_tags (
@@ -125,6 +126,9 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (next_fire_at) WHERE p
 CREATE INDEX IF NOT EXISTS idx_firings_nag ON firings (next_nag_at) WHERE state = 'nagging';
 -- Stats, dashboard, digest, and recap all filter firings by chat + state.
 CREATE INDEX IF NOT EXISTS idx_firings_chat ON firings (chat_id, state);
+-- A chore's live firing, and the cron's expiry clause (0003_hot_path_indexes.sql).
+CREATE INDEX IF NOT EXISTS idx_firings_reminder_state ON firings (reminder_id, state);
+CREATE INDEX IF NOT EXISTS idx_firings_nagging_fired ON firings (fired_at) WHERE state = 'nagging';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_chat_number ON reminders (chat_id, display_num);
 
 -- Durable delivery deduplication. Pending deliveries can be recovered by cron;

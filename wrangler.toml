@@ -45,6 +45,14 @@ binding = "AI"
 [assets]
 directory = "./public"
 
+# Run beside the database and Telegram's API wherever the request came from.
+# Webhooks already arrive from Amsterdam, but a Mini App request comes from a
+# phone in Singapore, and without this it ran in SIN (cf-ray -SIN, no
+# Cf-Placement header, 8 Nov 2026), paying ~170ms to Europe on every D1 query
+# and Telegram call. Squashbot answers Cf-Placement: remote-AMS with the same.
+[placement]
+region = "gcp:europe-west4"
+
 # Persisted Workers Logs, so "why didn't it nag?" is answerable after the fact.
 [observability]
 enabled = true
