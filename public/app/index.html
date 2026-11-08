@@ -264,6 +264,8 @@ window.earlyFetch = (() => {
     -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
     transform: translateY(calc(100% + 40px)); visibility: hidden; z-index: 10;
     transition: transform 0.22s ease-out, visibility 0s linear 0.22s;
+    /* Still drawn while it slides away, but no longer tappable. */
+    pointer-events: none;
   }
   .toast .glyph { flex: none; align-self: flex-start; padding-top: 5px; line-height: 1.35; margin-right: -2px; }
   .toast .msg { flex: 1; min-width: 0; padding: 4px 0; overflow-wrap: anywhere; }
@@ -275,7 +277,7 @@ window.earlyFetch = (() => {
   .toast .act:active { background: rgba(255, 255, 255, 0.12); }
   :root.dark .toast { background: rgba(58, 58, 60, 0.94); }
   @media (prefers-color-scheme: dark) { :root:not(.tg) .toast { background: rgba(58, 58, 60, 0.94); } }
-  .toast.show { transform: none; visibility: visible; transition: transform 0.22s ease-out; }
+  .toast.show { transform: none; visibility: visible; transition: transform 0.22s ease-out; pointer-events: auto; }
   .busy { opacity: 0.6; pointer-events: none; transition: opacity 0.15s; }
 </style>
 </head>
@@ -369,9 +371,11 @@ function toast(message, kind = 'success', action = null) {
   node.replaceChildren(...[
     glyph ? h('span', { class: 'glyph', 'aria-hidden': 'true' }, glyph[0].trim()) : null,
     h('div', { class: 'msg' }, words),
+    // Held at the first tap: a second, while the toast slides away, would ask
+    // for the same thing again.
     action ? h('button', {
       class: 'act', type: 'button',
-      onclick: () => { hideToast(); action.run(); },
+      onclick: (event) => { event.currentTarget.disabled = true; hideToast(); action.run(); },
     }, action.label) : null].filter(Boolean));
   node.classList.add('show');
   clearTimeout(toastTimer);
@@ -395,17 +399,24 @@ function haptic(kind) {
 }
 
 // Telegram's own dialog. `danger` names a destructive button ("Delete"),
-// drawn in red with Cancel beside it, as the system's own alerts are.
+// drawn in red with Cancel beside it, as the system's own alerts are. Its
+// popups came in 6.2; an older Telegram throws for both, so it gets the
+// browser's confirm, as does a popup that fails to open.
 function confirmAction(message, danger = null) {
-  if (inTelegram && danger && tg.showPopup && tgHas('6.2')) {
-    return new Promise((resolve) => tgCall(() => tg.showPopup({
-      message, buttons: [{ id: 'yes', type: 'destructive', text: danger }, { type: 'cancel' }],
-    }, (id) => resolve(id === 'yes'))));
-  }
-  if (inTelegram && tg.showConfirm) {
-    return new Promise((resolve) => tg.showConfirm(message, resolve));
-  }
-  return Promise.resolve(window.confirm(message));
+  if (!tgHas('6.2') || !tg.showPopup) return Promise.resolve(window.confirm(message));
+  return new Promise((resolve) => {
+    try {
+      if (danger) {
+        tg.showPopup({
+          message, buttons: [{ id: 'yes', type: 'destructive', text: danger }, { type: 'cancel' }],
+        }, (id) => resolve(id === 'yes'));
+      } else {
+        tg.showConfirm(message, resolve);
+      }
+    } catch {
+      resolve(window.confirm(message));
+    }
+  });
 }
 
 function closeApp() {
@@ -995,18 +1006,43 @@ let lastList = null;
 const statsCache = {};
 let statsView = 'week';
 
+// The first load's skeleton already draws the live switch and +, so the page
+// is not dimmed behind it, and its answer only takes over the screen if the
+// person is still waiting on the list. Moved on to Add or Stats, they keep
+// that screen: the list fills in behind it, and Back from Add leads to it.
 async function loadList(push = true) {
   const first = state.screen === 'loading' || state.screen === 'failed';
-  const result = await run(null, () => api('GET', 'chores'), { silent: first });
+  const result = first
+    ? await api('GET', 'chores').catch(() => null)
+    : await run(null, () => api('GET', 'chores'));
   if (result && blockedBy(result)) return;
+  const waiting = state.screen === 'loading' || state.screen === 'failed' || state.screen === 'list';
   if (!result || !result.ok) {
     const message = result ? result.message : OFFLINE;
-    if (first) go('failed', { message }, false);
-    else toast(message, 'error');
+    if (!first) toast(message, 'error');
+    else if (waiting) go('failed', { message }, false);
+    else {
+      toast(message, 'error');
+      if (state.screen === 'add' && !trail.length) leadBack({ screen: 'failed', message });
+    }
     return;
   }
   lastList = result;
-  go('list', { data: result }, push);
+  if (!first || waiting) { go('list', { data: result }, push); return; }
+  const listed = trail.find((entry) => entry.screen === 'list');
+  if (listed) listed.data = result;
+  else if (state.screen === 'add') leadBack({ screen: 'list', data: result });
+}
+
+// Puts a screen under the one showing, for Back to return to, without
+// redrawing it: the add screen keeps its keyboard and what was typed.
+function leadBack(entry) {
+  trail.unshift({ ...entry, scroll: 0 });
+  if (inTelegram) tgCall(() => tg.BackButton.show());
+  else {
+    const top = app.querySelector('.top');
+    if (top && !top.querySelector('.back')) top.prepend(h('button', { class: 'back', onclick: back }, '‹ Back'));
+  }
 }
 
 function showList() {
@@ -1108,7 +1144,9 @@ function settle(result, { quiet = false, id = null, mine = ++seq } = {}) {
     state.doneBy = false;
     render();
   } else {
-    applyList(result, mine, showing || state.screen === 'add');
+    // A reply that lands while the person is adding a chore updates the list
+    // behind them; it never takes the half-typed one away.
+    applyList(result, mine, showing);
   }
 }
 
@@ -1131,20 +1169,27 @@ function finishDone(result, c, seq) {
 
 // The toast's Undo for a reply that carries one — what the chat offers after
 // the same tap: ↩️ Not done on a Done's receipt, ↩️ Undo on a delete's log and
-// on a new chore's confirmation. Its answer is the list, which it lands on.
+// on a new chore's confirmation. Its answer is settled like any other reply:
+// the list and, if it is the one open, the chore's screen show what the undo
+// put back, and a half-typed new chore is left where it is. One undo per
+// toast: a second tap would only be told it is too late.
 function undoFor(result) {
   const token = result.ok && result.undo;
   if (!token) return null;
+  let used = false;
   return {
     label: 'Undo',
     run: async () => {
+      if (used) return;
+      used = true;
       haptic('tap');
       const mine = ++seq;
       const answer = await run(null, () => api('POST', 'undo', token));
       if (!answer || blockedBy(answer)) return;
-      prefetched.clear();
-      toast(answer.message, answer.ok ? 'success' : 'error');
-      if (answer.chores) applyList(answer, mine, state.screen === 'add');
+      // An add's token is the chore itself, so its screen, if open, goes once
+      // the chore does.
+      const id = answer.chore ? answer.chore.id : token.kind === 'add' ? token.id : null;
+      settle(answer, { id, mine });
     },
   };
 }
