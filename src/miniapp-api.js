@@ -157,8 +157,16 @@ async function snapshot(env, chatId, tz, before = []) {
   try {
     loaded = await loadBoard(env, chatId, { members: true, before: [...before, ...rides.statements] });
   } catch (error) {
-    rides.fail(error);
-    throw error;
+    if (!rides.statements.length) throw error;
+    // A batch is all or nothing, so a cover that cannot be written must not
+    // take the answer down with it (coverChildren never throws): the cover
+    // goes on its own, and the answer is read without it.
+    try {
+      rides.settle(await env.DB.batch(rides.statements));
+    } catch (e) {
+      rides.fail(e);
+    }
+    return snapshotFrom(env, chatId, tz, await loadBoard(env, chatId, { members: true, before }));
   }
   rides.settle(loaded.before.slice(before.length));
   loaded.before = loaded.before.slice(0, before.length);

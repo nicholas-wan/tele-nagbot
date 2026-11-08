@@ -33,6 +33,27 @@ describe('the parser reads chores the way people type them', () => {
     expect(p).toMatchObject({ text: 'bins', kind: 'weekly', detail: { days, h: 20, mi: 0 } });
   });
 
+  it.each([
+    ['bins weekly on mon and thu 8pm', [1, 4]],
+    ['bins every week on tue and fri 8pm', [2, 5]],
+  ])('%s: a cadence word beside two days is those days', (text, days) => {
+    expect(parse(text)).toMatchObject({ text: 'bins', kind: 'weekly', detail: { days } });
+  });
+
+  it('refuses two days on a fortnightly chore, and a weekday of the month', () => {
+    expect(() => parse('bins every 2 weeks on mon and thu 8pm')).toThrow(/one day — add the Thu one/);
+    expect(() => parse('every other tue and fri 8pm bins')).toThrow(/one day — add the Fri one/);
+    expect(() => parse('dentist every 2nd tuesday 3pm')).toThrow(/every 2nd tuesday/);
+  });
+
+  it('keeps days inside the text a one-off, and its other words its own', () => {
+    expect(parse('pack for mon and tue trip 9pm')).toMatchObject({ text: 'pack for mon and tue trip', kind: 'once' });
+    expect(parse('to do list review 9pm').text).toBe('to do list review');
+    expect(parse('pay 3 bills in two parts 9pm').text).toBe('pay 3 bills in two parts');
+    expect(parse('buy gift for nic and yx 7pm')).toMatchObject({ text: 'buy gift for nic and yx', assigneeName: null });
+    expect(parse('nic and yx clean house 9pm')).toMatchObject({ text: 'clean house', assigneeName: null });
+  });
+
   it('keeps a lone weekday a one-off', () => {
     expect(parse('vacuum sat 10am')).toMatchObject({ text: 'vacuum', kind: 'once' });
     expect(parse('buy sun hat 5pm')).toMatchObject({ text: 'buy sun hat', kind: 'once' });
@@ -228,11 +249,26 @@ describe('marking done in words', () => {
   it('tells a housemate when the only nag out is someone else\'s', async () => {
     reminder({ assignee_name: '@zack', assignee_user_id: 3 });
     nagging({ last_message_ephemeral: 1, nag_user_id: 3 });
+    // A plain "done" may be said to a person: the bot keeps out of it.
     await say(anne, 'done');
+    expect(sent('sendMessage')).toHaveLength(0);
+    await say(anne, '/done');
     expect(firing().state).toBe('nagging');
     const note = sent('sendMessage').at(-1);
     expect(note.body.text).toMatch(/Nothing of yours is nagging/);
     expect(note.body.receiver_user_id).toBe(2);
+  });
+
+  it('keeps "done together" a together when it has to ask which one', async () => {
+    reminder();
+    reminder({ id: 11, display_num: 2, text: 'dishes' });
+    nagging();
+    nagging({ id: 6, reminder_id: 11, reminder_text: 'dishes', last_message_id: 78 });
+    await say(anne, 'done together');
+    const ask = sent('sendMessage').at(-1);
+    const data = ask.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
+    expect(data.filter((d) => /^b:/.test(d))).toHaveLength(2);
+    expect(data.some((d) => /^d:/.test(d))).toBe(false);
   });
 
   it('takes the typed "done" away once "which one?" has answered it', async () => {

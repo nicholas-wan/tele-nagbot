@@ -412,6 +412,20 @@ describe('nested chores', () => {
     expect((await call('chores')).chores.find((c) => c.id === 60).under).toBe('clear poop');
   });
 
+  it('answers a parent\'s Done even when resetting a child cannot be written', async () => {
+    nest(43, 5, 'wash neakasa', null);
+    nest(5, 6, 'clear poop', 43);
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - DAY} WHERE id = 5`);
+    env.DB = d1(sql, (q, args) => {
+      if (/UPDATE reminders SET next_fire_at = \? WHERE id = \? AND next_fire_at = \?/.test(q) && args[1] === 5) {
+        throw new Error('D1_ERROR: cover');
+      }
+    });
+    const reply = await call('chore/43/done', {});
+    expect(reply).toMatchObject({ ok: true });
+    expect(reply.chore.id).toBe(43);
+  });
+
   it('sets and clears what a chore resets with, and refuses a loop', async () => {
     nest(43, 5, 'wash neakasa', null);
     nest(5, 6, 'clear poop', null);

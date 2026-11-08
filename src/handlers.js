@@ -198,7 +198,7 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
       // A bare /done means what a typed "done" does: the one nag in front of
       // the typer, or a "which one?" — not "Which chore? e.g. /done nails".
       // The command itself is tidied below, so the copy carries no id to delete.
-      const asText = { ...msg, message_id: 0, text: `done ${String(args).trim()}`.trim() };
+      const asText = { ...msg, message_id: 0, text: `done ${String(args).trim()}`.trim(), asked: true };
       if (!await bareDone(env, asText, ctx)) {
         result = await sendPrivate(env, ctx, '😺 Nothing is nagging right now — <code>/done trash</code> finishes a chore early.');
       }
@@ -419,8 +419,10 @@ async function bareDone(env, msg, ctx) {
   // Something is nagging, just not at them: an assigned chore nags its
   // assignee privately, so the other housemate typing "done" for it used to
   // get silence. The board is where anyone can finish anyone's chore.
+  // Only /done is asked of the bot: a plain "done" may be said to a person,
+  // and answering it was noise (public, where a private send falls back).
   if (!mine.length) {
-    if (!all.results.length) return false;
+    if (!all.results.length || !msg.asked) return false;
     await sendPrivate(env, ctx, '😺 Nothing of yours is nagging — to finish someone else’s, use the pinned board.');
     return true;
   }
@@ -428,8 +430,8 @@ async function bareDone(env, msg, ctx) {
     `SELECT id, text FROM reminders WHERE id IN (${mine.map(() => '?').join(',')}) ORDER BY id`
   ).bind(...mine.map((f) => f.reminder_id)).all();
   const names = new Map(rows.results.map((r) => [r.id, r.text]));
-  const together = /^dones+(?:together|both)/i.test(msg.text);
-  const named = /^dones+with/i.test(msg.text);
+  const together = /^done\s+(?:together|both)\b/i.test(msg.text);
+  const named = /^done\s+with\b/i.test(msg.text);
   const buttons = mine.filter((f) => names.has(f.reminder_id)).sort((x, y) => x.reminder_id - y.reminder_id)
     .map((f) => [{
       text: `${together ? '🤝' : '✅'} ${clip(names.get(f.reminder_id), 30)}`,

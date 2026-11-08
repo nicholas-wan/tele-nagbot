@@ -1,7 +1,7 @@
 // Parses "/remind" arguments: assignee mention, schedule, time, nag config.
 // Deterministic pattern matching — no LLM, no external parser.
 
-import { localParts, zonedEpoch, nextOccurrence, advanceOccurrence } from './time.js';
+import { localParts, zonedEpoch, nextOccurrence, advanceOccurrence, DAY_NAMES } from './time.js';
 
 export const DEFAULT_NAGS = [15, 30, 60];
 export const MAX_CHORE_TEXT = 200;
@@ -22,6 +22,12 @@ const DAY_ITEM = `${DAY_WORD}s?`;
 const daysIn = (list) => [...new Set(list.split(/[^a-z]+/i)
   .filter((w) => w && w.toLowerCase() !== 'and')
   .map((w) => DAY_INDEX[w.slice(0, 3).toLowerCase()]))].sort();
+
+// Two or more days in a list. Without "every" it repeats only when it closes
+// the message, before an optional time ("bins tue and fri 8pm"); days inside
+// the text ("pack for mon and tue trip") are a one-off's words.
+const DAY_LIST = `(?:on\\s+)?(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})+)\\b`;
+const CLOSING = '(?=\\s*(?:(?:at\\s+)?\\d{1,2}(?:[:.]?\\d{2})?\\s*(?:am|pm)?|noon|midday|midnight)?\\s*$)';
 
 // "every three days": the counts people spell out.
 const NUMBER_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
@@ -52,6 +58,9 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // so an assignee can be named without an @-mention; see household.nicknames.
 export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = null) {
   let args = ` ${argsRaw.trim()} `;
+  // "/remind to pay tax" and "/remind me to buy milk": the command's own
+  // grammar, not the chore. Under /chore, "to do list review" is the chore.
+  remindGrammar = /^\/remind\b/i.test(String(fullText || '').trim());
 
   // Assignee: text_mention entity first (has user id), else plain @username.
   let assigneeName = null;
@@ -88,8 +97,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
       const named = new Set(pair[2].replace(/^for\s+/i, '').split(/\s*(?:,|&|\+|\band\b)\s*/i)
         .map((n) => nicknames.get(n.toLowerCase())).filter(Boolean));
       if (named.size > 1) {
+        // Leading the message, they are who it is for. Anywhere else they are
+        // what it is about ("buy gift for nic and yx") and stay in the text —
+        // but still nobody is singled out.
         const at = pair.index + pair[1].length;
-        args = `${args.slice(0, at)} ${args.slice(at + pair[2].length)}`;
+        if (!args.slice(0, at).trim()) args = `${args.slice(0, at)} ${args.slice(at + pair[2].length)}`;
         nicknames = null;
       }
     }
@@ -121,7 +133,7 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
 
   // A spelled-out count after "every" or "in" is the number: "every three
   // days", "in five minutes". Elsewhere a number word is chore text.
-  args = args.replace(new RegExp(`\\b(every|in)\\s+(${Object.keys(NUMBER_WORDS).join('|')})\\b(?=\\s+[a-z])`, 'gi'),
+  args = args.replace(new RegExp(`\\b(every|in)\\s+(${Object.keys(NUMBER_WORDS).join('|')})\\b(?=\\s+(?:days?|weeks?|months?|years?|hours?|hrs?|minutes?|mins?)\\b)`, 'gi'),
     (all, lead, word) => `${lead} ${NUMBER_WORDS[word.toLowerCase()]}`);
 
   // Schedule kind.
@@ -202,11 +214,26 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   const weekM = args.match(/\b(?:(?:every|each)\s+week|weekly)\b/i);
   const fortnightM = args.match(/\b(?:(?:every|each)\s+fortnight|fortnightly|bi-?weekly)\b/i);
   // "every tue and fri", "every mon, wed and fri", "every tue/fri"; without
-  // "every", two or more days ("bins tue and fri") or a plural ("on tuesdays")
-  // still repeat — no one-off falls on two days, or on "tuesdays".
+  // "every", two or more days closing the message ("bins tue and fri 8pm") or
+  // a plural ("on tuesdays") still repeat (DAY_LIST says why only closing).
   const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})*)\\b`, 'i'))
-    || args.match(new RegExp(`\\b(?:on\\s+)?(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})+)\\b`, 'i'))
+    || args.match(new RegExp(`\\b${DAY_LIST}${CLOSING}`, 'i'))
     || args.match(/\b(?:on\s+)?((?:sun|mon|tues|wednes|thurs|fri|satur)days)\b/i);
+  // Two or more days anywhere, for a cadence word beside them: "weekly on mon
+  // and thu" is every Mon and Thu; a fortnightly one can only keep one day.
+  const dayListM = args.match(new RegExp(`\\b${DAY_LIST}`, 'i'));
+  const listDays = dayListM ? daysIn(dayListM[1]) : [];
+  const weeksM = intervalM && /^w/i.test(intervalM[2]) ? intervalM : null;
+  if (listDays.length > 1 && (fortnightM || weeksM || (otherM && !/^day$/i.test(otherM[1])))) {
+    const last = DAY_NAMES[listDays[listDays.length - 1]];
+    throw new ParseError(`A chore every few weeks keeps to one day — add the ${last} one as a chore of its own.`);
+  }
+  // "every 2nd tuesday" is a weekday of the month, which no schedule here
+  // keeps; read as "monthly on the 2nd" it was silently wrong.
+  const nthWeekdayM = args.match(new RegExp(`\\bevery\\s+(\\d{1,2}(?:st|nd|rd|th)|first|second|third|fourth|last)\\s+${DAY_WORD}\\b`, 'i'));
+  if (nthWeekdayM) {
+    throw new ParseError(`"${nthWeekdayM[0].trim()}" isn't one I can keep yet — try "every 4 weeks on tue", or "on the 10th".`);
+  }
   // Bare "on the Nth" only counts as a schedule when what follows can't be
   // prose ("on the 2nd floor" stays chore text); "monthly on the Nth" always,
   // and so do "the 1st of every month" and "every 1st".
@@ -268,6 +295,10 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     if (kind === 'interval') detail.days = days;
     args = args.replace(intervalM[0], ' ');
     cadenceM = intervalM;
+  } else if (weekM && !fortnightM && listDays.length > 1) {
+    kind = 'weekly';
+    detail.days = listDays;
+    args = args.replace(weekM[0], ' ').replace(dayListM[0], ' ');
   } else if (weekM || fortnightM) {
     kind = 'interval';
     detail.days = fortnightM ? 14 : 7;
@@ -558,6 +589,9 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   return finish(args, { kind, detail, firstFireAt, assigneeName, assigneeUserId, nagIntervals });
 }
 
+// Set by parseRemind for the cleanText calls it makes (it is synchronous).
+let remindGrammar = false;
+
 function cleanText(args) {
   let text = args
     .replace(/\s+at\s*$/i, ' ')      // dangling "at" left by "call mom at 7pm"
@@ -570,12 +604,13 @@ function cleanText(args) {
   // people naturally stack wrappers ("could you please remind me to ...").
   // "remind yx to feed cats" leaves "remind to feed cats" once the shortcut
   // has gone, and "/remind to pay tax" a leading "to": neither is the chore.
-  const leadingFiller = /^(?:(?:please|pls|plz|kindly)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|remind\s+(?:me\s+(?:to\s+)?|to\s+)|me\s+to\s+|to\s+|remember\s+to\s+|i\s+(?:need|have|want)\s+to\s+|help\s+me\s+(?:to\s+)?)/i;
+  const leadingFiller = /^(?:(?:please|pls|plz|kindly)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?|remind\s+(?:me\s+(?:to\s+)?|to\s+)|remember\s+to\s+|i\s+(?:need|have|want)\s+to\s+|help\s+me\s+(?:to\s+)?)/i;
   const trailingFiller = /\s+(?:please|pls|plz|thanks|thank\s+you)[.!]*$/i;
   let before;
   do {
     before = text;
     text = text.replace(leadingFiller, '').replace(trailingFiller, '').trim();
+    if (remindGrammar) text = text.replace(/^(?:me\s+)?to\s+/i, '').trim();
   } while (text !== before);
   return text;
 }
