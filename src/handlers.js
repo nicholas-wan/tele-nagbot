@@ -768,14 +768,18 @@ async function handleCallback(env, cb) {
   // confirmation and keeps its OK, so the kept command still goes with it.
   const cm = data.match(/^c:([0-9]+)(?::([0-9]+))?$/);
   if (cm) {
-    const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
-      .bind(+cm[1], cb.message.chat.id).first();
+    // The chore and its live nag in one round trip; the claim is the second.
+    const [rows, live] = await env.DB.batch([
+      env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(+cm[1], cb.message.chat.id),
+      env.DB.prepare(
+        "SELECT * FROM firings WHERE reminder_id = ? AND chat_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+      ).bind(+cm[1], cb.message.chat.id),
+    ]);
+    const r = (rows.results || [])[0] || null;
     if (!r) return answerCallback(env, cb.id, 'Already gone.');
     const tz = await getTz(env, r.chat_id);
     const credit = senderName(cb.from);
-    const firing = await env.DB.prepare(
-      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-    ).bind(r.id).first();
+    const firing = (live.results || [])[0] || null;
     let won;
     const onClaim = async () => {
       await answerCallback(env, cb.id, 'Purrs 😻');
@@ -805,20 +809,32 @@ async function handleCallback(env, cb) {
   const dg = data.match(/^dg:([0-9]+)$/);
   if (dg) {
     const chatId = cb.message.chat.id;
-    const { firing, reminder: r } = await tappedFiring(env, +dg[1], chatId);
-    const live = firing && firing.state === 'nagging' ? firing : null;
+    const by = senderName(cb.from);
+    // The claim goes with the reads it needs, as a nag's ✅ does (doneClaim):
+    // this chat's firing, still nagging, with its chore. Anyone may finish it.
+    const claim = doneClaim(env, +dg[1], by, Date.now(), {
+      chatId, needReminder: true,
+      extra: [env.DB.prepare(
+        `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+         WHERE f.id = ? AND f.chat_id = ?`
+      ).bind(+dg[1], chatId)],
+    });
+    const [got, tz] = await Promise.all([runDoneClaim(env, claim), tzOrDefault(env, chatId)]);
+    const firing = got.firing && got.firing.chat_id === chatId ? got.firing : null;
+    const r = (got.extra[0].results || [])[0] || null;
     const redraw = async () => {
       const view = await digestView(env, chatId, digestIds(cb, +dg[1]));
       await editRef(env, ctx, chatId, ref, view.html, view.markup);
     };
-    let won = false;
-    if (live) {
-      if (!r) return answerCallback(env, cb.id, 'That one is gone.');
-      won = await completeFiring(env, live, r, senderName(cb.from), await getTz(env, chatId), {
+    if (got.won && firing && r) {
+      await completeFiring(env, firing, r, by, tz, {
+        claimed: got,
         onClaim: () => answerCallback(env, cb.id, 'Purrs 😻 — ↩️ Not done is right there if that was a slip'),
       });
+    } else {
+      if (firing && firing.state === 'nagging' && !r) return answerCallback(env, cb.id, 'That one is gone.');
+      await answerCallback(env, cb.id, 'Already handled 👍');
     }
-    if (!won) await answerCallback(env, cb.id, 'Already handled 👍');
     await redraw();
     return;
   }

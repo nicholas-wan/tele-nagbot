@@ -426,6 +426,31 @@ describe('round trips before the toast', () => {
     expect(firing()).toMatchObject({ state: 'nagging', snoozes_used: 0 });
   });
 
+  it('✅ on the 8am digest: one, as on the nag; on a confirmation: two; Manage → Done: as soon as it is won', async () => {
+    expect(await wavesBeforeToast('dg:5', { messageId: 300 })).toEqual({
+      waves: 1, text: 'Purrs 😻 — ↩️ Not done is right there if that was a slip',
+    });
+    expect(firing().state).toBe('done');
+    expect((await wavesBeforeToast('dg:5', { messageId: 300 })).text).toBe('Already handled 👍');
+    // Done early from the confirmation of chore 9: its reads, then the claim.
+    expect(await wavesBeforeToast('c:9', { messageId: 300 })).toEqual({ waves: 2, text: 'Purrs 😻' });
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 9 AND state = 'done'").get().n).toBe(1);
+    // The board's Manage → Done: the toast goes before the receipt is sent.
+    sql.exec("UPDATE firings SET state = 'nagging', done_by = NULL, done_at = NULL WHERE id = 5");
+    const inner = globalThis.fetch;
+    let receiptFirst = null;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      if (receiptFirst == null && (method === 'answerCallbackQuery' || method === 'editMessageText')) {
+        receiptFirst = method === 'editMessageText';
+      }
+      return inner(url, init);
+    }));
+    expect((await wavesBeforeToast('m:done:8', { messageId: BOARD })).text).toBe('Purrs 😻');
+    expect(receiptFirst).toBe(false);
+    expect(firing().state).toBe('done');
+  });
+
   it('🗑 Delete on a nag: one, the removal sent with its reads, and its Undo puts the row back as it was', async () => {
     const before = sql.prepare('SELECT * FROM reminders WHERE id = 8').get();
     expect(await wavesBeforeToast('x:5')).toEqual({

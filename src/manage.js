@@ -297,16 +297,20 @@ export async function skipNext(env, r, tz) {
 // 'raced', not a Done early on the next occurrence.
 // `live`: the chore's live firing, or null for none, when the caller read it
 // in a batch of its own (the Mini App's gate).
-export async function completeNow(env, r, credit, tz, { expect, live } = {}) {
+// `onClaim(outcome)` runs the moment the Done is won — 'done' or 'early' —
+// before the card, the receipt and the board: where a tap's toast goes.
+export async function completeNow(env, r, credit, tz, { expect, live, onClaim } = {}) {
   const firing = live !== undefined ? live : await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) {
     if (expect === 'now') return 'raced';
     if (r.paused || r.next_fire_at == null) return 'idle';
-    return await completeEarly(env, r, credit, tz) ? 'early' : 'raced';
+    return await completeEarly(env, r, credit, tz, { onClaim: onClaim && (() => onClaim('early')) })
+      ? 'early' : 'raced';
   }
-  return await completeFiring(env, firing, r, credit, tz) ? 'done' : 'raced';
+  return await completeFiring(env, firing, r, credit, tz, { onClaim: onClaim && (() => onClaim('done')) })
+    ? 'done' : 'raced';
 }
 
 // The e: callback family: editor navigation and value taps. The chore, where
@@ -514,11 +518,14 @@ export async function handleManageCallback(env, cb) {
       if (!member) return answerCallback(env, cb.id, 'That household member is no longer here.');
       credit = member.name;
     }
-    const outcome = await completeNow(env, r, credit, tz);
-    return answerCallback(env, cb.id, {
+    const toasts = {
       done: 'Purrs 😻', early: 'Done early 😻', raced: 'Already handled 👍',
       idle: 'This chore is not nagging now.',
-    }[outcome]);
+    };
+    // A won Done is answered as soon as it is won; the card and receipt follow.
+    const outcome = await completeNow(env, r, credit, tz, { onClaim: (won) => answerCallback(env, cb.id, toasts[won]) });
+    if (outcome === 'raced' || outcome === 'idle') return answerCallback(env, cb.id, toasts[outcome]);
+    return;
   }
   return answerCallback(env, cb.id, '');
 }
