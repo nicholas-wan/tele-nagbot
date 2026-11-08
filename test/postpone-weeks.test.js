@@ -174,7 +174,7 @@ describe('✅ OK on a snoozed card', () => {
     await tapOn('zh:5', 700);
     expect(deletedMsg(700)).toBe(true);
     expect(firing()).toMatchObject({ state: 'nagging', last_message_id: null, next_nag_at: NOW + 7 * DAY });
-    expect(toast()).toBe('Hidden — back Oct 17, 7:30 PM 😴');
+    expect(toast()).toBe('Hidden — back in 7 days · Oct 17, 7:30 PM 😴');
   });
 
   it('gets a fresh nag when the snooze is up', async () => {

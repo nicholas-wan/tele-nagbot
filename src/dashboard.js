@@ -57,6 +57,19 @@ export function ordinal(n) {
   return `${n}${suffix}`;
 }
 
+// An interval in words: "weekly", "every 2 weeks", "every 3 days", "monthly",
+// "every 3 months", "yearly" — never "every 1 week".
+export function intervalWords(d) {
+  if (d.months) {
+    if (d.months === 1) return 'monthly';
+    if (d.months === 12) return 'yearly';
+    return `every ${d.months} months`;
+  }
+  const w = d.days % 7 === 0 ? d.days / 7 : 0;
+  if (w === 1) return 'weekly';
+  return w ? `every ${w} weeks` : `every ${d.days} days`;
+}
+
 export function describeSchedule(r) {
   const d = JSON.parse(r.schedule_detail);
   if (r.schedule_kind === 'daily') return `daily ${fmtTime(d.h, d.mi)}`;
@@ -64,12 +77,7 @@ export function describeSchedule(r) {
     return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')} ${fmtTime(d.h, d.mi)}`;
   }
   if (r.schedule_kind === 'monthly') return `on the ${ordinal(d.dom)} at ${fmtTime(d.h, d.mi)}`;
-  if (r.schedule_kind === 'interval') {
-    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`;
-    const w = d.days % 7 === 0 ? d.days / 7 : 0;
-    return w ? `every ${w} week${w > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`
-             : `every ${d.days} days at ${fmtTime(d.h, d.mi)}`;
-  }
+  if (r.schedule_kind === 'interval') return `${intervalWords(d)} at ${fmtTime(d.h, d.mi)}`;
   return 'once';
 }
 
@@ -79,11 +87,7 @@ export function cadence(r) {
   if (r.schedule_kind === 'daily') return 'daily';
   if (r.schedule_kind === 'weekly') return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')}`;
   if (r.schedule_kind === 'monthly') return `on the ${ordinal(d.dom)}`;
-  if (r.schedule_kind === 'interval') {
-    if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''}`;
-    const w = d.days % 7 === 0 ? d.days / 7 : 0;
-    return w ? `every ${w} week${w > 1 ? 's' : ''}` : `every ${d.days} days`;
-  }
+  if (r.schedule_kind === 'interval') return intervalWords(d);
   return 'once';
 }
 

@@ -4,12 +4,12 @@
 
 import { sendPrivate, deleteMessage, esc, mentionHtml, editRef, deleteRef, msgRef,
          answerCallback, isPublicMessage, keepSourceMessage, okButton } from './tg.js';
-import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtShort, fmtTime, DAY_NAMES } from './time.js';
-import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
+import { nextOccurrence, advanceOccurrence, localParts, zonedEpoch, fmtTime, DAY_NAMES } from './time.js';
+import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS, refusalHtml } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName, nicknames } from './household.js';
 import { createFromDraft, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
-import { ordinal } from './dashboard.js';
+import { ordinal, fmtWhen, intervalWords } from './dashboard.js';
 
 // Bare /chore or /remind — the "/" autocomplete menu sends the command with
 // no text. Ask what to nag about instead of erroring; the reply is parsed as
@@ -66,7 +66,7 @@ async function resolveTextPrompt(env, msg, ctx, draft) {
     // gets another try. The reply itself stays on show to be copied and
     // fixed, and the refusal's OK takes it away, as a confirmation's does.
     if (err instanceof ParseError) {
-      return sendPrivate(env, ctx, esc(err.message), { inline_keyboard: [[okButton(sourceMsgId)]] });
+      return sendPrivate(env, ctx, refusalHtml(err), { inline_keyboard: [[okButton(sourceMsgId)]] });
     }
     throw err;
   }
@@ -142,10 +142,13 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
   const p = localParts(now, tz);
   const endOfToday = zonedEpoch(p.y, p.mo, p.d, 23, 59, tz);
   const tomorrowNine = nextOccurrence('daily', { h: 9, mi: 0 }, endOfToday, tz);
+  // The day said as the board says it ("Today 7:00 PM", "Tomorrow 9:00 AM"),
+  // not as a date to work out.
+  const when = (ms) => { const w = fmtWhen(ms, tz); return w[0].toUpperCase() + w.slice(1); };
   const keyboard = partial.kind === 'once' && !hasDateConstraint(detail)
     ? [
         [btn('In 15 min', 'r15'), btn('In 1 hour', 'r60')],
-        [btn(fmtShort(seven, tz), `a${seven}`), btn(fmtShort(tomorrowNine, tz), `a${tomorrowNine}`)],
+        [btn(when(seven), `a${seven}`), btn(when(tomorrowNine), `a${tomorrowNine}`)],
         [btn('Every day 7pm', 'd19'), btn('✏️ Type a time', 'custom')],
       ]
     : [
@@ -154,17 +157,9 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
       ];
   const cancel = [btn('✕ Cancel', 'cancel')];
 
-  // An interval is counted in months or in days; reading only .days rendered
-  // a monthly chore as "every undefined days".
-  const intervalNote = partial.detail.months
-    ? `every ${partial.detail.months} month${partial.detail.months === 1 ? '' : 's'}`
-    : `every ${partial.detail.days} days`;
-  const kindNote = partial.kind === 'once' ? '' :
-    ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
-        partial.kind === 'monthly' ? 'on the ' + ordinal(partial.detail.dom) :
-        partial.kind === 'interval' ? intervalNote : 'daily'})`;
-  const html = `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
-    'Tap an option, or reply with a custom time.';
+  const html = `🐾 When should Latte &amp; Mocha pester ${partial.assigneeName ? esc(partial.assigneeName) : 'you'} ` +
+    `about <b>${esc(partial.text)}</b>${wizardNote(partial, now, tz)}?\n` +
+    'Tap a time, or just type one — e.g. <code>7:30pm</code>.';
   const sent = await sendPrivate(env, ctx, html, { inline_keyboard: [...keyboard, cancel] });
   const ref = msgRef(sent);
   if (ref) {
@@ -179,6 +174,28 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
     .bind(JSON.stringify(ai), id, chatId).run();
   if (!stored.meta.changes) return;
   await editRef(env, ctx, chatId, ref, html, { inline_keyboard: [[btn(`✨ ${ai.label}`, 'ai')], ...keyboard, cancel] });
+}
+
+// What the wizard already knows, in brackets after the chore: its cadence
+// ("every Sun", "every 2 weeks", "monthly") and any day it was given ("Sat",
+// "tomorrow", "13 Sep"). A one-off typed with a day used to show only the
+// hour presets, with nothing saying which day they were for.
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function wizardNote(partial, now, tz) {
+  const d = partial.detail || {};
+  const bits = [];
+  if (partial.kind === 'weekly') bits.push(`every ${d.days.map((i) => DAY_NAMES[i]).join(',')}`);
+  else if (partial.kind === 'monthly') bits.push(`on the ${ordinal(d.dom)}`);
+  else if (partial.kind === 'interval') bits.push(intervalWords(d));
+  else if (partial.kind === 'daily') bits.push('daily');
+  const lead = partial.kind === 'once' ? '' : 'starting ';
+  if (partial.date) bits.push(`${lead}${partial.date.dom} ${MONTH_NAMES[partial.date.mon]}`);
+  else if (partial.onDate) {
+    const n = localParts(now, tz);
+    const today = partial.onDate.d === n.d && partial.onDate.mo === n.mo;
+    bits.push(`${lead}${today ? 'today' : 'tomorrow'}`);
+  } else if (partial.startDay != null) bits.push(`${lead}${DAY_NAMES[partial.startDay]}`);
+  return bits.length ? ` (${bits.join(', ')})` : '';
 }
 
 // An assigned chore's confirmation is the wizard card itself, edited in place
@@ -425,7 +442,10 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
       : mentionHtml(cb.from.first_name || 'you', cb.from.id);
     const prompt = await sendPrivate(env, ctx,
       `⏰ ${mention} — reply with a time for <b>${esc(draft.text)}</b> — e.g. <code>10am</code>, ` +
-      '<code>tomorrow 9:30am</code>, <code>in 30m</code>, or <code>now</code>.',
+      // A repeating chore needs a clock time; "in 30m" is refused for it.
+      (draft.schedule_kind === 'once'
+        ? '<code>tomorrow 9:30am</code>, <code>in 30m</code>, or <code>now</code>.'
+        : 'or <code>7:30pm</code>.'),
       { force_reply: true, selective: true });
     const pRef = msgRef(prompt);
     if (pRef) {

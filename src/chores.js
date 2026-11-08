@@ -3,7 +3,7 @@
 
 import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, messageIsGone,
          retimeSentMessage, RECEIPT_TTL_MS, SENT_TTL_MS } from './tg.js';
-import { nextOccurrence, advanceOccurrence, deferQuietHours, fmtLocal } from './time.js';
+import { nextOccurrence, advanceOccurrence, deferQuietHours } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
@@ -55,12 +55,60 @@ export async function findReminder(env, chatId, args, cmd = 'delete') {
   if (exact.length === 1) return exact[0];
   const matches = exact.length ? exact : results.filter((x) => x.text.toLowerCase().includes(q));
   if (matches.length === 1) return matches[0];
-  if (!matches.length) throw new ParseError(`The cats can't find a chore matching "${raw}". See /list.`);
+  if (!matches.length) {
+    // A slip of the thumb ("/done trsh") is offered the chore it is a letter
+    // or two away from, as a command to tap-copy — offered, not acted on: a
+    // near miss can also be a different real word ("cook" beside "book
+    // flights"), and the chore it names may simply be gone.
+    const near = results.filter((x) => nearMiss(q, x.text.toLowerCase()));
+    const err = new ParseError(`The cats can't find a chore matching "${raw}". See /list.`);
+    if (near.length === 1) {
+      err.html = `😿 No chore called "${esc(raw)}" — did you mean <b>${esc(near[0].text)}</b>? ` +
+        `<code>/${esc(cmd)} ${esc(near[0].text)}</code>`;
+    }
+    throw err;
+  }
   // Two chores with the same name have only their number left to tell them
   // apart, so the refusal says it for those and for nothing else.
   const twins = exact.length > 1;
   const names = matches.map((x) => (twins ? `${x.text} (/${cmd} ${x.display_num})` : x.text));
   throw new ParseError(`"${raw}" matches: ${names.join(', ')} — ${twins ? 'use the number' : 'be more specific'}.`);
+}
+
+// Whether a typed name is a typo of a chore's name, or of one of its words:
+// within one edit (an insertion, deletion, substitution or swapped pair) for
+// short words, two from eight letters on. Under four letters nothing is close
+// enough to be sure of.
+function nearMiss(typed, name) {
+  if ([...typed].length < 4) return false;
+  const limit = typed.length >= 8 ? 2 : 1;
+  const words = name.split(/\s+/);
+  const spans = [name];
+  // A typed phrase of n words is compared with each run of n words in the name.
+  const n = typed.split(/\s+/).length;
+  for (let i = 0; i + n <= words.length; i++) spans.push(words.slice(i, i + n).join(' '));
+  return spans.some((s) => Math.abs(s.length - typed.length) <= limit && editDistance(typed, s, limit) <= limit);
+}
+
+// Damerau–Levenshtein (optimal string alignment), stopping once past `limit`.
+function editDistance(a, b, limit) {
+  let prev2 = null;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (prev2 && i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, prev2[j - 2] + 1);
+      cur.push(v);
+      best = Math.min(best, v);
+    }
+    if (best > limit) return best;
+    prev2 = prev;
+    prev = cur;
+  }
+  return prev[b.length];
 }
 
 // Allocate inside the INSERT: concurrent requests cannot read the same gap.
@@ -520,7 +568,7 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
 // repair; every credit carries ↩️ Not done, like every other receipt.
 export function earlyReceipt(text, credit, nextFireAt, tz, firingId, covered = []) {
   const html = `😻 <s>${esc(text)}</s> — done early by ${esc(credit)}. The cats are impressed.` +
-    (nextFireAt ? `\nNext: ${fmtLocal(nextFireAt, tz)}` : '') + coverLine(covered);
+    (nextFireAt ? `\nNext: ${fmtWhen(nextFireAt, tz)}` : '') + coverLine(covered);
   const together = credit.includes(CREDIT_SEP) ? []
     : [{ text: '🤝 Together too', callback_data: `g:${firingId}` }];
   return { html, markup: { inline_keyboard: [[
