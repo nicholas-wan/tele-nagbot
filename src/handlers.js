@@ -1079,6 +1079,11 @@ async function handleCallback(env, cb) {
   return answerCallback(env, cb.id, '');
 }
 
+const tzOrDefault = (env, chatId) => getTz(env, chatId).catch((e) => {
+  console.log(`timezone read failed, using the default: ${e}`);
+  return 'Asia/Singapore';
+});
+
 // ✅ Done and 🤝 Done together on a nag: the claim goes with the reads it
 // needs, so the toast is one round trip after the webhook's own intake. The
 // claim itself refuses what the old reads refused — another household's
@@ -1100,7 +1105,9 @@ async function doneTapped(env, cb, firingId, together) {
       ...(together ? [env.DB.prepare('SELECT username, first_name FROM members WHERE chat_id = ?').bind(chatId)] : []),
     ],
   });
-  const [got, tz] = await Promise.all([runDoneClaim(env, claim), getTz(env, chatId)]);
+  // The timezone rides beside a write, so a failed read must not turn a Done
+  // that happened into an error: it falls back to the default.
+  const [got, tz] = await Promise.all([runDoneClaim(env, claim), tzOrDefault(env, chatId)]);
   // The read-back is by id alone; a firing from another chat is not this tap's.
   const firing = got.firing && got.firing.chat_id === chatId ? got.firing : null;
   const reminder = (got.extra[0].results || [])[0] || null;
@@ -1148,7 +1155,7 @@ async function snoozeTapped(env, cb, firingId, code) {
   const chatId = cb.message.chat.id;
   // The timezone decides the time only for a postponement and "9pm"; for the
   // others it is only needed for the toast, so it is read beside the write.
-  const zone = getTz(env, chatId);
+  const zone = tzOrDefault(env, chatId);
   const now = Date.now();
   // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
   // to the 24h expiry, which would collapse a full day down to "just before
