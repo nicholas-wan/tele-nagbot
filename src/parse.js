@@ -27,7 +27,9 @@ const daysIn = (list) => [...new Set(list.split(/[^a-z]+/i)
 // the message, before an optional time ("bins tue and fri 8pm"); days inside
 // the text ("pack for mon and tue trip") are a one-off's words.
 const DAY_LIST = `(?:on\\s+)?(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})+)\\b`;
-const CLOSING = '(?=\\s*(?:(?:at\\s+)?\\d{1,2}(?:[:.]?\\d{2})?\\s*(?:am|pm)?|noon|midday|midnight)?\\s*$)';
+const CLOSING = '(?=\\s*(?:(?:at\\s+)?(?:\\d{1,2}(?:[:.]?\\d{2})?\\s*(?:am|pm)?|noon|midday|midnight)'
+  + '|(?:this\\s+)?(?:morning|afternoon|evening|tonight|night))?'
+  + '\\s*(?:please|pls|plz|thanks|thank\\s+you)?[.!]*\\s*$)';
 
 // "every three days": the counts people spell out.
 const NUMBER_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
@@ -101,7 +103,9 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
         // what it is about ("buy gift for nic and yx") and stay in the text —
         // but still nobody is singled out.
         const at = pair.index + pair[1].length;
-        if (!args.slice(0, at).trim()) args = `${args.slice(0, at)} ${args.slice(at + pair[2].length)}`;
+        // "remind nic and yx …" is the same subject with the command's word.
+        const lead = args.slice(0, at);
+        if (/^\s*(?:remind\s+)?$/i.test(lead)) args = ` ${args.slice(at + pair[2].length)}`;
         nicknames = null;
       }
     }
@@ -215,10 +219,14 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   const fortnightM = args.match(/\b(?:(?:every|each)\s+fortnight|fortnightly|bi-?weekly)\b/i);
   // "every tue and fri", "every mon, wed and fri", "every tue/fri"; without
   // "every", two or more days closing the message ("bins tue and fri 8pm") or
-  // a plural ("on tuesdays") still repeat (DAY_LIST says why only closing).
-  const weeklyM = args.match(new RegExp(`\\bevery\\s+(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})*)\\b`, 'i'))
+  // a plural ("on tuesdays", or closing) still repeat (DAY_LIST says why only
+  // closing). "every sat" is the strongest: "every sat weekly" is every Sat.
+  const PLURAL = '((?:sun|mon|tues|wednes|thurs|fri|satur)days)';
+  const everyDaysM = args.match(new RegExp(`\\bevery\\s+(${DAY_ITEM}(?:${DAY_SEP}${DAY_ITEM})*)\\b`, 'i'));
+  const weeklyM = everyDaysM
     || args.match(new RegExp(`\\b${DAY_LIST}${CLOSING}`, 'i'))
-    || args.match(/\b(?:on\s+)?((?:sun|mon|tues|wednes|thurs|fri|satur)days)\b/i);
+    || args.match(new RegExp(`\\bon\\s+${PLURAL}\\b`, 'i'))
+    || args.match(new RegExp(`\\b${PLURAL}\\b${CLOSING}`, 'i'));
   // Two or more days anywhere, for a cadence word beside them: "weekly on mon
   // and thu" is every Mon and Thu; a fortnightly one can only keep one day.
   const dayListM = args.match(new RegExp(`\\b${DAY_LIST}`, 'i'));
@@ -230,6 +238,12 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   }
   // "every 2nd tuesday" is a weekday of the month, which no schedule here
   // keeps; read as "monthly on the 2nd" it was silently wrong.
+  // "every 1st and 15th" is two chores; reading the first used to drop the
+  // second into the name without a word.
+  const twoDatesM = args.match(/\b\d{1,2}(?:st|nd|rd|th)\s*(?:,|&|and)\s*(?:the\s+)?(\d{1,2}(?:st|nd|rd|th))\b/i);
+  if (twoDatesM) {
+    throw new ParseError(`One day of the month per chore — add the ${twoDatesM[1]} one as a chore of its own.`);
+  }
   const nthWeekdayM = args.match(new RegExp(`\\bevery\\s+(\\d{1,2}(?:st|nd|rd|th)|first|second|third|fourth|last)\\s+${DAY_WORD}\\b`, 'i'));
   if (nthWeekdayM) {
     throw new ParseError(`"${nthWeekdayM[0].trim()}" isn't one I can keep yet — try "every 4 weeks on tue", or "on the 10th".`);
@@ -295,10 +309,13 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
     if (kind === 'interval') detail.days = days;
     args = args.replace(intervalM[0], ' ');
     cadenceM = intervalM;
-  } else if (weekM && !fortnightM && listDays.length > 1) {
+  } else if (weekM && !fortnightM && (everyDaysM || listDays.length > 1)) {
+    // "every sat weekly", "weekly on mon and thu": the days are the schedule,
+    // the cadence word only says so again.
     kind = 'weekly';
-    detail.days = listDays;
-    args = args.replace(weekM[0], ' ').replace(dayListM[0], ' ');
+    const daysM = everyDaysM || dayListM;
+    detail.days = daysIn(daysM[1]);
+    args = args.replace(weekM[0], ' ').replace(daysM[0], ' ');
   } else if (weekM || fortnightM) {
     kind = 'interval';
     detail.days = fortnightM ? 14 : 7;
@@ -322,10 +339,17 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
   // text in practice; a bare abbreviation only right after the cadence, since
   // "sun" and "sat" are ordinary words elsewhere.
   if (kind === 'interval' && fromDay == null && !fromDate) {
-    const anchorM = args.match(new RegExp(`\\bon\\s+(${DAY_WORD})s?\\b`, 'i'))
+    // A day names the start when it is marked ("on/every/next/this sat"),
+    // spelled out, beside the cadence ("sat weekly", "weekly sat"), or closes
+    // the message before its time ("weekly shop sat 10am") — the same marks a
+    // one-off's weekday needs, so "buy sun hat weekly" keeps its sun.
+    const anchorM = args.match(new RegExp(`\\b(?:on|every|next|this)\\s+(${DAY_WORD})s?\\b`, 'i'))
       || args.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b/i)
       || (cadenceM && cadenceM.input.slice(cadenceM.index + cadenceM[0].length)
-        .match(new RegExp(`^\\s+(${DAY_WORD})\\b`, 'i')));
+        .match(new RegExp(`^\\s+(${DAY_WORD})\\b`, 'i')))
+      || (cadenceM && cadenceM.input.slice(0, cadenceM.index)
+        .match(new RegExp(`\\b(${DAY_WORD})\\s+$`, 'i')))
+      || args.match(new RegExp(`\\b(${DAY_WORD})\\b${CLOSING}`, 'i'));
     if (anchorM) {
       fromDay = DAY_INDEX[anchorM[1].slice(0, 3).toLowerCase()];
       // The trailing-abbreviation form was matched on the original text; the

@@ -54,6 +54,28 @@ describe('the parser reads chores the way people type them', () => {
     expect(parse('nic and yx clean house 9pm')).toMatchObject({ text: 'clean house', assigneeName: null });
   });
 
+  it.each([
+    ['vacuum every sat weekly 10am', 'vacuum', 'weekly', { days: [6] }],
+    ['bins every tue and fri weekly 8pm', 'bins', 'weekly', { days: [2, 5] }],
+    ['weekly shop sat 10am', 'shop', 'interval', { days: 7 }, 6],
+    ['vacuum sat weekly 10am', 'vacuum', 'interval', { days: 7 }, 6],
+    ['fortnightly mop thu 9am', 'mop', 'interval', { days: 14 }, 4],
+    ['bins tue and fri at noon', 'bins', 'weekly', { days: [2, 5], h: 12 }],
+    ['bins tue and fri evening', 'bins', 'weekly', { days: [2, 5], h: 19 }],
+    ['bins tue and fri 8pm please', 'bins', 'weekly', { days: [2, 5] }],
+    ['buy mondays newspaper 8pm', 'buy mondays newspaper', 'once', {}],
+    ['buy sun hat weekly 5pm', 'buy sun hat', 'interval', { days: 7 }],
+    ['remind nic and yx clean house 8pm', 'clean house', 'once', {}],
+  ])('%s', (text, name, kind, detail, startDay) => {
+    const p = parse(text);
+    expect(p).toMatchObject({ text: name, kind, detail });
+    if (startDay != null) expect(new Date(p.firstFireAt + 8 * HOUR).getUTCDay()).toBe(startDay);
+  });
+
+  it('refuses two days of the month in one chore', () => {
+    expect(() => parse('every 1st and 15th pay bills 9am')).toThrow(/add the 15th one/);
+  });
+
   it('keeps a lone weekday a one-off', () => {
     expect(parse('vacuum sat 10am')).toMatchObject({ text: 'vacuum', kind: 'once' });
     expect(parse('buy sun hat 5pm')).toMatchObject({ text: 'buy sun hat', kind: 'once' });
