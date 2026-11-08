@@ -431,7 +431,8 @@ export async function skipPastPostponement(env, r, until, tz) {
 
 // `onClaim` runs once the chore is gone, before the log and the board — where
 // a tap's toast goes. `removed`: the removal, when the caller made it in a
-// batch of its own (deleteTapped, the Mini App's reply).
+// batch of its own (deleteTapped, the Mini App's reply). Returns the trash id,
+// which the log's Undo carries (and the Mini App's).
 export async function deleteReminder(env, r, ctx = null, by = null, { onClaim, removed = null } = {}) {
   const chatId = r.chat_id;
   let gone = removed;
@@ -454,6 +455,7 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim, r
     ctx ? sendPrivate(env, ctx, html, undo) : sendMessage(env, chatId, html, undo, { silent: true }),
   ]));
   await updateDashboard(env, chatId);
+  return gone.trashId;
 }
 
 // Where a resumed chore's schedule lands. A pause must not cost the chore its

@@ -310,18 +310,22 @@ export function skipPlan(env, r, tz) {
 // in a batch of its own (the Mini App's gate).
 // `onClaim(outcome)` runs the moment the Done is won — 'done' or 'early' —
 // before the card, the receipt and the board: where a tap's toast goes.
-export async function completeNow(env, r, credit, tz, { expect, live, onClaim } = {}) {
+// `onFiring(id)`: told the done firing's id when a Done is won, so the Mini App
+// can offer ↩️ Not done as the receipt does.
+export async function completeNow(env, r, credit, tz, { expect, live, onClaim, onFiring } = {}) {
   const firing = live !== undefined ? live : await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) {
     if (expect === 'now') return 'raced';
     if (r.paused || r.next_fire_at == null) return 'idle';
-    return await completeEarly(env, r, credit, tz, { onClaim: onClaim && (() => onClaim('early')) })
-      ? 'early' : 'raced';
+    const id = await completeEarly(env, r, credit, tz, { onClaim: onClaim && (() => onClaim('early')) });
+    if (id && onFiring) onFiring(id);
+    return id ? 'early' : 'raced';
   }
-  return await completeFiring(env, firing, r, credit, tz, { onClaim: onClaim && (() => onClaim('done')) })
-    ? 'done' : 'raced';
+  const won = await completeFiring(env, firing, r, credit, tz, { onClaim: onClaim && (() => onClaim('done')) });
+  if (won && onFiring) onFiring(firing.id);
+  return won ? 'done' : 'raced';
 }
 
 // The e: callback family: editor navigation and value taps. The chore, where

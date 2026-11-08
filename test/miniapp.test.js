@@ -265,6 +265,71 @@ describe('pause, skip and delete', () => {
   });
 });
 
+describe('undo from the toast', () => {
+  it('takes back a Done on a nag, as the receipt\'s Not done does', async () => {
+    const done = await call('chore/9/done', { how: 'me' });
+    expect(done.undo).toEqual({ kind: 'done', id: 5 });
+    expect(reminder(9)).toBeUndefined(); // a finished one-off waits in the trash
+    const res = await call('undo', done.undo);
+    expect(res).toMatchObject({ ok: true, message: '↩️ renew passport — not done after all' });
+    expect(sql.prepare('SELECT state, done_by FROM firings WHERE id = 5').get())
+      .toEqual({ state: 'nagging', done_by: null });
+    expect(reminder(9)).toBeDefined();
+    expect(res.chores.map((c) => c.text)).toContain('renew passport');
+    expect(sent(/not done after all, says @nicholaswan/)).toHaveLength(1);
+    expect(await call('undo', done.undo)).toMatchObject({ ok: false, message: 'Too late to take that back.' });
+  });
+
+  it('takes back a Done early, putting the slot it used back', async () => {
+    const done = await call('chore/8/done', { how: 'me' });
+    expect(done.undo.kind).toBe('done');
+    expect(reminder(8).next_fire_at).toBeGreaterThan(TUE_7PM);
+    const res = await call('undo', done.undo);
+    expect(res.ok).toBe(true);
+    expect(reminder(8).next_fire_at).toBe(TUE_7PM);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 8').get().n).toBe(0);
+  });
+
+  it('restores a deleted chore once, and only this household\'s', async () => {
+    const del = await call('chore/8/delete', {});
+    expect(del.undo.kind).toBe('delete');
+    expect(del.message).toBe('🗑️ Deleted slutbed');
+    sql.exec(`INSERT INTO trash (id, chat_id, payload, created_at) VALUES (500, 2, '{"id":77,"chat_id":2,"text":"x"}', 0)`);
+    expect((await call('undo', { kind: 'delete', id: 500 })).ok).toBe(false);
+    const res = await call('undo', del.undo);
+    expect(res).toMatchObject({ ok: true, message: '↩️ Restored slutbed' });
+    expect(reminder(8)).toMatchObject({ text: 'slutbed', next_fire_at: TUE_7PM });
+    expect(await call('undo', del.undo)).toMatchObject({ ok: false });
+  });
+
+  it('will not restore a Done\'s stash as if it were a delete', async () => {
+    const done = await call('chore/9/done', { how: 'me' });
+    const stash = sql.prepare('SELECT id FROM trash').get();
+    expect(await call('undo', { kind: 'delete', id: stash.id })).toMatchObject({ ok: false });
+    expect(reminder(9)).toBeUndefined();
+    expect((await call('undo', done.undo)).ok).toBe(true);
+  });
+
+  it('takes back a chore just added, quietly, as the confirmation\'s Undo does', async () => {
+    const added = await call('chores', { text: 'trash 7pm daily' });
+    expect(added.undo).toEqual({ kind: 'add', id: added.chore.id });
+    calls.length = 0;
+    const res = await call('undo', added.undo);
+    expect(res).toMatchObject({ ok: true, message: '↩️ Undone — trash' });
+    expect(reminder(added.chore.id)).toBeUndefined();
+    expect(res.chores.map((c) => c.text)).not.toContain('trash');
+    expect(sent(/./)).toHaveLength(0);
+  });
+
+  it('refuses anything else', async () => {
+    expect(await call('undo', { kind: 'done', id: 'x' })).toMatchObject({ ok: false });
+    expect(await call('undo', { kind: 'pause', id: 8 })).toMatchObject({ ok: false, message: 'Nothing to undo.' });
+    expect(await call('undo', { kind: 'add', id: 8 }, { startParam: 'g1', user: { id: 77, first_name: 'Eve' } }))
+      .toMatchObject({ status: 403 });
+    expect(reminder(8)).toBeDefined();
+  });
+});
+
 describe('adding a chore', () => {
   it('reads what /chore reads, and puts it on the board', async () => {
     const res = await call('chores', { text: 'trash 7pm daily', scored: true });
