@@ -147,6 +147,14 @@ export async function flushSweepRecords(env) {
   }
 }
 
+// The queued records as statements, taken off the queue, for a caller that
+// is about to send a batch anyway (a fire's last write).
+export function drainSweepStatements(env) {
+  const queue = env[SWEEP_QUEUE];
+  if (!queue || !queue.length) return [];
+  return queue.splice(0).map((row) => sweepStatement(env, row));
+}
+
 export async function recordSentMessage(env, chatId, res, { receiverUserId = null, ttlMs = SENT_TTL_MS } = {}) {
   if (!env.DB || !res || !res.ok || !res.result) return res;
   const r = res.result;

@@ -64,8 +64,27 @@ export async function acceptUpdate(env, update) {
   ];
   const learn = learnsSender(env, update);
   if (learn) statements.push(rememberMemberStatement(env, updateChat(update).id, updateFrom(update), now, { gated: true }));
-  const [claim] = await env.DB.batch(statements);
-  return claim.meta.changes ? 'claimed' : 'duplicate';
+  try {
+    const [claim] = await env.DB.batch(statements);
+    return claim.meta.changes ? 'claimed' : 'duplicate';
+  } catch (e) {
+    // A batch can commit and still answer with an error (the answer was lost
+    // on the way back). Telegram's retry would then find the update stored,
+    // claim nothing, and drop it — a tap that did nothing, with no trace
+    // (squashbot lost updates this way). So the row is asked about: if it
+    // carries this very claim's stamp, the claim is ours and the update is
+    // handled now; if there is no row, nothing committed and Telegram is told
+    // to retry, as before. A row stamped by another delivery is a duplicate.
+    console.log(`intake batch failed, checking whether it committed: ${e}`);
+    const row = await env.DB.prepare(
+      'SELECT state, started_at, received_at FROM webhook_updates WHERE update_id = ?'
+    ).bind(update.update_id).first();
+    if (!row) throw e;
+    if (row.state === 'processing' && row.started_at === now && row.received_at === now) {
+      return { result: 'claimed', memberRecorded: learn };
+    }
+    return 'duplicate';
+  }
 }
 
 // Handles an update this delivery has claimed, and records how it ended. The
@@ -99,28 +118,38 @@ export async function processUpdate(env, update) {
   return true;
 }
 
-// Runs every minute and usually finds nothing, so its two reads and the
-// week-old cleanup share one round trip. An interrupted handler is one that
-// started over 15 minutes ago, so nothing the first loop starts can be in it.
-export async function recoverUpdates(env, now) {
-  const [pending, interrupted] = await env.DB.batch([
+// Runs every minute and usually finds nothing, so its two reads ride in the
+// cron's due check (recoveryStatements; `found` is their answers) and the
+// week-old cleanup in the daily retention window (pruneOldUpdates). An
+// interrupted handler is one that started over 15 minutes ago, so nothing the
+// first loop starts can be in it.
+export function recoveryStatements(env, now) {
+  return [
     env.DB.prepare(
       "SELECT payload FROM webhook_updates WHERE state = 'pending' AND received_at < ? ORDER BY received_at LIMIT 20"
     ).bind(now - 30000),
     env.DB.prepare(
       "SELECT update_id, payload FROM webhook_updates WHERE state = 'processing' AND started_at < ? LIMIT 20"
     ).bind(now - 15 * 60000),
-    env.DB.prepare(
-      "DELETE FROM webhook_updates WHERE state IN ('done', 'failed') AND finished_at < ?"
-    ).bind(now - 7 * 86400000),
-  ]);
-  for (const row of pending.results) {
+  ];
+}
+
+export function pruneOldUpdatesStatement(env, now) {
+  return env.DB.prepare(
+    "DELETE FROM webhook_updates WHERE state IN ('done', 'failed') AND finished_at < ?"
+  ).bind(now - 7 * 86400000);
+}
+
+export async function recoverUpdates(env, now, found = null) {
+  const [pending, interrupted] = found || await env.DB.batch(recoveryStatements(env, now));
+  if (!(pending.results || []).length && !(interrupted.results || []).length) return;
+  for (const row of pending.results || []) {
     try { await processUpdate(env, JSON.parse(row.payload)); }
     catch (e) { console.log(`recover update failed: ${e.stack || e}`); }
   }
   // An interrupted handler may already have changed chores. Report it instead
   // of replaying a /delete, /done, or /chore with unknowable partial effects.
-  for (const row of interrupted.results) {
+  for (const row of interrupted.results || []) {
     const claim = await env.DB.prepare(
       "UPDATE webhook_updates SET state = 'failed', finished_at = ? WHERE update_id = ? AND state = 'processing' AND started_at < ?"
     ).bind(now, row.update_id, now - 15 * 60000).run();

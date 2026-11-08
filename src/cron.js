@@ -2,7 +2,7 @@
 // expire firings older than 24h.
 
 import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral, okButton } from './tg.js';
-import { getTz, isScored } from './household.js';
+import { getTz, isScored, primeTz } from './household.js';
 import { nagButtons, nagHtml, overdueHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
          EXPIRE_AFTER_MS, OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
@@ -10,15 +10,18 @@ import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
-import { recoverUpdates } from './updates.js';
+import { recoverUpdates, recoveryStatements, pruneOldUpdatesStatement } from './updates.js';
 
 // What this tick has to do, in one round trip. Nearly every minute the answer
 // is "nothing", and each step used to find that out with a query of its own.
 // Anything that comes due after this read — seconds later, or because an
-// earlier step made it so — is simply picked up by the next tick.
+// earlier step made it so — is simply picked up by the next tick. The webhook
+// inbox's recovery reads ride here too, and the chats come from `settings`
+// (with their timezones, which prime the cache) plus ALLOWED_CHATS, rather
+// than a DISTINCT over every firing ever kept: an idle tick is one round trip.
 async function dueThisTick(env, now) {
   const exists = (sql, ...args) => env.DB.prepare(`SELECT EXISTS(${sql}) AS due`).bind(...args);
-  const [wake, fire, renag, drafts, sweep, paused, digestChats, weeklyChats] = await env.DB.batch([
+  const [wake, fire, renag, drafts, sweep, paused, chats, pending, interrupted] = await env.DB.batch([
     exists('SELECT 1 FROM settings WHERE paused_until IS NOT NULL AND paused_until <= ?', now),
     exists('SELECT 1 FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?', now),
     exists(`SELECT 1 FROM firings WHERE state = 'nagging'
@@ -30,23 +33,32 @@ async function dueThisTick(env, now) {
         AND f.chat_id = s.chat_id AND f.last_message_id = s.message_id
         AND f.last_message_ephemeral = s.is_ephemeral)`, now),
     env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
-    env.DB.prepare('SELECT DISTINCT chat_id FROM reminders'),
-    env.DB.prepare('SELECT DISTINCT chat_id FROM firings'),
+    env.DB.prepare('SELECT chat_id, tz FROM settings'),
+    ...recoveryStatements(env, now),
   ]);
   const yes = (r) => Boolean(r.results && r.results[0] && r.results[0].due);
+  const known = new Set();
+  for (const row of chats.results || []) {
+    primeTz(env, row.chat_id, row.tz);
+    known.add(row.chat_id);
+  }
+  for (const id of String(env.ALLOWED_CHATS || '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (Number.isSafeInteger(Number(id))) known.add(Number(id));
+  }
   return {
     wake: yes(wake), fire: yes(fire), renag: yes(renag), drafts: yes(drafts), sweep: yes(sweep),
     // Disjoint from the chats the wake step ends: those are paused_until <= now.
     paused: new Set((paused.results || []).map((r) => r.chat_id)),
-    digestChats: (digestChats.results || []).map((r) => r.chat_id),
-    weeklyChats: (weeklyChats.results || []).map((r) => r.chat_id),
+    chats: [...known],
+    inbox: [pending, interrupted],
   };
 }
 
 export async function runCron(env) {
   const now = Date.now();
-  // The pinned board is redrawn once per chat at the end of the tick, however
-  // many chores fired or re-nagged in it (deferBoards).
+  // The pinned board is redrawn once per chat (deferBoards), straight after
+  // the nags: the household hears first, the board catches up, and the
+  // housekeeping follows.
   const tick = deferBoards(env);
   let due;
   try {
@@ -54,18 +66,21 @@ export async function runCron(env) {
   } catch (e) {
     // Without the answer, every step looks for itself, as it always could.
     console.log(`cron due check failed: ${e.stack || e}`);
-    due = { wake: true, fire: true, renag: true, drafts: true, sweep: true };
+    due = { wake: true, fire: true, renag: true, drafts: true, sweep: true, inbox: null };
   }
-  // Each step isolated: one failing must not starve the ones after it.
+  // Each step isolated: one failing must not starve the ones after it. The
+  // wake goes first because paused_until is all that keeps the fire step off
+  // a holiday's backlog until wakeChat has rolled it.
   const steps = {
-    updates: () => recoverUpdates(env, now),
     wake: () => due.wake && wakeLapsedPauses(tick, now),
-    digests: () => sendDigests(tick, now, due.paused, due.digestChats),
-    weekly: () => sendWeeklyRecap(tick, now, due.paused, due.weeklyChats),
     // These two read the paused chats again themselves, and only when
     // something is due: a /pause all landing mid-tick must still stop the nags.
     fire: () => due.fire && fireDueReminders(tick, now),
     renag: () => due.renag && renagPending(tick, now),
+    boards: () => flushBoards(tick),
+    digests: () => sendDigests(tick, now, due.paused, due.chats),
+    weekly: () => sendWeeklyRecap(tick, now, due.paused, due.chats),
+    updates: () => recoverUpdates(env, now, due.inbox),
     // Abandoned time-choice prompts and /delete undo stashes expire after a day.
     drafts: () => due.drafts && pruneDraftsAndTrash(env, now),
     // Everything the bot said a day ago is tidied away; the pin stays.
@@ -82,9 +97,11 @@ export async function runCron(env) {
     }
     took.push(`${name} ${Date.now() - started}ms`);
   }
+  // A digest's board refresh, and the sweep records of anything sent since
+  // the boards step.
   const started = Date.now();
   await flushBoards(tick);
-  took.push(`boards ${Date.now() - started}ms`);
+  took.push(`late boards ${Date.now() - started}ms`);
   // A slow tick says where its time went, for `wrangler tail` and Workers
   // Logs; a normal one stays quiet.
   if (Date.now() - now > SLOW_TICK_MS) console.log(`slow cron tick ${Date.now() - now}ms: ${took.join(', ')}`);
@@ -102,6 +119,9 @@ const SLOW_TICK_MS = 3000;
 // with nothing to tap. So a card that is still some nagging firing's current message is skipped — and
 // its row keeps coming due, so the moment the firing ends or re-nags, the
 // card goes with the next pass. Both id spaces are matched, as everywhere.
+// Six deletes at a time, and the rows dropped in one statement after.
+const SWEEP_PARALLEL = 6;
+
 async function sweepSentMessages(env, now) {
   const { results } = await env.DB.prepare(
     `SELECT s.* FROM sent_messages s WHERE s.delete_after <= ?
@@ -110,18 +130,25 @@ async function sweepSentMessages(env, now) {
          AND f.last_message_ephemeral = s.is_ephemeral)
      ORDER BY s.delete_after LIMIT 100`
   ).bind(now).all();
-  for (const row of results) {
-    try {
-      if (row.is_ephemeral) {
-        // deleteEphemeral only reads chatId/userId off the ctx.
-        await deleteEphemeral(env, { chatId: row.chat_id, userId: row.receiver_user_id }, row.message_id);
-      } else {
-        await deleteMessage(env, row.chat_id, row.message_id);
+  const swept = [];
+  for (let i = 0; i < results.length; i += SWEEP_PARALLEL) {
+    await Promise.all(results.slice(i, i + SWEEP_PARALLEL).map(async (row) => {
+      try {
+        if (row.is_ephemeral) {
+          // deleteEphemeral only reads chatId/userId off the ctx.
+          await deleteEphemeral(env, { chatId: row.chat_id, userId: row.receiver_user_id }, row.message_id);
+        } else {
+          await deleteMessage(env, row.chat_id, row.message_id);
+        }
+        swept.push(row.id);
+      } catch (e) {
+        console.log(`sweep of sent message ${row.id} failed: ${e.stack || e}`);
       }
-      await env.DB.prepare('DELETE FROM sent_messages WHERE id = ?').bind(row.id).run();
-    } catch (e) {
-      console.log(`sweep of sent message ${row.id} failed: ${e.stack || e}`);
-    }
+    }));
+  }
+  if (swept.length) {
+    await env.DB.prepare(`DELETE FROM sent_messages WHERE id IN (${swept.map(() => '?').join(',')})`)
+      .bind(...swept).run();
   }
 }
 
@@ -164,6 +191,17 @@ async function wakeLapsedPauses(env, now) {
   }
 }
 
+// Every chat the bot keeps settings for, and every allowed one (dueThisTick
+// reads the same list in its batch).
+async function cronChats(env) {
+  const { results } = await env.DB.prepare('SELECT chat_id FROM settings').all();
+  const chats = new Set((results || []).map((r) => r.chat_id));
+  for (const id of String(env.ALLOWED_CHATS || '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (Number.isSafeInteger(Number(id))) chats.add(Number(id));
+  }
+  return [...chats];
+}
+
 // Chats currently in vacation mode; everything below skips them.
 async function pausedChats(env, now) {
   const { results } = await env.DB.prepare(
@@ -178,18 +216,23 @@ async function pausedChats(env, now) {
 // runs late or is skipped altogether used to cost the whole day's retention,
 // and repeating this DELETE is idempotent and cheap.
 const RETENTION_WINDOW_MIN = 5;
+// The webhook inbox's week-old rows go in the same window: they used to be
+// deleted every minute, a write on every idle tick.
 async function pruneOldFirings(env, now) {
   const d = new Date(now);
   if (d.getUTCHours() !== 3 || d.getUTCMinutes() >= RETENTION_WINDOW_MIN) return;
-  await env.DB.prepare(
-    "DELETE FROM firings WHERE state IN ('done', 'expired') AND fired_at < ?"
-  ).bind(now - 183 * 86400000).run();
+  await env.DB.batch([
+    env.DB.prepare(
+      "DELETE FROM firings WHERE state IN ('done', 'expired') AND fired_at < ?"
+    ).bind(now - 183 * 86400000),
+    pruneOldUpdatesStatement(env, now),
+  ]);
 }
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.
 async function sendWeeklyRecap(env, now, paused = null, chats = null) {
   paused ??= await pausedChats(env, now);
-  chats ??= (await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all()).results.map((r) => r.chat_id);
+  chats ??= await cronChats(env);
   for (const chat_id of chats) {
     try {
       if (paused.has(chat_id)) continue;
@@ -274,7 +317,7 @@ export async function digestView(env, chatId, firingIds, now = Date.now()) {
 // nothing due today and nothing still nagging.
 export async function sendDigests(env, now, paused = null, chats = null) {
   paused ??= await pausedChats(env, now);
-  chats ??= (await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all()).results.map((r) => r.chat_id);
+  chats ??= await cronChats(env);
   for (const chat_id of chats) {
     try {
       if (paused.has(chat_id)) continue;
@@ -299,10 +342,10 @@ export async function sendDigests(env, now, paused = null, chats = null) {
       // speaks only when something was left hanging overnight.
       //
       // A recurring firing past its 24h is not "still hanging": quiet hours
-      // held its expiry back to 08:00, and the renag step of this very tick
-      // tombstones it seconds after the digest goes out — so the digest used
-      // to hand out a ✅ for a chore that was already gone by the time anyone
-      // read it. The tombstone says what happened to it. An overdue one-off
+      // held its expiry back to 08:00, and the renag step tombstones it at
+      // 08:00 too — so the digest used to hand out a ✅ for a chore that was
+      // already gone by the time anyone read it. The tombstone says what
+      // happened to it. An overdue one-off
       // stays: it is never expired, and Done here still counts.
       //
       // Nor is a chore the household parked "hanging": one postponed with
@@ -328,12 +371,14 @@ export async function sendDigests(env, now, paused = null, chats = null) {
 }
 
 async function fireDueReminders(env, now, paused = null) {
-  const { results } = await env.DB.prepare(
-    'SELECT * FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?'
-  ).bind(now).all();
+  const [due, pausedRows] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?').bind(now),
+    env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
+  ]);
+  const results = due.results || [];
   if (!results.length) return;
 
-  paused ??= await pausedChats(env, now);
+  paused ??= new Set((pausedRows.results || []).map((r) => r.chat_id));
   for (const r of results) {
     try {
       if (paused.has(r.chat_id)) continue;
@@ -347,19 +392,31 @@ async function fireDueReminders(env, now, paused = null) {
 
 // Exported so the expiry claims below can be pinned directly, without driving
 // eight unrelated cron steps to reach them.
+//
+// The due firings, their chores and the paused chats are one round trip; the
+// chore used to be read again for every firing. Each re-nag is then its claim,
+// the old card coming down while the new one goes up, and the new card's ids.
 export async function renagPending(env, now, paused = null) {
   // Due re-nags, plus anything past the 24h deadline regardless of snoozes —
   // expiry must not wait for the next nag slot to come due.
-  const { results } = await env.DB.prepare(
-    "SELECT * FROM firings WHERE state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)"
-  ).bind(now, now - EXPIRE_AFTER_MS).all();
+  const due = "state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)";
+  const [firings, chores, pausedRows] = await env.DB.batch([
+    env.DB.prepare(`SELECT * FROM firings WHERE ${due}`).bind(now, now - EXPIRE_AFTER_MS),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r WHERE r.id IN (SELECT f.reminder_id FROM firings f WHERE f.state = 'nagging'
+         AND ((f.next_nag_at IS NOT NULL AND f.next_nag_at <= ?) OR f.fired_at <= ?))`
+    ).bind(now, now - EXPIRE_AFTER_MS),
+    env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
+  ]);
+  const results = firings.results || [];
   if (!results.length) return;
+  const byId = new Map((chores.results || []).map((r) => [r.id, r]));
 
-  paused ??= await pausedChats(env, now);
+  paused ??= new Set((pausedRows.results || []).map((r) => r.chat_id));
   for (const f of results) {
     try {
       if (paused.has(f.chat_id)) continue; // vacation freezes nags and expiry
-      const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ?').bind(f.reminder_id).first();
+      const r = byId.get(f.reminder_id) || null;
       if (!r) {
         // Same conditional claim as expireFiring, for the same reason: this
         // tick's fired_at is a snapshot, and a resume may have moved it. The
@@ -369,8 +426,10 @@ export async function renagPending(env, now, paused = null) {
           "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
         ).bind(f.id, f.fired_at).run();
         if (claim.meta.changes) {
-          if (f.last_message_id) await deleteNag(env, f);
-          if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+          await Promise.all([
+            f.last_message_id ? deleteNag(env, f) : null,
+            f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+          ]);
         }
         continue;
       }
@@ -410,21 +469,26 @@ export async function renagPending(env, now, paused = null) {
         : Math.max(1, Number(intervals[Math.min(nagCount, intervals.length - 1)]) || 15);
       // Claim this re-nag before any sends: an overlapping cron tick loses the
       // compare-and-swap, and a Done/snooze landing mid-send isn't clobbered.
+      // The chore was read at the top of the tick, so the claim also checks it
+      // is still unpaused: a /pause landing since must not be answered with a
+      // fresh nag.
       const claim = await env.DB.prepare(
-        "UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at IS ?"
+        `UPDATE firings SET nag_count = ?, next_nag_at = ? WHERE id = ? AND state = 'nagging' AND next_nag_at IS ?
+           AND EXISTS (SELECT 1 FROM reminders WHERE id = firings.reminder_id AND paused = 0)`
       ).bind(nagCount, deferQuietHours(now + interval * 60000, tz), f.id, f.next_nag_at).run();
       if (!claim.meta.changes) continue;
 
-      // One live nag per chore: remove the previous nag and its sticker.
-      // Re-nags follow the first nag's home (assignee DM or the group).
-      if (f.last_message_id) await deleteNag(env, f);
-      if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
-
+      // One live nag per chore: the previous nag and its sticker come down
+      // while the new one goes out. Re-nags follow the first nag's home.
       // Loudness ladder: first re-nag is silent; later ones notify again.
       // sendNag keeps an assigned chore's re-nag as private as its first nag.
-      const ref = await sendNag(env, f,
-        overdue ? overdueHtml(r, f.fired_at, tz) : nagHtml(r, nagCount, f.cat || 'both'),
-        nagButtons(f.id, isScored(f)), { silent: nagCount === 1 });
+      const [ref] = await Promise.all([
+        sendNag(env, f,
+          overdue ? overdueHtml(r, f.fired_at, tz) : nagHtml(r, nagCount, f.cat || 'both'),
+          nagButtons(f.id, isScored(f)), { silent: nagCount === 1 }),
+        f.last_message_id ? deleteNag(env, f) : null,
+        f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+      ]);
       // Bound to the message id this tick read as well as the state: a /poke
       // re-sending in the same second is the other writer, and two
       // unconditional writes left one of the two cards untracked with live

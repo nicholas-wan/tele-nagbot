@@ -273,12 +273,16 @@ describe('a Telegram call that never answers', () => {
 describe('the cron tick', () => {
   const tick = async () => { await worker.scheduled({}, env, ctx()); await settle(); };
 
-  it('finds out there is nothing to do in two round trips', async () => {
+  it('finds out there is nothing to do in one round trip, cold or warm', async () => {
     sql.exec("UPDATE firings SET next_nag_at = next_nag_at + 86400000, fired_at = fired_at + 86400000");
-    await tick(); // reads the timezone once, then keeps it
+    // The due check reads the chats' timezones and the webhook inbox too, and
+    // the inbox's week-old rows wait for the 03:00 window.
+    await tick();
+    expect(ops).toHaveLength(1);
+    expect(ops[0].kind).toBe('batch');
     ops.length = 0;
     await tick();
-    expect(ops).toHaveLength(2);
+    expect(ops).toHaveLength(1);
     expect(calls).toHaveLength(0);
   });
 

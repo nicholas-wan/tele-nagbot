@@ -1,10 +1,10 @@
 // Fires one reminder: expires any stale nag, sends sticker + nag message,
 // schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
-import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage } from './tg.js';
+import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage, drainSweepStatements } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
-import { isScored, householdNames, canonName, CREDIT_SEP } from './household.js';
-import { nagButtons, nagHtml, expireFiring, deleteNag, deleteNagRef, nagChat } from './nag.js';
+import { isScored, householdNamesFrom, canonName, CREDIT_SEP } from './household.js';
+import { nagButtons, nagHtml, deleteNag, deleteNagRef, nagChat } from './nag.js';
 import { updateDashboard } from './dashboard.js';
 import { sendRandomSticker } from './stickers.js';
 
@@ -18,31 +18,56 @@ export async function fireReminder(env, r, now, tz) {
   // mid-fire drops one nag but keeps the schedule. A one-off has no next slot
   // to fall back on — NULLing at claim would kill it permanently — so it
   // takes a short lease instead, and only a completed fire finalizes to NULL.
-  const next = advanceOccurrence(
-    r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, now, tz
-  );
+  const detail = JSON.parse(r.schedule_detail);
+  const next = advanceOccurrence(r.schedule_kind, detail, r.next_fire_at, now, tz);
   const claimTo = next != null ? next : now + ONCE_LEASE_MS;
-  const claim = await env.DB.prepare(
+  const release = () => env.DB.prepare(
     'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
-  ).bind(claimTo, r.id, r.next_fire_at).run();
+  ).bind(r.next_fire_at, r.id, claimTo).run();
+
+  // A fire is three round trips: the claim with everything the fire reads
+  // (the previous nag, the roster that resolves the assignee, the rotation's
+  // tally), then the writes that make the new nag, then — after Telegram —
+  // the card's ids, a one-off's release and the sweep records, together. It
+  // used to be eight or nine one after another.
+  let claim;
+  let stale;
+  let members;
+  let tally;
+  try {
+    [claim, stale, members, tally] = await env.DB.batch([
+      env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+        .bind(claimTo, r.id, r.next_fire_at),
+      env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+      env.DB.prepare('SELECT user_id, username, first_name, last_seen FROM members WHERE chat_id = ?').bind(r.chat_id),
+      ...(detail.rotate ? [rotationStatement(env, r.chat_id, tz)] : []),
+    ]);
+  } catch (e) {
+    // The batch may have committed before its answer was lost. The swap back
+    // is bound to the claimed value, so it is a no-op when nothing committed.
+    try { await release(); } catch { /* the next tick decides */ }
+    throw e;
+  }
   if (!claim.meta.changes) return;
+  const roster = members.results || [];
 
   // Everything from the claim to the firing row existing is the danger zone: a
   // throw in here advances the schedule with no nag to show for it, and the
   // occurrence is silently gone until the next slot — "cut nails" lost its
   // 14 Aug 17:00 this way, leaving no firing row and no trace of the cause.
   // Releasing the claim on failure lets the next cron tick simply try again.
-  // The rotation pick and the stale-nag sweep are inside it too: both query
-  // D1 after the claim, and guarding only the insert left them able to lose
-  // the occurrence the same way. Both are safe to repeat on the retry.
+  // The rotation pick and the stale-nag sweep are inside it too: both are
+  // safe to repeat on the retry.
   let firingId;
+  let superseded = [];
   try {
+    const writes = [];
     // Rotation: this occurrence goes to whoever has the fewest ✅ this week.
-    if (JSON.parse(r.schedule_detail).rotate) {
-      const who = await pickRotation(env, r.chat_id, tz);
+    if (detail.rotate) {
+      const who = rotationFrom(roster, tally.results || []);
       if (who) {
-        await env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
-          .bind(who, r.id).run();
+        writes.push(env.DB.prepare('UPDATE reminders SET assignee_name = ?, assignee_user_id = NULL WHERE id = ?')
+          .bind(who, r.id));
         r.assignee_name = who;
         r.assignee_user_id = null;
       }
@@ -54,43 +79,49 @@ export async function fireReminder(env, r, now, tz) {
     // still-nagging firing dated in the future is one the household moved past
     // this very occurrence; the nag it asked for is arriving right now. That is
     // superseded, not failed, so the row is removed outright instead of being
-    // expired into /stats as "expired unclaimed".
-    const stale = await env.DB.prepare(
-      "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'"
-    ).bind(r.id).all();
-    for (const f of stale.results) {
-      if (f.fired_at <= now) {
-        await expireFiring(env, f, r, { silent: true });
-        continue;
-      }
-      // Claim it the usual way first: a Done landing mid-sweep wins and keeps
-      // its receipt, exactly as expireFiring's conditional update would.
-      const gone = await env.DB.prepare(
-        "DELETE FROM firings WHERE id = ? AND state = 'nagging'"
-      ).bind(f.id).run();
-      if (!gone.meta.changes) continue;
-      if (f.last_message_id) await deleteNag(env, f);
-      if (f.last_sticker_id) await deleteMessage(env, nagChat(f), f.last_sticker_id);
+    // expired into /stats as "expired unclaimed". Each is claimed the usual
+    // way (a Done landing mid-sweep wins and keeps its receipt), and read back
+    // after, so the card that comes down is the one it holds now.
+    const staleRows = stale.results || [];
+    const staleAt = writes.length;
+    for (const f of staleRows) {
+      writes.push(f.fired_at <= now
+        ? env.DB.prepare(
+          "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
+        ).bind(f.id, f.fired_at)
+        : env.DB.prepare("DELETE FROM firings WHERE id = ? AND state = 'nagging'").bind(f.id));
     }
-
     const intervals = JSON.parse(r.nag_intervals);
-    const ins = await env.DB.prepare(
+    const insertAt = writes.length;
+    writes.push(env.DB.prepare(
       'INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, next_nag_at, scored) VALUES (?, ?, ?, ?, ?, ?)'
     ).bind(r.id, r.chat_id, r.text, now, deferQuietHours(now + intervals[0] * 60000, tz),
-      r.scored != null ? r.scored : 1).run();
-    firingId = ins.meta.last_row_id;
+      r.scored != null ? r.scored : 1));
+    if (staleRows.length) {
+      writes.push(env.DB.prepare(
+        `SELECT * FROM firings WHERE id IN (${staleRows.map(() => '?').join(',')})`
+      ).bind(...staleRows.map((f) => f.id)));
+    }
+    const out = await env.DB.batch(writes);
+    firingId = out[insertAt].meta.last_row_id;
+    const now2 = new Map(((staleRows.length ? out[out.length - 1].results : null) || []).map((f) => [f.id, f]));
+    superseded = staleRows.filter((f, i) => out[staleAt + i].meta.changes).map((f) => now2.get(f.id) || f);
   } catch (e) {
     console.log(`fire for reminder ${r.id} failed before the nag existed, releasing claim: ${e.stack || e}`);
-    await env.DB.prepare(
-      'UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?'
-    ).bind(r.next_fire_at, r.id, claimTo).run();
+    await release();
     throw e;
   }
+
+  // The superseded nag's card and sticker come down while the new one goes out.
+  const cleanup = Promise.all(superseded.flatMap((f) => [
+    f.last_message_id ? deleteNag(env, f) : null,
+    f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+  ]));
 
   // An assigned chore nags only the person it is for: the message lives in the
   // group but Telegram shows it to that member alone. Unassigned chores are
   // everyone's problem and stay public.
-  const who = await assigneeUserId(env, r);
+  const who = assigneeUserIdFrom(r, roster);
   let sent = null;
   let ref = null;
   let s = { messageId: null, cat: 'both' };
@@ -109,29 +140,32 @@ export async function fireReminder(env, r, now, tz) {
     sent = await sendMessage(env, r.chat_id, nagHtml(r, 0, s.cat), nagButtons(firingId, isScored(r)));
     ref = msgRef(sent);
   }
+  await cleanup;
   // The row was inserted with no message; only a still-nagging row with none
   // takes this one. A Done (from /done <chore>, or a reply) that landed in the
   // few ms since the insert has already ended the firing — its receipt was
   // drawn on no card, so the card just sent would stay live forever.
-  const upd = await env.DB.prepare(
-    `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
-       cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL
-       AND nag_user_id IS NULL`
-  ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
-    ref && ref.ephemeral ? who : null, firingId).run();
+  // Fire completed: a one-off releases its lease and goes dormant, in the same
+  // batch. If the lease expired mid-fire and a retry re-fired, the stale sweep
+  // above has already replaced the earlier nag.
+  const [upd] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
+         cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL
+         AND nag_user_id IS NULL`
+    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
+      ref && ref.ephemeral ? who : null, firingId),
+    ...(next == null ? [env.DB.prepare(
+      'UPDATE reminders SET next_fire_at = NULL WHERE id = ? AND next_fire_at = ?'
+    ).bind(r.id, claimTo)] : []),
+    ...drainSweepStatements(env),
+  ]);
   if (!upd.meta.changes) {
     const orphan = { chat_id: r.chat_id, nag_chat_id: null, nag_user_id: ref && ref.ephemeral ? who : null };
-    if (ref) await deleteNagRef(env, orphan, ref);
-    if (s.messageId) await deleteMessage(env, r.chat_id, s.messageId);
-  }
-
-  // Fire completed: a one-off releases its lease and goes dormant. If the
-  // lease expired mid-fire and a retry re-fired, the stale sweep above has
-  // already replaced the earlier nag.
-  if (next == null) {
-    await env.DB.prepare(
-      'UPDATE reminders SET next_fire_at = NULL WHERE id = ? AND next_fire_at = ?'
-    ).bind(r.id, claimTo).run();
+    await Promise.all([
+      ref ? deleteNagRef(env, orphan, ref) : null,
+      s.messageId ? deleteMessage(env, r.chat_id, s.messageId) : null,
+    ]);
   }
 
   await updateDashboard(env, r.chat_id);
@@ -139,9 +173,10 @@ export async function fireReminder(env, r, now, tz) {
 
 // The assignee's numeric id, which is what an ephemeral send addresses.
 // Assignment stores a display name (the editor deliberately nulls the id), so
-// the name is resolved back through members. No dm_ok gate any more: the nag
-// stays in the group, so the member never has to open a private chat first.
-async function assigneeUserId(env, r) {
+// the name is resolved back through members — the rows the claim's batch
+// read. No dm_ok gate any more: the nag stays in the group, so the member
+// never has to open a private chat first.
+function assigneeUserIdFrom(r, roster) {
   if (!r.assignee_name && !r.assignee_user_id) return null;
   if (r.assignee_user_id) return r.assignee_user_id;
   // Stored names come from senderName: "@handle" for a member who has a
@@ -156,10 +191,7 @@ async function assigneeUserId(env, r) {
   // chore must never do. One pass over the chat's members covers both columns.
   const name = String(r.assignee_name).trim();
   const bare = name.replace(/^@/, '').toLowerCase();
-  const { results } = await env.DB.prepare(
-    'SELECT user_id, username, first_name, last_seen FROM members WHERE chat_id = ?'
-  ).bind(r.chat_id).all();
-  const rows = [...(results || [])].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+  const rows = [...(roster || [])].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
   const match = (col) => rows.find((m) => String(m[col] || '').trim().toLowerCase() === bare);
   const row = name.startsWith('@')
     ? match('username')
@@ -178,24 +210,30 @@ async function assigneeUserId(env, r) {
 // work. Counting only scored ones left a rotating /remind chore at 0/0 for
 // everyone, so the alphabetical tiebreak handed every occurrence to the same
 // person. The leaderboard keeps its own scored filter in stats.js.
-async function pickRotation(env, chatId, tz) {
-  const { roster, aliases } = await householdNames(env, chatId);
+//
+// The tally is counted in SQL, one row per distinct credit, rather than every
+// done row of the last six months coming back to be counted here.
+function rotationStatement(env, chatId, tz) {
+  return env.DB.prepare(
+    `SELECT done_by, COUNT(*) AS total, SUM(CASE WHEN done_at > ? THEN 1 ELSE 0 END) AS week
+     FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL GROUP BY done_by`
+  ).bind(weekStart(Date.now(), tz), chatId);
+}
+
+function rotationFrom(memberRows, tally) {
+  const { roster, aliases } = householdNamesFrom(memberRows);
   if (!roster.size) return null;
-  const { results } = await env.DB.prepare(
-    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL"
-  ).bind(chatId).all();
-  const ws = weekStart(Date.now(), tz);
   const stats = new Map();
   for (const name of roster) stats.set(name, { week: 0, total: 0 });
-  for (const row of results || []) {
+  for (const row of tally || []) {
     for (const p of String(row.done_by).split(CREDIT_SEP)) {
       if (!p.trim()) continue;
       // "jane" credited by hand is the roster's "@jane" (or "@janedoe" by first
       // name); an ambiguous spelling counts for nobody, and anyone else is a ghost.
       const s = stats.get(canonName(roster, p.trim(), aliases));
       if (!s) continue;
-      s.total++;
-      if (row.done_at > ws) s.week++;
+      s.total += Number(row.total) || 0;
+      s.week += Number(row.week) || 0;
     }
   }
   const sorted = [...stats.entries()].sort((a, b) =>

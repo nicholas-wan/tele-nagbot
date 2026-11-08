@@ -22,6 +22,14 @@ export async function getTz(env, chatId) {
   return tz;
 }
 
+// A timezone read in a batch of the caller's own (the cron's due check reads
+// every chat's settings row anyway), remembered as getTz would remember it.
+export function primeTz(env, chatId, tz) {
+  let byChat = tzCache.get(env.DB);
+  if (!byChat) tzCache.set(env.DB, byChat = new Map());
+  byChat.set(chatId, { tz: tz || 'Asia/Singapore', at: Date.now() });
+}
+
 export function senderName(from) {
   return from.username ? `@${from.username}` : from.first_name || 'someone';
 }

@@ -204,7 +204,7 @@ describe('ephemeral interactions', () => {
   function fireEnv(reminder, member) {
     return {
       BOT_TOKEN: 'token', ALLOWED_CHATS: '1',
-      DB: {
+      DB: withBatch({
         prepare(sql) {
           return {
             bind() {
@@ -225,7 +225,7 @@ describe('ephemeral interactions', () => {
             },
           };
         },
-      },
+      }),
     };
   }
 

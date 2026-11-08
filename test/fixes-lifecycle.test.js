@@ -48,6 +48,17 @@ function makeDb({ firings = [], reminder = null, settings = null, members = [],
           // Members come back in insertion order, never sorted: picking the
           // right one among namesakes is the caller's job now, not SQL's.
           if (sql.includes('FROM members')) return { results: members };
+          if (sql.includes('SELECT done_by') && sql.includes('GROUP BY done_by')) {
+            // The rotation's tally, counted per credit as the SQL counts it.
+            const tally = new Map();
+            for (const c of credits) {
+              const t = tally.get(c.done_by) || { done_by: c.done_by, total: 0, week: 0 };
+              t.total++;
+              if (c.done_at > args[0]) t.week++;
+              tally.set(c.done_by, t);
+            }
+            return { results: [...tally.values()] };
+          }
           if (sql.includes('SELECT done_by')) return { results: credits };
           if (sql.includes("FROM firings WHERE reminder_id")) return { results: nagging() };
           if (sql.includes("FROM firings WHERE chat_id")) return { results: nagging() };

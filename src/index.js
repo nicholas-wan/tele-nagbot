@@ -44,13 +44,17 @@ export default {
         return new Response('temporarily unavailable', { status: 503 });
       }
       if (accepted === 'rejected') return new Response('ok');
+      // A claim recovered after a batch error says whether its roster write
+      // went with it (acceptUpdate).
+      const memberRecorded = typeof accepted === 'object' ? accepted.memberRecorded : true;
+      if (typeof accepted === 'object') accepted = accepted.result;
       // Stored and claimed in one round trip (acceptUpdate). A repeated POST
       // of the same update claims nothing and is only acknowledged. Handling
       // starts on the next microtask, so the toast capture below is armed
       // before anything can answer.
       const handling = Promise.resolve().then(async () => {
         if (accepted === 'claimed') {
-          await runClaimedUpdate(env, update, { memberRecorded: true });
+          await runClaimedUpdate(env, update, { memberRecorded });
         } else if (update.callback_query?.id) {
           await answerCallback(env, update.callback_query.id, 'Already received 👍');
         }
