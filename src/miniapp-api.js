@@ -19,7 +19,7 @@ import {
 } from './household.js';
 import {
   choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, boardStatements, boardFrom,
-  deferBoards, flushBoards, later, takeRides,
+  deferBoards, flushBoards, later, takeRides, fmtWhen,
 } from './dashboard.js';
 import { completeNow, editorPlan, flagPlan, skipPlan, JUST_FIRED, NAG_PACES } from './manage.js';
 import {
@@ -317,7 +317,7 @@ const routes = [
     const snap = await snapshot(env, chatId, tz, [plan.statement, ...pending.splice(0)]);
     if (!snap.before[0].meta.changes) return json({ ok: false, message: JUST_FIRED });
     await updateDashboard(env, chatId);
-    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtLocal(plan.next, tz)}` }, [], snap);
+    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtWhen(plan.next, tz)}` }, [], snap);
   }, { chore: true }],
 
   ['POST', /^chore\/(\d+)\/(pause|resume)$/, async ({ env, chatId, tz, user, r, match, pending }) => {
@@ -326,7 +326,7 @@ const routes = [
     if (!pause && !r.paused) return json({ ok: false, message: 'It isn\'t paused.' });
     const state = await setReminderPaused(env, r, pause, tz, senderName(user));
     const message = pause ? '⏸️ Paused'
-      : state.next != null ? `▶️ Resumed — next ${fmtLocal(state.next, tz)}`
+      : state.next != null ? `▶️ Resumed — next ${fmtWhen(state.next, tz)}`
       : state.firing ? '▶️ Resumed — it is nagging again'
       : '▶️ Resumed, but it already fired and has nothing scheduled.';
     return choreReply(env, chatId, r.id, tz, user, { message }, pending);
@@ -402,7 +402,7 @@ const routes = [
     await updateDashboard(env, chatId);
     await later(env, () => fireIfDue(env, id, tz, { dueAt: p.firstFireAt }));
     return choreReply(env, chatId, id, tz, user, {
-      message: `📝 Added — first reminder ${fmtLocal(p.firstFireAt, tz)}`, undo: { kind: 'add', id },
+      message: `📝 Added — first nag ${fmtWhen(p.firstFireAt, tz)}`, undo: { kind: 'add', id },
     }, [], snap);
   }],
 

@@ -243,7 +243,7 @@ describe('pause, skip and delete', () => {
     expect((await call('chore/8/pause', {})).chore.state).toBe('paused');
     expect(await call('chore/8/pause', {})).toMatchObject({ ok: false, message: 'It is already paused.' });
     const resumed = await call('chore/8/resume', {});
-    expect(resumed.message).toBe('▶️ Resumed — next Tue, Oct 13, 7:00 PM');
+    expect(resumed.message).toBe('▶️ Resumed — next in 3 days · Tue 7:00 PM');
     expect(reminder(8).paused).toBe(0);
   });
 
@@ -334,7 +334,7 @@ describe('adding a chore', () => {
   it('reads what /chore reads, and puts it on the board', async () => {
     const res = await call('chores', { text: 'trash 7pm daily', scored: true });
     expect(res.ok).toBe(true);
-    expect(res.message).toBe('📝 Added — first reminder Sun, Oct 11, 7:00 PM');
+    expect(res.message).toBe('📝 Added — first nag tomorrow 7:00 PM');
     const added = sql.prepare("SELECT * FROM reminders WHERE text = 'trash'").get();
     expect(added).toMatchObject({ schedule_kind: 'daily', scored: 1, created_by: '@nicholaswan', display_num: 3 });
     expect(res.chore.text).toBe('trash');

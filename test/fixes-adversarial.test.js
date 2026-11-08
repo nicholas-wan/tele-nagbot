@@ -279,3 +279,17 @@ describe('durable webhook deduplication', () => {
     expect(log.mock.calls.flat().some((line) => String(line).includes('rejected chat -1009999 (supergroup) "Home"'))).toBe(true);
   });
 });
+
+describe('the delete log\'s Undo', () => {
+  it('will not restore a finished one-off from its ↩️ Not done stash', async () => {
+    reminder({ schedule_kind: 'once' });
+    await completeEarly(env, r(), '@alice', TZ);
+    expect(r()).toBeUndefined();
+    const stash = sql.prepare('SELECT id FROM trash').get().id;
+    await tap(`t:${stash}`);
+    expect(r()).toBeUndefined();
+    expect(count('trash')).toBe(1);
+    const toast = calls.find((c) => c.method === 'answerCallbackQuery');
+    expect(toast.body.text).toMatch(/Too late/);
+  });
+});

@@ -992,19 +992,20 @@ async function handleCallback(env, cb) {
   if (tr) {
     // The stash is read and claimed in one round trip: two taps on the same
     // Undo used to restore twice. Only a stashed chore can be claimed — a
-    // nested chore's reset record (`_cover`, nesting.js) lives in trash too,
-    // and ↩️ Not done needs it.
+    // nested chore's reset record (`_cover`, nesting.js) and a finished
+    // one-off's Undo stash (`_firing`) live in trash too, and ↩️ Not done needs
+    // them; restoring the one-off from here would leave its done row behind.
     const [read, claim] = await env.DB.batch([
       env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?').bind(+tr[1], cb.message.chat.id),
       env.DB.prepare(
         `DELETE FROM trash WHERE id = ? AND chat_id = ? AND json_extract(payload, '$._cover') IS NULL
-           AND json_extract(payload, '$.id') IS NOT NULL`
+           AND json_extract(payload, '$._firing') IS NULL AND json_extract(payload, '$.id') IS NOT NULL`
       ).bind(+tr[1], cb.message.chat.id),
     ]);
     const row = (read.results || [])[0];
     if (!row) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
     const r = JSON.parse(row.payload);
-    if (r._cover != null || r.id == null) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
+    if (r._cover != null || r._firing != null || r.id == null) return answerCallback(env, cb.id, 'Too late — that one is gone for good.');
     if (!claim.meta.changes) return answerCallback(env, cb.id, 'Already restored.');
     await restoreReminder(env, r);
     await answerCallback(env, cb.id, 'Restored 😺');
