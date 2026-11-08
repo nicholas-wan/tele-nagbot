@@ -19,7 +19,7 @@ import {
 } from './household.js';
 import {
   choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, boardStatements, boardFrom,
-  deferBoards, flushBoards, later,
+  deferBoards, flushBoards, later, takeRides,
 } from './dashboard.js';
 import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
 import { reminderInsert, deleteReminder, removalStatements, fireIfDue, setReminderPaused } from './chores.js';
@@ -146,8 +146,19 @@ function summary({ r, state, lead, live, cadence }, names = new Map()) {
 // the list, once for the chore — at three round trips apiece.
 // `before`: writes that ride in the same batch, ahead of the reads (an edit,
 // the roster refresh), answered in `before`.
+// Writes queued to ride with the answer (withReply: a nested chore's cover)
+// go last among them, and get their results back from it.
 async function snapshot(env, chatId, tz, before = []) {
-  const loaded = await loadBoard(env, chatId, { members: true, before });
+  const rides = takeRides(env);
+  let loaded;
+  try {
+    loaded = await loadBoard(env, chatId, { members: true, before: [...before, ...rides.statements] });
+  } catch (error) {
+    rides.fail(error);
+    throw error;
+  }
+  rides.settle(loaded.before.slice(before.length));
+  loaded.before = loaded.before.slice(0, before.length);
   return snapshotFrom(env, chatId, tz, loaded);
 }
 

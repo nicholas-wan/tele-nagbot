@@ -77,14 +77,19 @@ async function initData({ user = nick, startParam = 'g1', token = TOKEN, ...fiel
   return new URLSearchParams(signed).toString();
 }
 
+const tasks = [];
 async function call(path, body, opts = {}) {
   const auth = opts.auth === undefined ? await initData(opts) : opts.auth;
   const response = await worker.fetch(new Request(`https://nag.test/api/app/${path}`, {
     method: body ? 'POST' : 'GET',
     headers: { ...(auth ? { Authorization: `tma ${auth}` } : {}), 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
-  }), env, { waitUntil() {} });
-  return { status: response.status, ...await response.json() };
+  }), env, { waitUntil: (task) => tasks.push(task) });
+  const answer = { status: response.status, ...await response.json() };
+  // What follows the answer (the receipt, the board) has finished too.
+  for (let i = 0; i < tasks.length; i++) await tasks[i];
+  tasks.length = 0;
+  return answer;
 }
 
 const reminder = (id) => sql.prepare('SELECT * FROM reminders WHERE id = ?').get(id);

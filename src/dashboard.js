@@ -246,6 +246,7 @@ export async function choreListHtml(env, chatId, tz, loaded = null) {
 // handlers directly) draws at once.
 const BOARDS = Symbol('boards');
 const AFTER = Symbol('after');
+const RIDE = Symbol('ride');
 
 // `afterReply`: the Mini App's scope. Work handed to later() — the Telegram
 // edits, receipts and stickers that only show what the database already says
@@ -256,8 +257,38 @@ export function deferBoards(env, { afterReply = false } = {}) {
   const scoped = Object.create(env);
   scoped[BOARDS] = new Set();
   scoped[SWEEP_QUEUE] = [];
-  if (afterReply) scoped[AFTER] = [];
+  if (afterReply) {
+    scoped[AFTER] = [];
+    scoped[RIDE] = [];
+  }
   return scoped;
+}
+
+// Writes that can wait for the batch the Mini App's answer reads (a nested
+// chore's cover): queued there, so the answer already shows them, and their
+// results come back once that batch has run. Without that scope they are a
+// batch of their own, sent at once. Nothing in the request may wait on the
+// promise before its answer is built — only work handed to later().
+export function withReply(env, statements) {
+  if (!env[RIDE]) return env.DB.batch(statements);
+  return new Promise((resolve, reject) => env[RIDE].push({ statements, resolve, reject }));
+}
+
+// The queued writes, for the batch that carries them: `statements` to send,
+// `settle(results)` with their answers, `fail(error)` if the batch failed.
+export function takeRides(env) {
+  const rides = env[RIDE] ? env[RIDE].splice(0) : [];
+  return {
+    statements: rides.flatMap((ride) => ride.statements),
+    settle(results) {
+      let at = 0;
+      for (const ride of rides) {
+        ride.resolve(results.slice(at, at + ride.statements.length));
+        at += ride.statements.length;
+      }
+    },
+    fail(error) { for (const ride of rides) ride.reject(error); },
+  };
 }
 
 export async function later(env, task) {
@@ -278,6 +309,15 @@ export function boardDrawn(env, chatId) {
 // Everything the scope put off, in order: the after-reply work, each board
 // once, then the sweep records of every message sent along the way.
 export async function flushBoards(env) {
+  // Writes no answer carried (a route that refused, or failed) go first.
+  const rides = takeRides(env);
+  if (rides.statements.length) {
+    try {
+      rides.settle(await env.DB.batch(rides.statements));
+    } catch (e) {
+      rides.fail(e);
+    }
+  }
   const after = env[AFTER];
   while (after && after.length) {
     try {

@@ -575,10 +575,12 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
   if (onClaim) await onClaim();
   // The receipt is the shared record — there is no nag message to edit. The
   // next slot is the one this batch just wrote.
-  const covered = await coverChildren(env, r, firingId, tz, { nested: await nested });
+  const { names: covered } = await coverChildren(env, r, firingId, tz, { nested: await nested });
   const next = r.schedule_kind === 'once' ? null : { next_fire_at: nextFireAt };
-  const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId, covered);
-  await later(env, () => sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS }));
+  await later(env, async () => {
+    const receipt = earlyReceipt(r.text, credit, next && next.next_fire_at, tz, firingId, await covered);
+    await sendMessage(env, r.chat_id, receipt.html, receipt.markup, { silent: true, ttl: RECEIPT_TTL_MS });
+  });
   await updateDashboard(env, r.chat_id);
   return firingId;
 }

@@ -662,6 +662,24 @@ describe('the Mini App, round trips before its answer', () => {
     expect(n).toBe(3);
   });
 
+  it('Done early on a parent: three, the reset of the chore under it inside the answer\'s batch', async () => {
+    sql.exec(`INSERT INTO reminders (id, chat_id, display_num, text, schedule_kind, schedule_detail, nag_intervals,
+        next_fire_at, paused, created_at, scored, parent_id)
+      VALUES (10, 1, 3, 'shake neakasa', 'interval', '{"days":3,"h":21,"mi":0}', '[15,30,60]', ${NOW + DAY}, 0,
+        ${NOW - 30 * DAY}, 1, 9)`);
+    const before = (await appWaves('chore/10')).reply.chore.status;
+    const { reply, waves: n } = await appWaves('chore/9/done', {});
+    expect(reply).toMatchObject({ ok: true, message: 'Done early 😻' });
+    expect(n).toBe(3);
+    // The answer already shows the child restarted from now.
+    expect(sql.prepare('SELECT next_fire_at FROM reminders WHERE id = 10').get().next_fire_at).toBeGreaterThan(NOW + DAY);
+    expect(reply.chores.find((c) => c.id === 10).status).not.toBe(before);
+    await settle();
+    const receipt = calls.find((c) => c.method === 'sendMessage' && /done early/.test(c.body.text));
+    expect(receipt.body.text).toMatch(/Resets too: shake neakasa/);
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM trash WHERE json_extract(payload, '$._cover') IS NOT NULL").get().n).toBe(1);
+  });
+
   it('an edit and an add: two, the write inside the answer\'s batch', async () => {
     const edit = await appWaves('chore/9/edit', { field: 'nag', value: '30' });
     expect(edit.reply.chore.paceKey).toBe('30');
@@ -928,7 +946,7 @@ describe('the chat\'s timezone and stickers', () => {
     expect(ops.slice(1).some(cached)).toBe(false);
   });
 
-  it('ride in the Mini App\'s gate for a change, and in the cron\'s due check', async () => {
+  it('ride in the Mini App\'s gate for a change', async () => {
     const fields = { auth_date: String(Math.floor(NOW / 1000)), start_param: 'g1', user: JSON.stringify(nick) };
     fields.hash = await signInitData(TOKEN, fields);
     await worker.fetch(new Request('https://nag.test/api/app/chore/8/done', {

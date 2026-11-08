@@ -348,8 +348,7 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
   const picking = isEphemeralNag(firing) ? Promise.resolve(null) : pickCelebration(env, nagChat(firing), firing.id);
-  const covered = await coverChildren(env, reminder, firing.id, tz, { nested: claimed.nested });
-  const also = coverLine(covered);
+  const { names: covered } = await coverChildren(env, reminder, firing.id, tz, { nested: claimed.nested });
   // A finished one-off goes to the trash rather than straight out, so that
   // ↩️ Not done can bring it back for as long as the trash keeps it. Stash
   // and removal are one batch: the claim's own, unless the claim was made
@@ -365,7 +364,7 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   // page's answer (later): the database already says the chore is done, and
   // these only show it.
   const show = async () => {
-    const pick = await picking;
+    const [pick, also] = await Promise.all([picking, covered.then(coverLine)]);
     const purr = pick && pick.cat === 'latte' ? 'Latte purrs approvingly.'
       : pick && pick.cat === 'mocha' ? 'Mocha purrs approvingly.'
       : 'The cats purr approvingly.';

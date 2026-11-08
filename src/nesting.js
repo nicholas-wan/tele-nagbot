@@ -19,7 +19,7 @@ import { deleteMessage, esc } from './tg.js';
 import { nextOccurrence, deferQuietHours } from './time.js';
 import { deleteNag, nagChat, firingCard } from './nag.js';
 import { redrawNag } from './chores.js';
-import { later } from './dashboard.js';
+import { later, withReply } from './dashboard.js';
 
 // Every chore that sits under `parentId`, at any depth, in tier order. One
 // read of the chat's nested chores, walked here: a query per tier used to put
@@ -72,25 +72,29 @@ export async function nestedReads(env, chatId) {
   return { reminders: reminders.results || [], live: live.results || [] };
 }
 
-// Covers every chore under `parent` after its completion won. Returns the
-// names of the chores it reset, for the receipt; [] when there are none.
-// Never throws: the parent's Done has already been claimed, and a reset that
-// failed must not leave that Done without its receipt.
+// Covers every chore under `parent` after its completion won. Returns
+// { names }: a promise of the names of the chores it reset, for the receipt —
+// [] when there are none. It never rejects: the parent's Done has already
+// been claimed, and a reset that failed must not leave that Done without its
+// receipt.
 //
 // Every child's writes — its live nags taken down, an interval restarted —
 // are conditional and independent, so they go in one batch, each judged by
-// its own change count. The cards come down after (later), as a Done's own
-// card does.
+// its own change count; in the Mini App, the batch its answer reads
+// (withReply), so the answer shows the resets without a round trip of their
+// own. That is why only the receipt, which is sent after (later), waits for
+// the names. The cards come down after too, as a Done's own card does.
 export async function coverChildren(env, parent, parentFiringId, tz, { nested = null } = {}) {
   const covered = [];
   const now = Date.now();
+  let write = Promise.resolve([]);
+  const steps = [];
   try {
     // `nested`: nestedReads' answer, when the claim read it alongside.
     const known = nested || await nestedReads(env, parent.chat_id);
     const children = descendantsIn(known.reminders, parent.id)
       .filter((r) => !r.paused && r.schedule_kind !== 'once');
     const statements = [];
-    const steps = [];
     for (const r of children) {
       const rec = { r, removed: [], after: null };
       for (const f of known.live.filter((x) => x.reminder_id === r.id)) {
@@ -109,38 +113,49 @@ export async function coverChildren(env, parent, parentFiringId, tz, { nested = 
       }
       covered.push(rec);
     }
-    const results = statements.length ? await env.DB.batch(statements) : [];
+    if (statements.length) write = withReply(env, statements);
+  } catch (e) {
+    console.log(`covering the chores under ${parent.id} failed: ${e.stack || e}`);
+  }
+  const settled = write.then((results) => {
     steps.forEach((step, i) => {
       if (!results[i].meta.changes) return;
       if (step.firing) step.rec.removed.push(step.firing);
       else step.rec.after = step.restart;
     });
-    const gone = covered.flatMap((c) => c.removed);
-    if (gone.length) {
-      await later(env, () => Promise.all(gone.flatMap((f) => [
-        f.last_message_id ? deleteNag(env, f) : null,
-        f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
-      ])));
-    }
-  } catch (e) {
+    return {
+      gone: covered.flatMap((c) => c.removed),
+      reset: covered.filter((c) => c.removed.length || c.after != null)
+        .map(({ r, removed, after }) => ({ id: r.id, text: r.text, before: r.next_fire_at, after, firings: removed })),
+    };
+  }).catch((e) => {
     console.log(`covering the chores under ${parent.id} failed: ${e.stack || e}`);
-  }
-  const reset = covered.filter((c) => c.removed.length || c.after != null)
-    .map(({ r, removed, after }) => ({ id: r.id, text: r.text, before: r.next_fire_at, after, firings: removed }));
-  // The record ↩️ Not done puts the children back from. Only the receipt
-  // offers that, and the receipt is sent after this (later, in order), so in
-  // the Mini App the record waits for the answer too.
-  if (reset.length && parentFiringId) {
-    await later(env, async () => {
-      try {
-        await env.DB.prepare('INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)')
-          .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: reset }), now).run();
-      } catch (e) {
-        console.log(`stashing the reset under ${parent.id} failed: ${e.stack || e}`);
-      }
-    });
-  }
-  return reset.map((c) => c.text);
+    return { gone: [], reset: [] };
+  });
+  // The record ↩️ Not done puts the children back from, and the cards that
+  // came down. Only the receipt offers ↩️ Not done, and it waits for the
+  // names, which wait for the record. In the Mini App this runs after the
+  // answer (later), with the rest of what Telegram has to show; anywhere
+  // else, now.
+  let recorded;
+  const written = new Promise((resolve) => { recorded = resolve; });
+  await later(env, async () => {
+    try {
+      const { gone, reset } = await settled;
+      await Promise.all([
+        ...gone.flatMap((f) => [
+          f.last_message_id ? deleteNag(env, f) : null,
+          f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
+        ]),
+        reset.length && parentFiringId ? env.DB.prepare('INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)')
+          .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: reset }), now).run()
+          .catch((e) => console.log(`stashing the reset under ${parent.id} failed: ${e.stack || e}`)) : null,
+      ]);
+    } finally {
+      recorded();
+    }
+  });
+  return { names: written.then(() => settled).then(({ reset }) => reset.map((c) => c.text)) };
 }
 
 // The names a parent's done reset, read back from its stash, for a receipt
