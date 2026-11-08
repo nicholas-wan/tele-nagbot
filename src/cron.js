@@ -12,40 +12,85 @@ import { fireReminder } from './firing.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
 import { recoverUpdates } from './updates.js';
 
+// What this tick has to do, in one round trip. Nearly every minute the answer
+// is "nothing", and each step used to find that out with a query of its own.
+// Anything that comes due after this read — seconds later, or because an
+// earlier step made it so — is simply picked up by the next tick.
+async function dueThisTick(env, now) {
+  const exists = (sql, ...args) => env.DB.prepare(`SELECT EXISTS(${sql}) AS due`).bind(...args);
+  const [wake, fire, renag, drafts, sweep, paused, digestChats, weeklyChats] = await env.DB.batch([
+    exists('SELECT 1 FROM settings WHERE paused_until IS NOT NULL AND paused_until <= ?', now),
+    exists('SELECT 1 FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?', now),
+    exists(`SELECT 1 FROM firings WHERE state = 'nagging'
+      AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)`, now, now - EXPIRE_AFTER_MS),
+    exists('SELECT 1 FROM drafts WHERE created_at < ? UNION ALL SELECT 1 FROM trash WHERE created_at < ?',
+      now - 86400000, now - 86400000),
+    exists(`SELECT 1 FROM sent_messages s WHERE s.delete_after <= ?
+      AND NOT EXISTS (SELECT 1 FROM firings f WHERE f.state = 'nagging'
+        AND f.chat_id = s.chat_id AND f.last_message_id = s.message_id
+        AND f.last_message_ephemeral = s.is_ephemeral)`, now),
+    env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
+    env.DB.prepare('SELECT DISTINCT chat_id FROM reminders'),
+    env.DB.prepare('SELECT DISTINCT chat_id FROM firings'),
+  ]);
+  const yes = (r) => Boolean(r.results && r.results[0] && r.results[0].due);
+  return {
+    wake: yes(wake), fire: yes(fire), renag: yes(renag), drafts: yes(drafts), sweep: yes(sweep),
+    // Disjoint from the chats the wake step ends: those are paused_until <= now.
+    paused: new Set((paused.results || []).map((r) => r.chat_id)),
+    digestChats: (digestChats.results || []).map((r) => r.chat_id),
+    weeklyChats: (weeklyChats.results || []).map((r) => r.chat_id),
+  };
+}
+
 export async function runCron(env) {
   const now = Date.now();
   // The pinned board is redrawn once per chat at the end of the tick, however
   // many chores fired or re-nagged in it (deferBoards).
   const tick = deferBoards(env);
-  // Vacation mode is read once for the two daily announcements, after the
-  // wake step may have ended it.
-  let paused = null;
-  const pausedNow = async () => (paused ??= await pausedChats(env, now));
+  let due;
+  try {
+    due = await dueThisTick(env, now);
+  } catch (e) {
+    // Without the answer, every step looks for itself, as it always could.
+    console.log(`cron due check failed: ${e.stack || e}`);
+    due = { wake: true, fire: true, renag: true, drafts: true, sweep: true };
+  }
   // Each step isolated: one failing must not starve the ones after it.
   const steps = {
     updates: () => recoverUpdates(env, now),
-    wake: () => wakeLapsedPauses(tick, now),
-    digests: async () => sendDigests(tick, now, await pausedNow()),
-    weekly: async () => sendWeeklyRecap(tick, now, await pausedNow()),
-    // These two read it again themselves, and only when something is due: a
-    // /pause all landing mid-tick must still stop the nags.
-    fire: () => fireDueReminders(tick, now),
-    renag: () => renagPending(tick, now),
+    wake: () => due.wake && wakeLapsedPauses(tick, now),
+    digests: () => sendDigests(tick, now, due.paused, due.digestChats),
+    weekly: () => sendWeeklyRecap(tick, now, due.paused, due.weeklyChats),
+    // These two read the paused chats again themselves, and only when
+    // something is due: a /pause all landing mid-tick must still stop the nags.
+    fire: () => due.fire && fireDueReminders(tick, now),
+    renag: () => due.renag && renagPending(tick, now),
     // Abandoned time-choice prompts and /delete undo stashes expire after a day.
-    drafts: () => pruneDraftsAndTrash(env, now),
+    drafts: () => due.drafts && pruneDraftsAndTrash(env, now),
     // Everything the bot said a day ago is tidied away; the pin stays.
-    sweep: () => sweepSentMessages(env, now),
+    sweep: () => due.sweep && sweepSentMessages(env, now),
     retention: () => pruneOldFirings(env, now),
   };
+  const took = [`due ${Date.now() - now}ms`];
   for (const [name, step] of Object.entries(steps)) {
+    const started = Date.now();
     try {
       await step();
     } catch (e) {
       console.log(`cron step ${name} failed: ${e.stack || e}`);
     }
+    took.push(`${name} ${Date.now() - started}ms`);
   }
+  const started = Date.now();
   await flushBoards(tick);
+  took.push(`boards ${Date.now() - started}ms`);
+  // A slow tick says where its time went, for `wrangler tail` and Workers
+  // Logs; a normal one stays quiet.
+  if (Date.now() - now > SLOW_TICK_MS) console.log(`slow cron tick ${Date.now() - now}ms: ${took.join(', ')}`);
 }
+
+const SLOW_TICK_MS = 3000;
 
 // Deletes every recorded bot message whose day is up, each through the method
 // its kind requires. A message someone already dismissed with OK just makes
@@ -92,7 +137,7 @@ async function pruneDraftsAndTrash(env, now) {
     // the sweep already removes them — only public ones need tidying here.
     if (draft.wizard_msg_id && !draft.wizard_msg_ephemeral) {
       await editMessage(env, draft.chat_id, draft.wizard_msg_id,
-        `⌛ Time picker expired for <s>${esc(draft.text)}</s>. Send /remind to start again.`,
+        `⌛ Time picker expired for <s>${esc(draft.text)}</s>. Send ${draft.scored === 0 ? '/remind' : '/chore'} to start again.`,
         { inline_keyboard: [] });
     }
     if (draft.prompt_msg_id && !draft.prompt_msg_ephemeral) {
@@ -142,10 +187,10 @@ async function pruneOldFirings(env, now) {
 }
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.
-async function sendWeeklyRecap(env, now, paused = null) {
+async function sendWeeklyRecap(env, now, paused = null, chats = null) {
   paused ??= await pausedChats(env, now);
-  const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all();
-  for (const { chat_id } of results) {
+  chats ??= (await env.DB.prepare('SELECT DISTINCT chat_id FROM firings').all()).results.map((r) => r.chat_id);
+  for (const chat_id of chats) {
     try {
       if (paused.has(chat_id)) continue;
       const tz = await getTz(env, chat_id);
@@ -167,16 +212,17 @@ async function sendWeeklyRecap(env, now, paused = null) {
       const lines = ['🏁 <b>Weekly wrap from Latte &amp; Mocha</b>'];
       if (s.people.length) {
         const [winner, winnerItems] = s.people[0];
-        const tie = s.people.length > 1 && s.people[1][1].length === winnerItems.length;
+        const top = s.people.filter(([, items]) => items.length === winnerItems.length);
+        const tie = top.length > 1;
         const streak = tie ? 0 : await winnerStreak(env, chat_id, tz, winner);
         lines.push(tie
-          ? `It's a tie at ${winnerItems.length} ✅ each — the cats demand a tiebreaker chore.`
+          ? `It's a tie between ${top.map(([who]) => esc(who)).join(' and ')} at ${winnerItems.length} ✅ each — the cats demand a tiebreaker chore.`
           : `🥇 ${esc(winner)} takes the week with ${winnerItems.length} ✅!` +
             (streak >= 1 ? ` 🔥 ${streak + 1} weeks running!` : ''));
-        for (const [who, items] of s.people) lines.push(`• ${esc(who)}: ${items.length} ✅`);
+        for (const [who, items] of s.people.slice(top.length)) lines.push(`• ${esc(who)}: ${items.length} ✅`);
       }
       if (s.expired) lines.push(`🪦 ${s.expired} expired unclaimed. The cats saw everything.`);
-      lines.push('Fresh board Monday. /stats anytime.');
+      lines.push('Scores reset Monday. /stats anytime.');
       await sendMessage(env, chat_id, lines.join('\n'), null, { silent: true });
     } catch (e) {
       console.log(`weekly recap for chat ${chat_id} failed: ${e.stack || e}`);
@@ -211,25 +257,25 @@ export async function digestView(env, chatId, firingIds, now = Date.now()) {
   const buttons = undone.map((r) => [{ text: `↩️ Not done · ${label(r.text)}`, callback_data: `nd:${r.id}` }]);
   buttons.push([okButton()]);
   if (!nagging.length) {
-    const lines = ['☀️ All caught up — nothing left hanging over from yesterday. The cats approve 😻'];
+    const lines = ['☀️ All caught up. The cats approve 😻'];
     for (const r of undone) lines.push(`😻 <s>${esc(r.text)}</s> — done by ${esc(r.done_by || 'someone')}`);
     return { html: lines.join('\n'), markup: { inline_keyboard: buttons } };
   }
   const who = (r) => r.assignee_name ? ` (${mentionHtml(r.assignee_name, r.assignee_user_id)})` : '';
-  const lines = ['☀️ Mrow. Still hanging over you from yesterday:'];
+  const lines = ['☀️ Mrow. Still waiting on:'];
   for (const r of nagging) lines.push(`• <b>${esc(r.text)}</b>${who(r)}`);
   for (const r of undone) lines.push(`😻 <s>${esc(r.text)}</s> — done by ${esc(r.done_by || 'someone')}`);
-  const rows2 = nagging.slice(0, DIGEST_BUTTONS).map((r) => [{ text: `✅ ${label(r.text)}`, callback_data: `dg:${r.id}` }]);
+  const rows2 = nagging.slice(0, DIGEST_BUTTONS).map((r) => [{ text: `✅ Done · ${label(r.text)}`, callback_data: `dg:${r.id}` }]);
   if (nagging.length > DIGEST_BUTTONS) lines.push('<i>The rest can be finished from the pinned board.</i>');
   return { html: lines.join('\n'), markup: { inline_keyboard: [...rows2, ...buttons] } };
 }
 
 // 8am local: one summary of the day's chores per chat. Skipped when there is
 // nothing due today and nothing still nagging.
-export async function sendDigests(env, now, paused = null) {
+export async function sendDigests(env, now, paused = null, chats = null) {
   paused ??= await pausedChats(env, now);
-  const { results } = await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all();
-  for (const { chat_id } of results) {
+  chats ??= (await env.DB.prepare('SELECT DISTINCT chat_id FROM reminders').all()).results.map((r) => r.chat_id);
+  for (const chat_id of chats) {
     try {
       if (paused.has(chat_id)) continue;
       const tz = await getTz(env, chat_id);
@@ -377,7 +423,7 @@ export async function renagPending(env, now, paused = null) {
       // Loudness ladder: first re-nag is silent; later ones notify again.
       // sendNag keeps an assigned chore's re-nag as private as its first nag.
       const ref = await sendNag(env, f,
-        overdue ? overdueHtml(r) : nagHtml(r, nagCount, f.cat || 'both'),
+        overdue ? overdueHtml(r, f.fired_at, tz) : nagHtml(r, nagCount, f.cat || 'both'),
         nagButtons(f.id, isScored(f)), { silent: nagCount === 1 });
       // Bound to the message id this tick read as well as the state: a /poke
       // re-sending in the same second is the other writer, and two

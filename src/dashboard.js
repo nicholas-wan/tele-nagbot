@@ -49,13 +49,20 @@ export function choreEmoji(text) {
   return '📌';
 }
 
+// 1st, 2nd, 3rd, 4th … 11th, 12th, 13th … 21st: "on the 1 at 9am" read wrong.
+export function ordinal(n) {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th';
+  return `${n}${suffix}`;
+}
+
 export function describeSchedule(r) {
   const d = JSON.parse(r.schedule_detail);
   if (r.schedule_kind === 'daily') return `daily ${fmtTime(d.h, d.mi)}`;
   if (r.schedule_kind === 'weekly') {
     return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')} ${fmtTime(d.h, d.mi)}`;
   }
-  if (r.schedule_kind === 'monthly') return `on the ${d.dom} at ${fmtTime(d.h, d.mi)}`;
+  if (r.schedule_kind === 'monthly') return `on the ${ordinal(d.dom)} at ${fmtTime(d.h, d.mi)}`;
   if (r.schedule_kind === 'interval') {
     if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''} at ${fmtTime(d.h, d.mi)}`;
     const w = d.days % 7 === 0 ? d.days / 7 : 0;
@@ -66,11 +73,11 @@ export function describeSchedule(r) {
 }
 
 // Schedule cadence without the time-of-day (list cards lead with the time).
-function cadence(r) {
+export function cadence(r) {
   const d = JSON.parse(r.schedule_detail);
   if (r.schedule_kind === 'daily') return 'daily';
   if (r.schedule_kind === 'weekly') return `every ${d.days.map((i) => DAY_NAMES[i]).join(',')}`;
-  if (r.schedule_kind === 'monthly') return `on the ${d.dom}`;
+  if (r.schedule_kind === 'monthly') return `on the ${ordinal(d.dom)}`;
   if (r.schedule_kind === 'interval') {
     if (d.months) return `every ${d.months} month${d.months > 1 ? 's' : ''}`;
     const w = d.days % 7 === 0 ? d.days / 7 : 0;
@@ -163,7 +170,7 @@ export async function choreBoard(env, chatId, tz, loaded = null) {
   for (const f of live) {
     if (!since.has(f.reminder_id) || f.fired_at < since.get(f.reminder_id)) since.set(f.reminder_id, f.fired_at);
   }
-  const sinceText = (r) => (since.has(r.id) ? ` since ${fmtSince(since.get(r.id), tz)}` : '');
+  const sinceText = (r) => (since.has(r.id) ? ` since ${fmtSince(since.get(r.id), tz).replace(/^today /, '')}` : '');
   // Parked by the household — snoozed, or postponed up to two weeks — and
   // keyed to when it comes back. "🔔 nagging now" for a fortnight said the
   // opposite of what was chosen.

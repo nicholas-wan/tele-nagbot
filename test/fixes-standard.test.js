@@ -62,11 +62,11 @@ describe('one confirmation shape', () => {
   it('says who added what, the cadence, and marks a reminder — silently', async () => {
     await say(5, '/remind pay tax 7pm daily');
     const c = sent(/added/)[0];
-    expect(c.body.text).toBe('📝 @nicholaswan added <b>pay tax</b> · <i>reminder</i>\nFirst reminder: Sat, Sep 5, 7:00 PM (daily 7pm)');
+    expect(c.body.text).toBe('📝 @nicholaswan added <b>pay tax</b> · <i>reminder</i>\nFirst nag: today 7:00 PM · daily');
     expect(c.body.disable_notification).toBe(true);
     calls.length = 0;
     await say(6, '/chore dishes 8pm');
-    expect(sent(/added/)[0].body.text).toBe('📝 @nicholaswan added <b>dishes</b>\nFirst reminder: Sat, Sep 5, 8:00 PM');
+    expect(sent(/added/)[0].body.text).toBe('📝 @nicholaswan added <b>dishes</b>\nFirst nag: today 8:00 PM');
   });
 });
 
@@ -118,7 +118,7 @@ describe('receipts', () => {
     seedReminder({});
     seedFiring({});
     await tap('d:5', { message_id: 700 });
-    expect(edits(700)[0].body.text).toContain('Done by @nicholaswan at 2:00 PM.');
+    expect(edits(700)[0].body.text).toContain('done by @nicholaswan at 2:00 PM.');
   });
 
   it('gives a Done early its way back: the slot returns and the credit goes', async () => {
@@ -134,8 +134,9 @@ describe('receipts', () => {
     expect(count('firings')).toBe(0);
     expect(reminder(10).next_fire_at).toBe(NOW + 7 * HOUR);
     expect(count('trash')).toBe(0);
-    expect(edits(99)[0].body.text).toContain('not done after all');
-    expect(sent(/not done after all, says @nicholaswan/)).toHaveLength(1);
+    // The receipt itself becomes the one line saying so.
+    expect(edits(99)[0].body.text).toContain('not done after all, says @nicholaswan');
+    expect(sent(/not done after all/)).toHaveLength(0);
     expect(toast()).toBe('Taken back ↩️');
   });
 

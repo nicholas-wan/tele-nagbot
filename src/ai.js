@@ -4,6 +4,7 @@
 // confirmation button in the wizard — it can never schedule silently.
 
 import { localParts, nextOccurrence, fmtTime } from './time.js';
+import { ordinal } from './dashboard.js';
 
 const MODEL = '@cf/meta/llama-3.1-8b-instruct';
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -59,7 +60,7 @@ function validate(j, tz, now) {
       `every ${days.map((d) => DAY_NAMES[d]).join(',')} ${fmtTime(h, mi)}`);
   }
   if (j.kind === 'monthly' && int(j.dom) && j.dom >= 1 && j.dom <= 31) {
-    return withNext('monthly', { ...detail, dom: j.dom }, tz, now, `on the ${j.dom} at ${fmtTime(h, mi)}`);
+    return withNext('monthly', { ...detail, dom: j.dom }, tz, now, `on the ${ordinal(j.dom)} at ${fmtTime(h, mi)}`);
   }
   if (j.kind === 'interval' && int(j.every_days) && j.every_days >= 2 && j.every_days <= 365) {
     // First occurrence at the next h:mi slot, matching the parser's interval rule.

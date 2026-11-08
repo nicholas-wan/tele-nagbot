@@ -72,7 +72,7 @@ it('a live nag on a child is taken down when the parent is done', async () => {
   expect(sql.prepare('SELECT * FROM firings WHERE id = ?').get(poop)).toBeUndefined();
   expect(calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === 555)).toBe(true);
   expect(next(5)).toBe(at9pm(8));
-  expect(sent().some((t) => /Done by @nicholaswan.*Resets too: clear poop, shake neakasa/s.test(t))).toBe(true);
+  expect(sent().some((t) => /done by @nicholaswan.*Resets too: clear poop, shake neakasa/s.test(t))).toBe(true);
 });
 
 it('Not done on the parent puts the children back, nag included', async () => {
@@ -176,12 +176,12 @@ it('a failing reset never blocks the parent Done', async () => {
   const wash = liveNag(43);
   const real = env.DB;
   env.DB = { ...real, prepare: (q) => {
-    if (/parent_id = \?/.test(q)) throw new Error('no such column: parent_id');
+    if (/parent_id IS NOT NULL/.test(q)) throw new Error('no such column: parent_id');
     return real.prepare(q);
   } };
   await tap(`d:${wash}`, 555);
   expect(sql.prepare('SELECT state FROM firings WHERE id = ?').get(wash).state).toBe('done');
-  expect(sent().some((t) => /Done by @nicholaswan/.test(t))).toBe(true);
+  expect(sent().some((t) => /done by @nicholaswan/.test(t))).toBe(true);
 });
 
 it('a deleted and restored child keeps its place', async () => {

@@ -353,11 +353,11 @@ export function parseRemind(argsRaw, fullText, entities, nowMs, tz, nicknames = 
       throw err;
     }
     throw new ParseError(
-      'I could not find a time. Examples:\n' +
-      '/remind take out trash 7pm daily\n' +
-      '/remind @jane water plants every mon,thu 8am\n' +
-      '/remind pay rent on the 1st 10am\n' +
-      '/remind call the plumber tomorrow 9:30am\n' +
+      'The cats couldn\'t find a time. Try:\n' +
+      '/chore take out trash 7pm daily\n' +
+      '/chore @jane water plants every mon,thu 8am\n' +
+      '/chore pay rent on the 1st 10am\n' +
+      '/chore call the plumber tomorrow 9:30am\n' +
       '/remind check the oven in 20m'
     );
   }
@@ -494,7 +494,7 @@ function cleanText(args) {
 
 function finish(args, out) {
   const text = cleanText(args);
-  if (!text) throw new ParseError('The reminder needs some text, e.g. /remind take out trash 7pm daily');
+  if (!text) throw new ParseError('The chore needs some text, e.g. /chore take out trash 7pm daily');
   validateText(text);
   return { ...out, text };
 }

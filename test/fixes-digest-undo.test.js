@@ -70,7 +70,7 @@ describe('the 8am digest', () => {
     seedFiring({ id: 6, reminder_id: 11, reminder_text: 'cut nails', fired_at: EIGHT_AM + 13 * HOUR, next_nag_at: EIGHT_AM + 13 * HOUR, last_message_id: 701 });
     seedFiring({ id: 7, reminder_id: 12, reminder_text: 'dishes', fired_at: EIGHT_AM - 2 * HOUR, next_nag_at: EIGHT_AM + HOUR, snoozed_until: EIGHT_AM + HOUR, last_message_id: 702 });
     await sendDigests(env, EIGHT_AM);
-    const d = sent(/hanging over/)[0];
+    const d = sent(/Still waiting on/)[0];
     expect(d.body.text).toContain('clear poop');
     expect(d.body.text).not.toContain('cut nails');
     expect(d.body.text).not.toContain('dishes');
@@ -82,14 +82,14 @@ describe('the 8am digest', () => {
     seedReminder({});
     seedFiring({ fired_at: EIGHT_AM - 2 * HOUR });
     await sendDigests(env, EIGHT_AM);
-    const markup = sent(/hanging over/)[0].body.reply_markup;
+    const markup = sent(/Still waiting on/)[0].body.reply_markup;
     calls.length = 0;
     await tap('dg:5', { text: '☀️ digest', markup });
     expect(firing(5)).toMatchObject({ state: 'done', done_by: '@nicholaswan' });
     const after = edits(99)[0];
     expect(after.body.text).toContain('<s>clear poop</s> — done by @nicholaswan');
     expect(buttons(after.body.reply_markup)).toEqual(['nd:5', 'ok']);
-    expect(toast()).toContain('Not done is below');
+    expect(toast()).toContain('Not done is right there');
 
     calls.length = 0;
     await tap('nd:5', { text: after.body.text, markup: after.body.reply_markup });
@@ -114,7 +114,7 @@ describe('↩️ Not done', () => {
     expect(reminder(10)).toBeUndefined();
     expect(count('trash')).toBe(1);
     const receipt = edits(700)[0];
-    expect(receipt.body.text).toContain('Done by @nicholaswan');
+    expect(receipt.body.text).toContain('done by @nicholaswan');
     expect(buttons(receipt.body.reply_markup)).toEqual(['nd:5', 'ok']);
 
     calls.length = 0;

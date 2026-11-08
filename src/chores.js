@@ -8,7 +8,7 @@ import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
 import { deleteNag, nagChat, nagRef, showPausedCard, editNag, sendNag, deleteNagRef,
          completeFiring, isHouseholdDeferred, isOverdue, firingCard, stashStatement, OVERDUE_NAG_MIN } from './nag.js';
-import { updateDashboard, describeSchedule } from './dashboard.js';
+import { updateDashboard, cadence, fmtWhen } from './dashboard.js';
 import { fireReminder } from './firing.js';
 import { coverChildren, uncoverChildren, coverLine } from './nesting.js';
 
@@ -44,7 +44,7 @@ export async function findReminder(env, chatId, args, cmd = 'delete') {
     const num = parseInt(raw, 10);
     const r = results.find((x) => x.display_num === num);
     if (r) return r;
-    throw new ParseError(`No reminder ${num} here. See /list.`);
+    throw new ParseError(`No chore ${num} here. See /list.`);
   }
   const q = raw.toLowerCase();
   // A name typed in full means that chore, even when a longer one contains it:
@@ -91,10 +91,10 @@ export async function createReminder(env, chatId, p, by, tz) {
 function confirmHtml(by, p, tz) {
   const forWho = p.assigneeName ? ` for ${mentionHtml(p.assigneeName, p.assigneeUserId)}` : '';
   const kind = isScored({ scored: p.scored }) ? '' : ' · <i>reminder</i>';
-  const cadence = p.kind !== 'once'
-    ? ` (${describeSchedule({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })})` : '';
+  const each = p.kind !== 'once'
+    ? ` · ${cadence({ schedule_kind: p.kind, schedule_detail: JSON.stringify(p.detail) })}` : '';
   return `📝 ${esc(by)} added <b>${esc(p.text)}</b>${forWho}${kind}\n` +
-    `First reminder: ${fmtLocal(p.firstFireAt, tz)}${cadence}`;
+    `First nag: ${fmtWhen(p.firstFireAt, tz)}${each}`;
 }
 
 // Exactly one confirmation per new chore, never two saying the same thing.
@@ -197,7 +197,7 @@ export const UNDO_WINDOW_MS = 86400000;
 // the time the household chose; an overdue one-off nags again within the hour.
 // Every step is bound to the done row that was read, so a second tap loses.
 // Returns { ok } or { ok: false, why: 'late' | 'gone' }.
-export async function undoCompletion(env, firing, by, tz, { onClaim } = {}) {
+export async function undoCompletion(env, firing, by, tz, { onClaim, announce = true } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
@@ -237,9 +237,11 @@ export async function undoCompletion(env, firing, by, tz, { onClaim } = {}) {
   // The receipt had been given two hours; as a nag again it gets its day back.
   if (firing.last_message_id) await retimeSentMessage(env, nagChat(firing), nagRef(firing), SENT_TTL_MS);
   // Accountability is household-wide: the group hears the credit was withdrawn.
-  await sendMessage(env, firing.chat_id,
-    `↩️ <b>${esc(r.text)}</b> — not done after all, says ${esc(by)}.`, null,
-    { silent: true, ttl: RECEIPT_TTL_MS });
+  if (announce) {
+    await sendMessage(env, firing.chat_id,
+      `↩️ <b>${esc(r.text)}</b> — not done after all, says ${esc(by)}.`, null,
+      { silent: true, ttl: RECEIPT_TTL_MS });
+  }
   await updateDashboard(env, firing.chat_id);
   return { ok: true };
 }
@@ -279,7 +281,7 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } 
     ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
   if (ctx) await sendPrivate(env, ctx, html, undo);
-  else await sendMessage(env, chatId, html, undo);
+  else await sendMessage(env, chatId, html, undo, { silent: true });
   await updateDashboard(env, chatId);
 }
 
@@ -487,7 +489,7 @@ export function earlyReceipt(text, credit, nextFireAt, tz, firingId, covered = [
 // next_fire_at, or the whole one-off. Refused once a later occurrence has
 // fired, since the slot would then be history, and after a day like every
 // undo. The firing claim comes first, so a second tap has nothing to take.
-export async function undoEarly(env, firing, by, tz, { onClaim } = {}) {
+export async function undoEarly(env, firing, by, tz, { onClaim, announce = true } = {}) {
   const now = Date.now();
   if (firing.state !== 'done' || firing.done_at == null || now - firing.done_at > UNDO_WINDOW_MS) {
     return { ok: false, why: 'late' };
@@ -519,9 +521,11 @@ export async function undoEarly(env, firing, by, tz, { onClaim } = {}) {
     await restoreReminder(env, before);
   }
   await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(trashed.id).run();
-  await sendMessage(env, firing.chat_id,
-    `↩️ <b>${esc(before.text)}</b> — not done after all, says ${esc(by)}.`, null,
-    { silent: true, ttl: RECEIPT_TTL_MS });
+  if (announce) {
+    await sendMessage(env, firing.chat_id,
+      `↩️ <b>${esc(before.text)}</b> — not done after all, says ${esc(by)}.`, null,
+      { silent: true, ttl: RECEIPT_TTL_MS });
+  }
   await updateDashboard(env, firing.chat_id);
   return { ok: true };
 }
@@ -580,5 +584,6 @@ export async function wakeChat(env, chatId, tz) {
   }
   await env.DB.prepare('UPDATE settings SET paused_until = NULL WHERE chat_id = ?').bind(chatId).run();
   await updateDashboard(env, chatId);
-  await sendMessage(env, chatId, '😺 The cats are back on duty — chores resume. /list to see what\'s up.');
+  await sendMessage(env, chatId, '😺 The cats are back on duty — chores resume. /list to see what\'s up.', null,
+    { silent: true });
 }

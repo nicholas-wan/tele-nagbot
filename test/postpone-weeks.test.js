@@ -82,7 +82,7 @@ describe('📅 1 week / 📅 2 weeks', () => {
       fired_at: NOW + 7 * DAY, next_nag_at: NOW + 7 * DAY, snoozed_until: NOW + 7 * DAY,
       snoozed_by: '@nicholaswan', snoozes_used: 1,
     });
-    expect(toast()).toBe('Postponed to Oct 17, 7:30 PM 📅');
+    expect(toast()).toBe('Postponed — back in 7 days · Oct 17, 7:30 PM 📅 · 2 snoozes left');
     expect(calls.find((c) => c.url.endsWith('/editMessageText') && c.body.message_id === 700).body.text).toMatch(/^😴/);
   });
 
@@ -93,7 +93,7 @@ describe('📅 1 week / 📅 2 weeks', () => {
     // Due Tue 13 and Tue 20 Oct 19:00 — both before Sat 24 Oct 19:30 — so the
     // next is Tue 27 Oct, still on the chore's own seven-day beat.
     expect(reminder().next_fire_at).toBe(TUE_7PM + 14 * DAY);
-    expect(toast()).toBe('Postponed to Oct 24, 7:30 PM 📅 — skipping 2 scheduled times');
+    expect(toast()).toBe('Postponed — back in 14 days · Oct 24, 7:30 PM 📅 — skipping 2 scheduled times · 2 snoozes left');
   });
 
   it('leave a schedule alone when the postponed nag returns before it', async () => {
@@ -101,7 +101,7 @@ describe('📅 1 week / 📅 2 weeks', () => {
     seedNag();
     await tap('z:5:w1');
     expect(reminder().next_fire_at).toBe(NOW + 20 * DAY);
-    expect(toast()).toBe('Postponed to Oct 17, 7:30 PM 📅');
+    expect(toast()).toBe('Postponed — back in 7 days · Oct 17, 7:30 PM 📅 · 2 snoozes left');
   });
 
   it('wait for 8am when a week from now falls in quiet hours', async () => {
@@ -115,7 +115,7 @@ describe('📅 1 week / 📅 2 weeks', () => {
   it('count against the snooze cap', async () => {
     seedChore(); seedNag({ snoozes_used: 3 });
     await tap('z:5:w2');
-    expect(toast()).toBe('No more snoozes 😈 (max 3)');
+    expect(toast()).toBe('😾 No snoozes left (3 used) — time to do it.');
     expect(firing().fired_at).toBe(NOW - HOUR);
   });
 });
@@ -141,7 +141,7 @@ describe('the board', () => {
 
   it('still shows an ordinary pending re-nag as nagging', async () => {
     seedChore(); seedNag();
-    expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging since today 6:30 PM');
+    expect(await choreListHtml(env, 1, TZ)).toContain('🔔 nagging since 6:30 PM');
   });
 
   // 20 Oct 2026: the board said "nagging now" whether a chore had nagged for
@@ -207,7 +207,7 @@ describe('✅ OK on a snoozed card', () => {
   it('refuses on a card whose snooze is already spent', async () => {
     seedChore(); seedNag();
     await tapOn('zh:5', 700);
-    expect(toast()).toBe('Not snoozed any more — Done or snooze it again');
+    expect(toast()).toBe('It’s nagging again — card updated');
     expect(deletedMsg(700)).toBe(false);
     expect(firing().last_message_id).toBe(700);
   });

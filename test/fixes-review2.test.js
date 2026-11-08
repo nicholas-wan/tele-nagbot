@@ -150,7 +150,7 @@ describe('the 8am digest', () => {
     seedFiring({ id: 6, reminder_id: 11, fired_at: EIGHT_AM - 25 * HOUR, next_nag_at: EIGHT_AM, last_message_id: 701 });
     seedFiring({ id: 7, reminder_id: 12, reminder_text: 'dishes', fired_at: EIGHT_AM - 2 * HOUR, last_message_id: 702 });
     await sendDigests(env, EIGHT_AM);
-    const digest = sent(/hanging over/)[0];
+    const digest = sent(/Still waiting on/)[0];
     expect(digest.body.text).toContain('singlife');
     expect(digest.body.text).toContain('dishes');
     expect(digest.body.text).not.toContain('clear poop');

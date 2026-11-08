@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 afterEach(() => { sql.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-const digest = () => calls.find((c) => c.url.endsWith('/sendMessage') && /hanging over/.test(c.body.text));
+const digest = () => calls.find((c) => c.url.endsWith('/sendMessage') && /Still waiting on/.test(c.body.text));
 const buttons = (markup) => markup.inline_keyboard.flat().map((b) => [b.text, b.callback_data]);
 const firing = (id) => sql.prepare('SELECT * FROM firings WHERE id = ?').get(id);
 const tap = (data, markup, chatId = 1, from = { id: 2, first_name: 'Nick', username: 'nicholaswan' }) =>
@@ -46,7 +46,7 @@ describe('the 8am digest', () => {
     expect(d.body.disable_notification).toBe(true);
     expect(d.body.text).toContain('<b>singlife</b> (@nicholaswan)');
     expect(d.body.text).toContain('<b>clear poop</b>');
-    expect(buttons(d.body.reply_markup)).toEqual([['✅ singlife', 'dg:5'], ['✅ clear poop', 'dg:6'], ['✅ OK', 'ok']]);
+    expect(buttons(d.body.reply_markup)).toEqual([['✅ Done · singlife', 'dg:5'], ['✅ Done · clear poop', 'dg:6'], ['✅ OK', 'ok']]);
   });
 
   it('says nothing when nothing is nagging', async () => {
@@ -72,7 +72,7 @@ describe('the 8am digest', () => {
     // The finished one stays on as a struck line with its way back.
     expect(redraw.body.text).toContain('<s>singlife</s> — done by @nicholaswan');
     expect(buttons(redraw.body.reply_markup)).toEqual([
-      ['✅ clear poop', 'dg:6'], ['↩️ Not done · singlife', 'nd:5'], ['✅ OK', 'ok'],
+      ['✅ Done · clear poop', 'dg:6'], ['↩️ Not done · singlife', 'nd:5'], ['✅ OK', 'ok'],
     ]);
     expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toContain('Purrs 😻');
   });
@@ -98,7 +98,7 @@ describe('the 8am digest', () => {
     expect(firing(5)).toMatchObject({ done_by: 'yx' });
     expect(calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text).toBe('Already handled 👍');
     const redraw = calls.find((c) => c.url.endsWith('/editMessageText'));
-    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ clear poop', 'dg:6'], ['✅ OK', 'ok']]);
+    expect(buttons(redraw.body.reply_markup)).toEqual([['✅ Done · clear poop', 'dg:6'], ['✅ OK', 'ok']]);
   });
 
   it('ignores a Done forged from another chat', async () => {

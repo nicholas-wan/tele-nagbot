@@ -228,7 +228,7 @@ const routes = [
   ['POST', /^chore\/(\d+)\/done$/, async ({ env, chatId, tz, user, r, body }) => {
     const credit = await creditFor(env, chatId, user, body);
     if (!credit) return json({ ok: false, message: 'That household member is no longer here.' });
-    const outcome = await completeNow(env, r, credit, tz);
+    const outcome = await completeNow(env, r, credit, tz, { expect: body.expect === 'now' ? 'now' : undefined });
     if (outcome === 'idle') return json({ ok: false, message: DONE_MESSAGES.idle });
     return choreReply(env, chatId, r.id, tz, user, { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome] });
   }, { chore: true }],

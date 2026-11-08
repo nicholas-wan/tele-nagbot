@@ -9,6 +9,7 @@ import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { suggestSchedule } from './ai.js';
 import { getTz, senderName, nicknames } from './household.js';
 import { createReminder, confirmNewChore, undoButtons, fireIfDue } from './chores.js';
+import { ordinal } from './dashboard.js';
 
 // Bare /chore or /remind — the "/" autocomplete menu sends the command with
 // no text. Ask what to nag about instead of erroring; the reply is parsed as
@@ -147,7 +148,7 @@ export async function startWizard(env, ctx, partial, rawArgs, tz, scored, source
     : `every ${partial.detail.days} days`;
   const kindNote = partial.kind === 'once' ? '' :
     ` (${partial.kind === 'weekly' ? 'every ' + partial.detail.days.map((i) => DAY_NAMES[i]).join(',') :
-        partial.kind === 'monthly' ? 'on the ' + partial.detail.dom :
+        partial.kind === 'monthly' ? 'on the ' + ordinal(partial.detail.dom) :
         partial.kind === 'interval' ? intervalNote : 'daily'})`;
   const sent = await sendPrivate(env, ctx,
     `🐾 When should Latte &amp; Mocha pester you about <b>${esc(partial.text)}</b>${kindNote}?\n` +
@@ -382,7 +383,7 @@ export async function handleWizardCallback(env, cb, ctx, ref) {
   if (!wiz) return answerCallback(env, cb.id, '');
   const draft = await env.DB.prepare('SELECT * FROM drafts WHERE id = ? AND chat_id = ?')
     .bind(+wiz[1], cb.message.chat.id).first();
-  if (!draft) return answerCallback(env, cb.id, 'That one expired — send /remind again.');
+  if (!draft) return answerCallback(env, cb.id, 'That one expired — send /chore again.');
   const tz = await getTz(env, draft.chat_id);
   if (wiz[2] === 'cancel') {
     const claim = await env.DB.prepare('DELETE FROM drafts WHERE id = ? AND chat_id = ?')

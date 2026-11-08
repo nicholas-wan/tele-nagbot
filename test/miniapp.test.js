@@ -125,7 +125,7 @@ describe('the chore list', () => {
       ['renew passport', 'nagging', true],
       ['slutbed', 'upcoming', false],
     ]);
-    expect(res.chores[0].status).toBe('🔔 nagging since today 6:30 PM');
+    expect(res.chores[0].status).toBe('🔔 nagging since 6:30 PM');
     expect(res.chores[0].scored).toBe(false);
     expect(res.chores[1].cadence).toBe('every 1 week');
     expect(res.members.map((m) => m.name)).toEqual(['@Dodgerblueee', '@nicholaswan']);

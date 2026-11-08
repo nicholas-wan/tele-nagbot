@@ -639,7 +639,7 @@ describe('chat UX', () => {
     });
     const editor = calls.find((c) => c.url.endsWith('/sendMessage'));
     const labels = editor.body.reply_markup.inline_keyboard.flat().map((b) => b.text);
-    expect(editor.body.text).toContain('Edit #3: Water plants');
+    expect(editor.body.text).toContain('Edit: Water plants');
     expect(labels).toContain('🕐 Time');
     expect(labels).toContain('😾 Nag pace');
     expect(labels).toContain('👤 Assignee');

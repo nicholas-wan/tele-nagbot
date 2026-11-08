@@ -9,12 +9,13 @@
   /* Telegram hands the page its own theme as --tg-theme-* variables, so the
      sheet matches the chat it opens over. The fallbacks are for the local
      preview, which runs outside Telegram. Squashbot's page, restyled for
-     chores. */
+     chores: a grouped list in Telegram's own settings style, values shown as
+     plain text at the end of a row, one filled button per screen at most. */
   :root {
     --bg: var(--tg-theme-secondary-bg-color, #f0f0f4);
     --section: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, #ffffff));
     --text: var(--tg-theme-text-color, #111111);
-    --hint: var(--tg-theme-hint-color, #8a8a8e);
+    --hint: var(--tg-theme-hint-color, #6d6d72);
     --link: var(--tg-theme-link-color, #2481cc);
     --accent: var(--tg-theme-button-color, #2481cc);
     --accent-text: var(--tg-theme-button-text-color, #ffffff);
@@ -22,14 +23,18 @@
     --danger: var(--tg-theme-destructive-text-color, #e53935);
     --separator: var(--tg-theme-section-separator-color, rgba(128, 128, 128, 0.22));
     --radius: 12px;
-    --alert: #e8890c;
+    --thumb: var(--section);
+    /* Urgent text: dark enough on white to read (5.3:1), lighter on dark. */
+    --alert: #a85500;
   }
   @media (prefers-color-scheme: dark) {
     :root:not(.tg) {
       --bg: #101014; --section: #1c1c22; --text: #f2f2f5; --hint: #8d8d96;
-      --link: #5aa9ef; --accent: #3a8fd9; --header: #8d8d96;
+      --link: #5aa9ef; --accent: #3a8fd9; --header: #8d8d96; --alert: #ff9f0a;
+      --thumb: color-mix(in srgb, var(--text) 16%, var(--section));
     }
   }
+  :root.tg.dark { --alert: #ff9f0a; --thumb: color-mix(in srgb, var(--text) 16%, var(--section)); }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); }
   body {
@@ -39,18 +44,21 @@
   }
   button, input, select { font: inherit; color: inherit; }
   [hidden] { display: none !important; }
+  input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 
-  .top { display: flex; align-items: center; gap: 8px; min-height: 36px; margin: 2px 0 10px; }
+  .top { display: flex; align-items: center; gap: 4px; min-height: 44px; margin: 0 0 6px; }
   .top h1 { font-size: 20px; margin: 0; flex: 1; min-width: 0; letter-spacing: -0.01em; overflow-wrap: anywhere; }
   .back {
-    flex: none; border: 0; background: none; color: var(--link); padding: 6px 4px 6px 0; cursor: pointer;
+    flex: none; min-height: 44px; border: 0; background: none; color: var(--link);
+    padding: 0 8px 0 0; cursor: pointer;
   }
-  .sub { color: var(--hint); font-size: 14px; margin: -6px 0 12px; }
+  .sub { color: var(--hint); font-size: 15px; margin: 0 0 4px; }
   .sub.alert { color: var(--alert); font-weight: 600; }
 
   .label {
     color: var(--header); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;
-    margin: 18px 4px 6px;
+    margin: 20px 4px 6px;
   }
   .section { background: var(--section); border-radius: var(--radius); overflow: hidden; }
   .row {
@@ -58,8 +66,13 @@
     padding: 10px 14px; border: 0; background: none; text-align: left;
   }
   .row + .row, .row + .field, .field + .row { box-shadow: inset 0 1px 0 var(--separator); }
+  .section > .row:has(.emo) + .row:has(.emo) { box-shadow: none; position: relative; }
+  .section > .row:has(.emo) + .row:has(.emo)::after {
+    content: ""; position: absolute; top: 0; right: 0; left: calc(54px + var(--d, 0) * 22px);
+    height: 1px; background: var(--separator); pointer-events: none;
+  }
   button.row { cursor: pointer; }
-  button.row:active { background: var(--separator); }
+  button.row:active, .row.chore:has(.open:active) { background: var(--separator); }
   .row .main { flex: 1; min-width: 0; }
   .row .title { font-weight: 600; overflow-wrap: anywhere; }
   .row .meta { color: var(--hint); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -68,14 +81,24 @@
   .meta.alert { color: var(--alert); }
   .row.link { color: var(--link); }
   .row.danger { color: var(--danger); }
-  .row.indent { padding-left: 30px; }
+  .row.indent { padding-left: 54px; }
+  /* One column for the chore's emoji, so its name and both lines under it
+     share a left edge. */
+  .emo { flex: none; width: 28px; text-align: center; font-size: 20px; line-height: 1; align-self: flex-start; padding-top: 1px; }
+  /* A chore with no icon of its own gets a quiet dot, not a hole. */
+  .emo:empty::before {
+    content: ""; display: block; width: 6px; height: 6px; margin: 7px auto 0; border-radius: 50%;
+    background: color-mix(in srgb, var(--hint) 45%, transparent);
+  }
+  .row.link .emo, .row.danger .emo { align-self: center; padding-top: 0; font-size: 18px; }
   .row.fam { position: relative; padding-left: calc(14px + var(--d, 0) * 22px); }
   .row.fam.nested::before {
-    content: ""; position: absolute; left: calc(var(--d) * 22px - 2px); top: 0; height: 50%; width: 9px;
+    content: ""; position: absolute; left: calc(var(--d) * 22px + 5px); top: 0; height: 50%; width: 9px;
     border-left: 1.5px solid color-mix(in srgb, var(--hint) 60%, transparent);
     border-bottom: 1.5px solid color-mix(in srgb, var(--hint) 60%, transparent);
     border-bottom-left-radius: 6px;
   }
+  .row.fam .meta { white-space: normal; }
   .row.fam.self { background: color-mix(in srgb, var(--link) 13%, transparent); }
   .row:disabled { opacity: 0.45; }
   .note { color: var(--hint); font-size: 13px; margin: 6px 4px 0; }
@@ -84,31 +107,34 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
 
-  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 4px; }
-  .tag { font-size: 13px; padding: 3px 9px; border-radius: 999px; background: var(--section); color: var(--hint); }
-
   .row.chore { padding-right: 12px; }
+  .row.chore.settling .status { color: var(--hint); }
   .main.open {
-    display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 0;
+    display: flex; align-items: center; gap: 12px; border: 0; background: none; padding: 0;
     text-align: left; cursor: pointer;
   }
   .main.open .text { flex: 1; min-width: 0; }
-  .chev { flex: none; color: var(--hint); font-size: 22px; line-height: 1; }
+  .chev { flex: none; color: var(--hint); font-size: 22px; line-height: 1; transition: transform 0.15s; }
+  .chev.open { transform: rotate(90deg); }
   .quick {
-    flex: none; min-width: 72px; height: 34px; padding: 0 14px; border: 0; border-radius: 999px;
+    position: relative; flex: none; min-width: 72px; height: 36px; padding: 0 14px; border: 0; border-radius: 999px;
     background: var(--accent); color: var(--accent-text); font-weight: 600; cursor: pointer;
+  }
+  .quick::after { content: ""; position: absolute; inset: -6px -4px; }
+  .quick.done, .quick.done:disabled {
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); opacity: 1;
   }
   .seg {
     display: flex; gap: 4px; padding: 3px; margin: 0 0 14px; border-radius: 10px;
-    background: var(--section);
+    background: color-mix(in srgb, var(--hint) 16%, transparent);
   }
   .seg button {
-    flex: 1; min-height: 34px; border: 0; border-radius: 8px; background: none;
+    flex: 1; min-height: 38px; border: 0; border-radius: 8px; background: none;
     color: var(--hint); font-weight: 600; cursor: pointer;
   }
-  .seg button.on { background: var(--accent); color: var(--accent-text); }
-  .seg.small button { min-height: 30px; font-size: 14px; }
-  .count { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .seg button.on { background: var(--thumb); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15); }
+  .seg.small button { min-height: 32px; font-size: 14px; }
+  .count { flex: none; font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
   .wrap { overflow-wrap: anywhere; }
 
   .switch { position: relative; flex: none; width: 46px; height: 28px; }
@@ -124,26 +150,54 @@
   }
   .switch input:checked + span { background: var(--accent); }
   .switch input:checked + span::after { transform: translateX(18px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--link); outline-offset: 2px; }
 
   .field { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 14px; }
   .field + .field { box-shadow: inset 0 1px 0 var(--separator); }
-  .field label, .field .name { flex: 1; }
-  .field input:not([type=checkbox]), .field select {
-    flex: none; width: 56%; min-height: 36px; padding: 4px 8px; text-align: right;
-    border: 0; border-radius: 8px; background: var(--bg);
+  .field label, .field .name { flex: 1; min-width: 0; }
+  .field .value { flex: none; max-width: 62%; color: var(--hint); text-align: right; }
+  /* A value is plain text at the end of its row, as in Telegram's settings;
+     the chevron says it can be changed. */
+  .field select, .field input[type=time] {
+    flex: none; width: auto; max-width: 62%; min-height: 36px; padding: 4px 20px 4px 4px;
+    border: 0; border-radius: 8px; color: var(--hint); text-align: right; text-align-last: right;
+    appearance: none; -webkit-appearance: none; cursor: pointer;
+    /* iOS's up-and-down chevrons: this value opens a menu. One grey reads on
+       both themes. */
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='14' viewBox='0 0 9 14'%3E%3Cpath d='M1 5l3.5-3.5L8 5M1 9l3.5 3.5L8 9' fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 4px center;
   }
-  .field.stack { flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 14px; }
-  .field.stack input { width: 100%; text-align: left; min-height: 42px; padding: 8px 10px; }
+  .field input[type=time]::-webkit-calendar-picker-indicator { display: none; }
+  .field.stack { flex-direction: column; align-items: stretch; gap: 8px; padding: 12px 14px; }
+  .field.stack input {
+    width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: var(--bg);
+  }
+  .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 -14px; padding: 0 14px; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; min-height: 32px; padding: 0 11px; border: 0; border-radius: 999px; cursor: pointer; font-size: 14px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--link);
+  }
 
   .primary {
     display: block; width: 100%; margin-top: 18px; min-height: 48px; border: 0;
     border-radius: var(--radius); background: var(--accent); color: var(--accent-text);
     font-weight: 600; cursor: pointer;
   }
+  .primary.first { margin-top: 16px; }
+  .primary.soft { background: var(--section); color: var(--link); }
   .primary:disabled { opacity: 0.55; }
+  .working { opacity: 0.6; }
 
   .empty { text-align: center; color: var(--hint); padding: 48px 12px; }
   .empty .big { font-size: 40px; margin-bottom: 8px; }
+  .bones .row { gap: 12px; }
+  .bone { height: 12px; border-radius: 6px; background: color-mix(in srgb, var(--hint) 22%, transparent); }
+  .bone.dot { flex: none; width: 24px; height: 24px; border-radius: 50%; }
+  .bones .main { display: grid; gap: 8px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .bone { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+  }
 
   .toast {
     position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom));
@@ -153,7 +207,7 @@
     transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
   }
   .toast.show { transform: none; visibility: visible; transition: transform 0.2s ease-out; }
-  .busy { opacity: 0.6; pointer-events: none; }
+  .busy { opacity: 0.6; pointer-events: none; transition: opacity 0.15s; }
 </style>
 </head>
 <body>
@@ -168,8 +222,20 @@ const inTelegram = Boolean(tg && tg.initData);
 // screens can be checked without Telegram. Nothing it does reaches the bot:
 // the API refuses any request Telegram did not sign.
 const preview = !inTelegram && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+// Telegram's own header and background take the page's grey, so the sheet is
+// one surface; urgent text follows its light or dark theme.
+function applyTheme() {
+  document.documentElement.classList.toggle('dark', tg.colorScheme === 'dark');
+}
+function tgCall(fn) {
+  try { fn(); } catch { /* an older Telegram without this method */ }
+}
 if (inTelegram) {
   document.documentElement.classList.add('tg');
+  applyTheme();
+  tg.onEvent('themeChanged', applyTheme);
+  tgCall(() => tg.setHeaderColor('secondary_bg_color'));
+  tgCall(() => tg.setBackgroundColor('secondary_bg_color'));
   tg.ready();
 }
 
@@ -203,7 +269,18 @@ function toast(message, kind = 'success') {
   node.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('show'), 3200);
-  if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(kind);
+  haptic(kind);
+}
+
+// Haptics: 'success' / 'error' after an answer, 'tap' the moment a button is
+// pressed, 'select' when a setting changes.
+function haptic(kind) {
+  if (!inTelegram || !tg.HapticFeedback) return;
+  tgCall(() => {
+    if (kind === 'tap') tg.HapticFeedback.impactOccurred('light');
+    else if (kind === 'select') tg.HapticFeedback.selectionChanged();
+    else tg.HapticFeedback.notificationOccurred(kind);
+  });
 }
 
 function confirmAction(message) {
@@ -234,8 +311,14 @@ async function api(method, path, body) {
   return { status: response.status, ...data };
 }
 
+// Work that waits on the bot. Only the button that was tapped is held — and
+// only looks busy if the answer is slow — rather than the whole page dimming
+// on every tap. A load with no button dims the page after the same wait.
 async function run(button, work) {
-  document.body.classList.add('busy');
+  const slow = setTimeout(() => {
+    if (button) button.classList.add('working');
+    else document.body.classList.add('busy');
+  }, 300);
   if (button) button.disabled = true;
   try {
     return await work();
@@ -243,8 +326,9 @@ async function run(button, work) {
     toast('Could not reach the cats. Check your connection and try again.', 'error');
     return null;
   } finally {
+    clearTimeout(slow);
     document.body.classList.remove('busy');
-    if (button) button.disabled = false;
+    if (button) { button.disabled = false; button.classList.remove('working'); }
   }
 }
 
@@ -258,22 +342,33 @@ function blockedBy(result) {
 }
 
 // ---- Navigation. Telegram's own back button in its header, an in-page one
-// in the preview.
+// in the preview. A screen opens at the top; Back returns to where you were
+// on the one before, drawn at once from what it last showed and refreshed
+// quietly behind it.
 function go(screen, extra = {}, push = true) {
-  if (push && state.screen !== 'loading' && state.screen !== 'blocked') trail.push(state);
+  if (push && state.screen !== 'loading' && state.screen !== 'blocked') {
+    trail.push({ ...state, scroll: window.scrollY });
+  }
+  const before = state;
   state = { screen, ...extra };
   render();
+  const sameChore = screen === 'chore' && before.chore && extra.chore && before.chore.id === extra.chore.id;
+  if (before.screen !== screen || (screen === 'chore' && !sameChore)) window.scrollTo(0, 0);
+  if (inTelegram && (screen === 'chore' || screen === 'add')) tgCall(() => tg.expand());
 }
 function back() {
   const previous = trail.pop();
   if (!previous) return;
   state = previous;
-  if (state.screen === 'list') return loadList(false);
-  if (state.screen === 'chore') return openChore(state.chore.id, false);
   render();
+  window.scrollTo(0, previous.scroll || 0);
+  if (state.screen === 'list') refreshList();
+  else if (state.screen === 'chore') refreshChore(state.chore.id);
 }
 if (inTelegram) tg.BackButton.onClick(back);
 
+// A sub-screen's title. The two roots (Chores, Stats) have none: their switch
+// is the top of the page, and Telegram's header already says where you are.
 function header(title) {
   const showBack = trail.length > 0;
   if (inTelegram) {
@@ -281,30 +376,56 @@ function header(title) {
   }
   return h('div', { class: 'top' },
     !inTelegram && showBack ? h('button', { class: 'back', onclick: back }, '‹ Back') : null,
-    h('h1', null, title),
-    h('button', { class: 'back', onclick: closeApp, 'aria-label': 'Close' }, 'Close'));
+    h('h1', null, title));
+}
+function rootTop() {
+  if (inTelegram) tgCall(() => tg.BackButton.hide());
+  return null;
 }
 
-// Chores and stats are the two roots; the switch under the header moves
-// between them without stacking either on the back trail.
+// Chores and stats are the two roots; the switch moves between them without
+// stacking either on the back trail.
 function sections(current) {
   const option = (key, label, open) => h('button', {
     class: current === key ? 'on' : '', 'aria-pressed': current === key ? 'true' : 'false',
     onclick: () => { if (current !== key) { trail = []; open(false); } },
   }, label);
-  return h('div', { class: 'seg', role: 'group' },
-    option('list', '🐾 Chores', loadList), option('stats', '🏆 Stats', (push) => loadStats('week', push)));
+  return h('div', { class: 'seg', role: 'group', 'aria-label': 'Section' },
+    option('list', 'Chores', loadList), option('stats', 'Stats', (push) => loadStats('week', push)));
 }
 
 // ---- Screens
 function render() {
   const screens = { loading, blocked, list, chore, add, stats };
   app.replaceChildren(...[].concat(screens[state.screen]()).flat(Infinity).filter(Boolean));
-  window.scrollTo(0, 0);
+}
+
+// Skeleton rows shaped like what they stand for: a list row (icon and three
+// lines), an action (icon and one line) or a setting (name and value).
+function bones(rows, kind = 'list') {
+  const width = (index, set) => `width: ${set[index % set.length]}%`;
+  const row = (index) => {
+    if (kind === 'setting') {
+      return h('div', { class: 'row' }, h('div', { class: 'bone', style: width(index, [28, 34, 24, 30]) }),
+        h('div', { class: 'bone', style: `margin-left: auto; ${width(index, [22, 18, 26, 20])}` }));
+    }
+    if (kind === 'action') {
+      return h('div', { class: 'row' }, h('span', { class: 'bone dot', style: 'border-radius: 6px; width: 20px; height: 20px; margin: 0 4px' }),
+        h('div', { class: 'bone', style: width(index, [34, 42, 28]) }));
+    }
+    return h('div', { class: 'row' }, h('span', { class: 'bone dot' }),
+      h('div', { class: 'main' },
+        h('div', { class: 'bone', style: width(index, [46, 62, 38, 54]) }),
+        h('div', { class: 'bone', style: width(index, [64, 40, 58, 34]) }),
+        h('div', { class: 'bone', style: width(index, [30, 44, 36, 26]) })));
+  };
+  return h('div', { class: 'section bones', 'aria-hidden': 'true' }, Array.from({ length: rows }, (_, index) => row(index)));
 }
 
 function loading() {
-  return h('div', { class: 'empty' }, 'Loading…');
+  return [h('div', { class: 'seg', 'aria-hidden': 'true' }, h('button', { class: 'on', tabindex: -1 }, 'Chores'), h('button', { tabindex: -1 }, 'Stats')),
+    h('div', { class: 'sr', role: 'status', style: 'position:absolute;left:-9999px' }, 'Loading'),
+    bones(4)];
 }
 
 function blocked() {
@@ -316,14 +437,34 @@ function blocked() {
   ];
 }
 
-const title = (c) => [c.emoji, c.text].filter(Boolean).join(' ');
+// The board's words, tidied for a small screen: the emoji that leads a status
+// line goes (urgency already has its colour), a clock time never breaks from
+// its AM/PM, and the board's generic 📌 is no icon at all.
+const PIN = '📌';
+const LEADING_EMOJI = /^\p{Extended_Pictographic}️?\s*/u;
+const keepTime = (text) => String(text || '').replace(/ (AM|PM)\b/g, ' $1');
+const emoji = (c) => (c.emoji && c.emoji !== PIN ? c.emoji : '');
+const title = (c) => [emoji(c), c.text].filter(Boolean).join(' ');
 const urgent = (c) => c.state === 'nagging' || c.state === 'overdue';
+function statusText(c) {
+  const text = keepTime(String(c.status || '').replace(LEADING_EMOJI, '').replace(/^overdue · nagging since/, 'overdue since'));
+  return c.state === 'parked' ? `snoozed · ${text}` : text;
+}
 
 // The board's second line: how often, for whom, and whether it scores.
 function details(c) {
-  return [c.cadence, c.under ? `↪️ resets with ${c.under}` : null, c.assignee,
-    c.rotate ? '🔄 rotation' : null, c.scored ? null : 'reminder · no points']
+  return [c.cadence, c.assignee, c.rotate ? 'takes turns' : null,
+    c.under ? `resets with ${c.under}` : null, c.scored ? null : 'no points']
     .filter(Boolean).join(' · ');
+}
+
+// A row's details, fetched as the finger lands so the screen is often ready
+// by the time the tap completes. Kept a few seconds only.
+const prefetched = new Map();
+function prefetch(id) {
+  const hit = prefetched.get(id);
+  if (hit && Date.now() - hit.at < 8000) return;
+  prefetched.set(id, { at: Date.now(), promise: api('GET', `chore/${id}`).catch(() => null) });
 }
 
 function choreRow(c) {
@@ -333,39 +474,39 @@ function choreRow(c) {
   // a deliberate choice: both are done from the chore's own screen.
   const quick = c.live && urgent(c);
   return h('div', { class: 'row chore' },
-    h('button', { class: 'main open', onclick: () => openChore(c.id) },
+    h('button', { class: 'main open', onpointerdown: () => prefetch(c.id), onclick: () => openChore(c.id) },
+      h('span', { class: 'emo', 'aria-hidden': 'true' }, emoji(c)),
       h('div', { class: 'text' },
-        h('div', { class: 'title' }, title(c)),
-        h('div', { class: urgent(c) ? 'meta status alert' : 'meta status' }, c.status),
+        h('div', { class: 'title' }, c.text),
+        h('div', { class: urgent(c) ? 'meta status alert' : 'meta status' }, statusText(c)),
         more ? h('div', { class: 'meta' }, more) : null),
       quick ? null : h('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
     quick ? h('button', {
       class: 'quick', 'aria-label': `Done: ${c.text}`,
-      onclick: (event) => done(event.currentTarget, c, { how: 'me' }),
+      onclick: (event) => quickDone(event.currentTarget, c),
     }, 'Done') : null);
 }
 
 function list() {
   const { chores, vacation } = state.data;
   return [
-    header('Chores'),
+    rootTop(),
     sections('list'),
     vacation ? h('div', { class: 'banner' }, `✈️ All paused until ${vacation}. /resume all in the chat wakes the cats.`) : null,
     chores.length
       ? h('div', { class: 'section' }, chores.map(choreRow))
-      : h('div', { class: 'empty' }, h('div', { class: 'big' }, '😺'), 'No chores on the list.'),
-    chores.length ? h('div', { class: 'note' }, 'Tap a chore to do it early, change it, pause or delete it.') : null,
-    h('button', { class: 'primary', onclick: openAdd }, '➕ Add chore'),
+      : h('div', { class: 'empty' }, h('div', { class: 'big' }, '😺'), 'No chores yet. Add the first one below.'),
+    h('button', { class: 'primary soft', onclick: openAdd }, '+ Add chore'),
   ];
 }
 
-function select(options, current, onchange, currentLabel) {
+function select(label, options, current, onchange, currentLabel) {
   // A value the screen cannot choose — "every 8 days", "nag:15m" — still shows
   // as what the chore has now.
   const known = options.some(([value]) => value === current);
-  return h('select', { onchange },
+  return h('select', { onchange, 'aria-label': label },
     !known ? h('option', { value: '', selected: true, disabled: true }, currentLabel) : null,
-    options.map(([value, label]) => h('option', { value, selected: value === current }, label)));
+    options.map(([value, text]) => h('option', { value, selected: value === current }, text)));
 }
 
 function toggle(label, hint, on, onchange) {
@@ -374,76 +515,128 @@ function toggle(label, hint, on, onchange) {
     h('span', { class: 'switch' }, h('input', { type: 'checkbox', checked: on, onchange }), h('span')));
 }
 
+const icon = (glyph) => h('span', { class: 'emo', 'aria-hidden': 'true' }, glyph);
+const capital = (text) => String(text || '').charAt(0).toUpperCase() + String(text || '').slice(1);
+
 function chore() {
   const c = state.chore;
+  if (c.partial) {
+    // Drawn from the list row the moment it is tapped; the rest follows.
+    // A nagging chore's Done is real from the first frame: the list row
+    // already said it is nagging, and Done is what the tap was usually for.
+    return [
+      header(title(c)),
+      h('div', { class: urgent(c) ? 'sub alert' : 'sub' }, statusText(c)),
+      urgent(c) && c.live ? h('button', {
+        class: 'primary first', onclick: (event) => done(event.currentTarget, c, { how: 'me' }),
+      }, 'Done') : h('div', { class: 'label' }, '\u00a0'),
+      h('div', { style: urgent(c) && c.live ? 'margin-top: 10px' : null }, bones(2, 'action')),
+      h('div', { class: 'label' }, '\u00a0'),
+      bones(4, 'setting'),
+    ];
+  }
   const members = state.members || [];
   const me = state.me;
   const early = c.done === 'early';
   const others = members.filter((member) => !me || member.userId !== me.id);
-  const tags = [
-    c.assignee && `👤 ${c.assignee}`,
-    c.rotate && '🔄 Rotation',
-    !c.scored && 'Reminder · no points',
-  ].filter(Boolean);
+  const nagging = c.live && c.state !== 'parked';
 
-  const doneRows = [];
-  if (c.done) {
-    doneRows.push(
-      h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'me' }) },
-        early ? '✅ Done early' : '✅ Done'),
-      h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'together' }) },
-        early ? '🤝 Together early' : '🤝 Done together'));
-    if (others.length) {
-      doneRows.push(h('button', {
-        class: 'row link', onclick: () => { state.doneBy = !state.doneBy; render(); },
-      }, h('div', { class: 'main' }, early ? '👤 Done early by…' : '👤 Done by…'),
-      h('span', { class: 'chev', 'aria-hidden': 'true' }, state.doneBy ? '⌄' : '›')));
+  // What the chore is up to decides what leads the screen: Resume for a paused
+  // one, Done for anything that can be done.
+  const lead = [];
+  if (c.paused) {
+    lead.push(h('div', { class: 'label' }, 'Paused'),
+      h('div', { class: 'section' },
+        h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, 'resume') }, icon('▶️'), 'Resume')));
+  } else if (c.done) {
+    const rows = [];
+    if (!nagging) {
+      rows.push(h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'me' }) },
+        icon('✅'), early ? 'Done early' : 'Done'));
+    }
+    rows.push(h('button', { class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'together' }) },
+      icon('🤝'), 'Done together'));
+    if (others.length === 1) {
+      rows.push(h('button', {
+        class: 'row link', onclick: (event) => done(event.currentTarget, c, { how: 'as', member: others[0].userId }),
+      }, icon('👤'), `Done by ${others[0].name}`));
+    } else if (others.length) {
+      rows.push(h('button', {
+        class: 'row link', 'aria-expanded': state.doneBy ? 'true' : 'false',
+        onclick: () => { state.doneBy = !state.doneBy; render(); },
+      }, icon('👤'), h('div', { class: 'main' }, 'Done by…'),
+      h('span', { class: `chev${state.doneBy ? ' open' : ''}`, 'aria-hidden': 'true' }, '›')));
       if (state.doneBy) {
         for (const member of others) {
-          doneRows.push(h('button', {
+          rows.push(h('button', {
             class: 'row link indent',
             onclick: (event) => done(event.currentTarget, c, { how: 'as', member: member.userId }),
           }, member.name));
         }
       }
     }
+    lead.push(nagging ? null : h('div', { class: 'label' }, c.state === 'parked' ? 'Snoozed' : 'Not due yet'),
+      nagging ? h('button', {
+        class: 'primary first', onclick: (event) => done(event.currentTarget, c, { how: 'me' }),
+      }, 'Done') : null,
+      h('div', { class: 'section', style: nagging ? 'margin-top: 10px' : null }, rows),
+      early ? h('div', { class: 'note' }, 'Counts on the board and skips the next reminder.') : null);
   }
 
-  const assignees = [['0', 'Anyone'], ...members.map((member) => [String(member.userId), member.name])];
-  const assigned = c.assigneeId != null ? String(c.assigneeId) : c.assignee ? null : '0';
+  // Assigned and rotation are one choice: a person, anyone, or taking turns.
+  const assignees = [['0', 'Anyone'], ['rotate', 'Take turns'],
+    ...members.map((member) => [String(member.userId), member.name])];
+  const assigned = c.rotate ? 'rotate'
+    : c.assigneeId != null ? String(c.assigneeId) : c.assignee ? null : '0';
+  // Leaving rotation is two edits; both name this chore, whatever screen is
+  // showing by the time the second goes.
+  const assign = async (value) => {
+    const id = c.id;
+    if (value === 'rotate') return edit('rotate', true, id);
+    if (c.rotate && !await edit('rotate', false, id)) return;
+    return edit('assign', value, id);
+  };
 
   // Nesting: doing the chore picked here resets this one too — washing the
   // litter box clears the poop. Only recurring chores can sit under one.
   const resetsWith = (c.parents || []).length || c.parentId != null
     ? h('div', { class: 'field' }, h('span', { class: 'name' },
-      h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'Doing that chore resets this one')),
-      select([['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
+      h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'When that one is done, this resets too')),
+      select('Resets with', [['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
         c.parentId != null ? String(c.parentId) : '0', (event) => edit('parent', event.target.value),
         c.under || 'Nothing'))
     : null;
   // The whole family, top tier first, this chore highlighted. Every other
   // member opens its own screen.
   const fam = c.family || [];
-  const relation = { above: 'resets this one', below: 'reset by this one', self: 'this chore' };
+  const relation = { above: 'doing it resets this', below: 'reset when this is done', self: 'this chore' };
   const famRows = fam.map((m) => {
-    const body = [h('div', { class: 'main' },
-      h('div', { class: 'title' }, title(m)),
-      h('div', { class: 'meta' }, [m.rel === 'self' ? null : m.status, relation[m.rel]].filter(Boolean).join(' · ')))];
+    const body = [h('span', { class: 'emo', 'aria-hidden': 'true' }, emoji(m)), h('div', { class: 'main' },
+      h('div', { class: 'title' }, m.text),
+      h('div', { class: 'meta' }, [m.rel === 'self' ? null : keepTime(String(m.status || '').replace(LEADING_EMOJI, '')),
+        relation[m.rel]].filter(Boolean).join(' · ')))];
     const props = { class: `row fam${m.depth ? ' nested' : ''}${m.rel === 'self' ? ' self' : ''}`, style: `--d: ${m.depth}` };
     return m.rel === 'self' ? h('div', props, body)
       : h('button', { ...props, onclick: () => openChore(m.id) }, body, h('span', { class: 'chev', 'aria-hidden': 'true' }, '›'));
   });
 
+  // A schedule the screen cannot express ("every Mon,Thu") is replaced only
+  // when asked twice.
+  const repeats = async (event) => {
+    const value = event.target.value;
+    if (!c.scheduleKey && !await confirmAction(`Replace "${c.schedule}" with ${event.target.selectedOptions[0].text}?`)) {
+      render();
+      return;
+    }
+    edit('schedule', value, c.id);
+  };
+
   return [
     header(title(c)),
-    h('div', { class: urgent(c) ? 'sub alert' : 'sub' }, c.status),
-    tags.length ? h('div', { class: 'tags' }, tags.map((tag) => h('span', { class: 'tag' }, tag))) : null,
+    h('div', { class: urgent(c) ? 'sub alert' : 'sub' }, statusText(c)),
     c.vacation ? h('div', { class: 'banner' }, `✈️ All paused until ${c.vacation}.`) : null,
 
-    doneRows.length ? [h('div', { class: 'label' },
-      c.state === 'parked' ? 'Snoozed — done anyway?' : c.live ? 'Nagging now' : 'Ahead of the nag'),
-      h('div', { class: 'section' }, doneRows),
-      early ? h('div', { class: 'note' }, 'Still counts on the board. The schedule moves on past the next slot.') : null] : null,
+    lead,
 
     fam.length ? [h('div', { class: 'label' }, 'Family'), h('div', { class: 'section' }, famRows, resetsWith)] : null,
 
@@ -456,62 +649,68 @@ function chore() {
             onchange: (event) => event.target.value && edit('time', event.target.value),
           })),
         h('div', { class: 'field' }, h('span', { class: 'name' }, 'Repeats'),
-          select([['daily', 'Daily'], ['weekdays', 'Weekdays'], ['weekends', 'Weekends']],
-            c.scheduleKey, (event) => edit('schedule', event.target.value), c.schedule)),
-      ] : h('div', { class: 'row' }, h('div', { class: 'main' },
-        h('div', null, c.schedule), h('div', { class: 'meta' }, 'Its time can change once this nag is done.'))),
-      h('div', { class: 'field' }, h('span', { class: 'name' }, 'Nag pace'),
-        select([['default', '15 / 30 / 60 min'], ['10', 'Every 10 min'], ['30', 'Every 30 min'], ['60', 'Every 60 min']],
+          select('Repeats', [['daily', 'Daily'], ['weekdays', 'Weekdays'], ['weekends', 'Weekends']],
+            c.scheduleKey, repeats, capital(c.schedule))),
+      ] : h('div', { class: 'field' }, h('span', { class: 'name' },
+        h('div', null, 'Repeats'), h('div', { class: 'meta' }, 'Time can be changed after it’s done')),
+      h('span', { class: 'value' }, c.schedule === 'once' ? 'One-off' : capital(c.schedule))),
+      h('div', { class: 'field' }, h('span', { class: 'name' }, 'Nag every'),
+        select('Nag every', [['default', '15, 30, 60 min'], ['10', '10 min'], ['30', '30 min'], ['60', '60 min']],
           c.paceKey, (event) => edit('nag', event.target.value), c.pace)),
       h('div', { class: 'field' }, h('span', { class: 'name' }, 'Assigned'),
-        select(assignees, assigned, (event) => edit('assign', event.target.value), c.assignee || 'Anyone')),
-      toggle('Rotation', 'Assign whoever has done it least', c.rotate, (event) => edit('rotate', event.target.checked)),
+        select('Assigned', assignees, assigned, (event) => assign(event.target.value), c.assignee || 'Anyone')),
       toggle('Points', c.scored ? 'Counts on the leaderboard' : 'A reminder — no points',
         c.scored, (event) => edit('score', event.target.checked)),
       // A chore on its own picks its parent here; one already in a family
       // does it from the Family section.
       fam.length ? null : resetsWith),
-    c.next ? h('div', { class: 'note' }, `Next: ${c.next} · ${c.schedule}`) : null,
+    c.next && !c.paused ? h('div', { class: 'note' }, `Next: ${keepTime(c.next)}`) : null,
 
     h('div', { class: 'label' }, 'More'),
     h('div', { class: 'section' },
       c.canSkip && !c.paused ? h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, 'skip') },
-        '⏭️ Skip next') : null,
-      h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, c.paused ? 'resume' : 'pause') },
-        c.paused ? '▶️ Resume' : '⏸️ Pause'),
-      h('button', { class: 'row danger', onclick: (event) => remove(event.currentTarget) }, '🗑️ Delete chore')),
+        icon('⏭️'), 'Skip next') : null,
+      c.paused ? null : h('button', { class: 'row link', onclick: (event) => act(event.currentTarget, 'pause') },
+        icon('⏸️'), 'Pause'),
+      h('button', { class: 'row danger', onclick: (event) => remove(event.currentTarget) }, icon('🗑️'), 'Delete chore')),
   ];
 }
+
+const EXAMPLES = ['7pm daily', 'every Mon, Thu 8am', 'every 2 weeks', 'on the 1st', 'tomorrow 9:30am', 'in 20m'];
 
 function add() {
   const values = state.values;
   const members = state.members || [];
-  const set = (key) => (event) => { values[key] = event.target.value; };
-  const kind = (scored, label) => h('button', {
-    class: values.scored === scored ? 'on' : '', 'aria-pressed': values.scored === scored ? 'true' : 'false',
-    onclick: () => { values.scored = scored; render(); },
-  }, label);
+  const input = () => document.getElementById('text');
+  const example = (text) => h('button', {
+    class: 'chip', type: 'button',
+    onclick: () => {
+      values.text = `${values.text.trim()} ${text}`.trim();
+      input().value = values.text;
+      input().focus();
+    },
+  }, text);
   return [
-    header('Add chore'),
-    h('div', { class: 'seg small', role: 'group' }, kind(true, '🏆 Chore · points'), kind(false, '🔔 Reminder')),
+    header(values.scored ? 'Add chore' : 'Add reminder'),
     h('div', { class: 'section' },
       h('div', { class: 'field stack' },
-        h('label', { for: 'text' }, 'What, and when'),
+        h('label', { for: 'text' }, 'Chore and time'),
         h('input', {
-          id: 'text', type: 'text', value: values.text, placeholder: 'trash 7pm daily', maxLength: 240,
-          autocomplete: 'off', enterKeyHint: 'done', oninput: set('text'),
+          id: 'text', type: 'text', value: values.text, placeholder: 'e.g. trash 7pm daily', maxLength: 240,
+          autocomplete: 'off', enterKeyHint: 'done', oninput: (event) => { values.text = event.target.value; },
           onkeydown: (event) => { if (event.key === 'Enter') save(document.getElementById('save')); },
-        })),
+        }),
+        h('div', { class: 'chips', role: 'group', 'aria-label': 'Add a time' }, EXAMPLES.map(example))),
       h('div', { class: 'field' }, h('span', { class: 'name' }, 'Assigned'),
-        h('select', { onchange: set('assignee') },
+        h('select', { 'aria-label': 'Assigned', onchange: (event) => { values.assignee = event.target.value; } },
           h('option', { value: '', selected: !values.assignee }, 'Anyone'),
           members.map((member) => h('option', {
             value: String(member.userId), selected: values.assignee === String(member.userId),
-          }, member.name))))),
-    h('div', { class: 'note' }, 'As after /chore: 7pm daily · every mon,thu 8am · every 2 weeks · '
-      + 'on the 1st · tomorrow 9:30am · in 20m · now · nag:10m'),
+          }, member.name)))),
+      toggle('Points', values.scored ? 'Counts on the leaderboard' : 'A reminder — no points', values.scored,
+        (event) => { values.scored = event.target.checked; render(); })),
     h('button', { id: 'save', class: 'primary', onclick: (event) => save(event.currentTarget) },
-      values.scored ? '✅ Add chore' : '✅ Add reminder'),
+      values.scored ? 'Add chore' : 'Add reminder'),
   ];
 }
 
@@ -523,31 +722,36 @@ function stats() {
     class: s.view === key ? 'on' : '', 'aria-pressed': s.view === key ? 'true' : 'false',
     onclick: () => { if (s.view !== key) loadStats(key, false); },
   }, label);
+  // A person's count includes what they did together, so the meta line says
+  // how it splits and the numbers add up.
   const people = s.people.map((person, index) => h('div', { class: 'row' },
+    h('span', { class: 'emo', 'aria-hidden': 'true' }, MEDALS[index] || ''),
     h('div', { class: 'main' },
-      h('div', { class: 'title' }, `${MEDALS[index] || '•'} ${person.name}`),
-      person.solo !== person.count || (index === 0 && s.streak >= 1)
-        ? h('div', { class: 'meta' }, [
-          person.solo !== person.count ? `${person.solo} solo` : null,
-          index === 0 && s.streak >= 1 ? `🔥 ${s.streak + 1}-week reign` : null,
-        ].filter(Boolean).join(' · ')) : null),
-    h('span', { class: 'count' }, `${person.count} ✅`)));
+      h('div', { class: 'title' }, person.name),
+      h('div', { class: 'meta' }, [
+        `${person.solo} solo`,
+        person.count - person.solo ? `${person.count - person.solo} together` : null,
+        index === 0 && s.streak >= 1 ? `🔥 ${s.streak + 1}-week reign` : null,
+      ].filter(Boolean).join(' · '))),
+    h('span', { class: 'count', 'aria-label': `${person.count} done` }, person.count)));
   return [
-    header('Stats'),
+    rootTop(),
     sections('stats'),
-    h('div', { class: 'seg small', role: 'group' }, view('week', 'This week'), view('last', 'Last week')),
+    h('div', { class: 'seg small', role: 'group', 'aria-label': 'Week' }, view('week', 'This week'), view('last', 'Last week')),
     s.total || s.expired ? [
-      h('div', { class: 'label' }, `Week of ${s.week}`),
+      h('div', { class: 'label' }, `Week of ${s.week} · ${s.total} done`),
       h('div', { class: 'section' }, people,
-        s.together ? h('div', { class: 'row' }, h('div', { class: 'main' }, '🤝 Done together'),
-          h('span', { class: 'count' }, `${s.together} ✅`)) : null),
-      s.expired ? h('div', { class: 'note' }, `🪦 Expired unclaimed: ${s.expired}`) : null,
+        s.together ? h('div', { class: 'row' }, h('span', { class: 'emo', 'aria-hidden': 'true' }, '🤝'),
+          h('div', { class: 'main' }, 'Done together'), h('span', { class: 'count' }, s.together)) : null),
+      s.expired ? h('div', { class: 'note' },
+        `🪦 ${s.expired} ${s.expired === 1 ? 'chore' : 'chores'} expired with nobody on it`) : null,
       s.recent.length ? [
         h('div', { class: 'label' }, 'Done'),
         h('div', { class: 'section' }, s.recent.map((item) => h('div', { class: 'row' },
+          h('span', { class: 'emo', 'aria-hidden': 'true' }, item.emoji && item.emoji !== PIN ? item.emoji : ''),
           h('div', { class: 'main' },
-            h('div', { class: 'wrap' }, [item.emoji, item.text].filter(Boolean).join(' ')),
-            h('div', { class: 'meta' }, `${item.who} · ${item.when}`))))),
+            h('div', { class: 'wrap' }, item.text),
+            h('div', { class: 'meta' }, `${item.who.includes(' & ') ? 'together' : item.who} · ${keepTime(item.when)}`))))),
       ] : null,
     ] : h('div', { class: 'empty' }, h('div', { class: 'big' }, '🏆'), s.view === 'last'
       ? 'Nothing was completed last week. The cats pretend not to remember.'
@@ -563,19 +767,54 @@ async function loadList(push = true) {
   go('list', { data: result }, push);
 }
 
-async function openChore(id, push = true) {
-  const result = await run(null, () => api('GET', `chore/${id}`));
-  if (!result || blockedBy(result)) return;
+// Quiet refreshes behind a screen already drawn: no busy state, no toast,
+// and nothing if the person has moved on meanwhile.
+async function refreshList() {
+  const mine = ++seq;
+  const result = await api('GET', 'chores').catch(() => null);
+  if (!result || !result.ok || mine < listSeq) return;
+  applyList(result, mine, false);
+}
+async function refreshChore(id) {
+  const mine = ++seq;
+  const result = await api('GET', `chore/${id}`).catch(() => null);
+  if (!result || mine < choreSeq || state.screen !== 'chore' || state.chore.id !== id) return;
+  choreSeq = mine;
   if (!result.ok) {
     toast(result.message, 'error');
     trail = [];
     return loadList(false);
   }
+  state.chore = result.chore;
+  state.members = result.members;
+  render();
+}
+
+async function openChore(id, push = true) {
   const listed = trail.concat(state).find((entry) => entry.screen === 'list');
-  go('chore', {
-    chore: result.chore, members: result.members, me: listed && listed.data.me,
-    doneBy: push ? false : state.doneBy,
-  }, push);
+  const row = listed && listed.data.chores.find((entry) => entry.id === id);
+  const me = listed && listed.data.me;
+  if (row) go('chore', { chore: { ...row, partial: true }, me, doneBy: false }, push);
+  const hit = prefetched.get(id);
+  prefetched.delete(id);
+  const mine = ++seq;
+  let result = hit && Date.now() - hit.at < 8000 ? await hit.promise : null;
+  if (!result) result = await run(null, () => api('GET', `chore/${id}`));
+  const stillHere = state.screen === 'chore' && state.chore && state.chore.id === id;
+  if (!result) {
+    if (row && stillHere && state.chore.partial) back();
+    return;
+  }
+  if (blockedBy(result)) return;
+  if (row && !stillHere) return; // moved on
+  choreSeq = mine;
+  if (!result.ok) {
+    toast(result.message, 'error');
+    trail = [];
+    return loadList(false);
+  }
+  const fresh = { chore: result.chore, members: result.members, me, doneBy: false };
+  if (row) { Object.assign(state, fresh); render(); } else go('chore', fresh, push);
 }
 
 async function loadStats(view, push = true) {
@@ -596,50 +835,120 @@ function openAdd() {
 
 // ---- Actions. Every reply carries the chore as it now stands (null once it
 // has gone) and the whole list, so the page draws what the server holds.
-function settle(result) {
-  toast(result.message, result.ok ? 'success' : 'error');
+// The reply to an action on chore `id`. It redraws that chore's screen only
+// if it is still the one showing; a reply that lands after the person went
+// back and opened another chore just updates the list behind them.
+let choreSeq = 0;
+function settle(result, { quiet = false, id = null, mine = ++seq } = {}) {
+  prefetched.clear();
+  if (!quiet || !result.ok) toast(result.message, result.ok ? 'success' : 'error');
+  else haptic('select');
   if (!result.chores) return;
-  const listed = trail.find((entry) => entry.screen === 'list');
-  if (listed) listed.data = result;
-  if (state.screen === 'chore' && result.chore) {
+  const showing = state.screen === 'chore' && state.chore && state.chore.id === id;
+  if (showing && result.chore) {
+    if (mine < choreSeq) return;
+    choreSeq = mine;
+    applyList(result, mine, false);
     state.chore = result.chore;
     state.doneBy = false;
     render();
   } else {
-    trail = [];
-    go('list', { data: result }, false);
+    applyList(result, mine, showing || state.screen === 'add');
   }
 }
 
+// A Done is the end of the job: back to the list, with the toast naming what
+// was done and when it comes round again — unless the person has already
+// moved on to another chore, whose screen is left alone.
+function finishDone(result, c, seq) {
+  prefetched.clear();
+  const here = state.screen === 'list' || (state.screen === 'chore' && state.chore && state.chore.id === c.id);
+  if (!result.ok) {
+    toast(result.message, 'error');
+    if (result.chores) applyList(result, seq, here);
+    else if (state.screen === 'list') render(); // put the row's Done back
+    return;
+  }
+  const next = result.chore && result.chore.next ? ` · next ${keepTime(result.chore.next)}` : '';
+  toast(`${title(c)} — done${next}`, 'success');
+  applyList(result, seq, here);
+}
+
+// The newest list wins: replies can come back out of order now that several
+// taps can be in flight, and an older one must not undo a newer one.
+let seq = 0;
+let listSeq = 0;
+function applyList(result, mine, show) {
+  if (mine < listSeq) return;
+  listSeq = mine;
+  const listed = trail.find((entry) => entry.screen === 'list');
+  if (listed) listed.data = result;
+  if (show) { trail = []; go('list', { data: result }, false); }
+  else if (state.screen === 'list') { state.data = result; render(); }
+}
+
+// One Done per chore at a time. A second tap while the first is out — or on
+// a screen redrawn under the finger — would otherwise complete the next
+// occurrence too. A Done on a nag says so (`expect: 'now'`), so a nag that
+// was finished meanwhile answers "already handled" instead of doing it early.
+const doing = new Set();
 async function done(button, c, body) {
-  const result = await run(button, () => api('POST', `chore/${c.id}/done`, body));
-  if (!result || blockedBy(result)) return;
-  settle(result);
+  if (doing.has(c.id)) return;
+  doing.add(c.id);
+  haptic('tap');
+  const mine = ++seq;
+  const expect = c.done === 'now' || (c.partial && c.live) ? 'now' : undefined;
+  try {
+    const result = await run(button, () => api('POST', `chore/${c.id}/done`, { ...body, expect }));
+    if (!result || blockedBy(result)) { if (state.screen === 'list') render(); return; }
+    finishDone(result, c, mine);
+  } finally {
+    doing.delete(c.id);
+  }
+}
+
+// Done from the list: the pill turns into a tick at once, and the list
+// redraws from the answer.
+function quickDone(button, c) {
+  if (doing.has(c.id)) return;
+  button.classList.add('done');
+  button.textContent = '✓';
+  const row = button.closest('.row');
+  if (row) row.classList.add('settling');
+  return done(button, { ...c, done: 'now' }, { how: 'me' });
 }
 
 async function act(button, action) {
-  const result = await run(button, () => api('POST', `chore/${state.chore.id}/${action}`));
+  const id = state.chore.id;
+  const mine = ++seq;
+  const result = await run(button, () => api('POST', `chore/${id}/${action}`));
   if (!result || blockedBy(result)) return;
-  settle(result);
+  settle(result, { id, mine });
 }
 
-async function edit(field, value) {
-  const result = await run(null, () => api('POST', `chore/${state.chore.id}/edit`, { field, value }));
-  if (!result || blockedBy(result)) return;
+// A setting has already moved on screen when this runs, so success needs no
+// toast — a tick of haptics — and only a refusal is spelled out. Returns
+// whether it took.
+async function edit(field, value, id = state.chore.id) {
+  const mine = ++seq;
+  const result = await run(null, () => api('POST', `chore/${id}/edit`, { field, value }));
+  if (!result || blockedBy(result)) return false;
   if (!result.ok) {
     toast(result.message, 'error');
-    render(); // put the control back to what the chore still has
-    return;
+    if (state.screen === 'chore' && state.chore && state.chore.id === id) render(); // put the control back
+    return false;
   }
-  settle(result);
+  settle(result, { quiet: true, id, mine });
+  return true;
 }
 
 async function remove(button) {
   const c = state.chore;
-  if (!(await confirmAction(`Delete ${c.text}? This removes it for everyone. Undo is in the chat for a day.`))) return;
+  if (!(await confirmAction(`Delete "${c.text}"? It's removed for everyone. Undo is in the chat for a day.`))) return;
+  const mine = ++seq;
   const result = await run(button, () => api('POST', `chore/${c.id}/delete`));
   if (!result || blockedBy(result)) return;
-  settle(result);
+  settle(result, { id: c.id, mine });
 }
 
 async function save(button) {

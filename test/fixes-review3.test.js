@@ -135,7 +135,8 @@ describe('vacation wake keeps one-offs', () => {
     expect(firing(7)).toMatchObject({ state: 'nagging', next_nag_at: NOW - DAY });
     const card = edits(700).at(-1);
     expect(card.body.text).toBe('⏸️ <b>renew passport</b>\nPaused.');
-    expect(buttons(card.body.reply_markup)).toEqual([]);
+    // A chore paused on its own keeps its way back on the card.
+    expect(buttons(card.body.reply_markup)).toEqual(['rs:20']);
   });
 });
 

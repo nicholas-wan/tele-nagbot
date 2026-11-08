@@ -125,7 +125,7 @@ describe('a tap is answered before the redrawing', () => {
     await settle();
     // ...and the redrawing still happens, the board exactly once.
     expect(calls.find((c) => c.method === 'editMessageText' && c.body.message_id === 700).body.text)
-      .toMatch(/Done by @nicholaswan/);
+      .toMatch(/done by @nicholaswan/);
     expect(boardEdits()).toHaveLength(1);
     expect(firing().state).toBe('done');
   });
@@ -149,7 +149,7 @@ describe('a tap is answered before the redrawing', () => {
 
   it('confirms a delete before the log and the board', async () => {
     const answer = await tap('x:5');
-    expect(answer.text).toBe('Deleted — Undo is in the group.');
+    expect(answer.text).toBe('Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.');
     expect(finished('sendMessage')).toBe(false);
     await settle();
     expect(calls.some((c) => c.method === 'sendMessage' && /deleted/.test(c.body.text))).toBe(true);
@@ -215,6 +215,19 @@ describe('the Mini App', () => {
     expect(ops.filter((o) => o.kind === 'batch')).toHaveLength(3);
   });
 
+  it('never turns a Done on a nag that has gone into a Done early on the next one', async () => {
+    // Water plants (9) is not nagging: a Done the page sent for a live nag is
+    // a second tap, or a nag finished from the chat meanwhile.
+    const raced = await app('chore/9/done', { how: 'me', expect: 'now' });
+    expect(raced.ok).toBe(false);
+    expect(raced.message).toBe('Already handled 👍');
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 9 AND state = 'done'").get().n).toBe(0);
+    // Asked for plainly, it is the Done early it always was.
+    expect((await app('chore/9/done', { how: 'me' })).ok).toBe(true);
+    await settle();
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 9 AND state = 'done'").get().n).toBe(1);
+  });
+
   it('still refuses someone who is not in the household', async () => {
     sql.exec('DELETE FROM members WHERE user_id = 2');
     calls.length = 0;
@@ -254,5 +267,77 @@ describe('a Telegram call that never answers', () => {
     expect(res.ok).toBe(false);
     expect(seen).toHaveLength(1);
     expect(seen[0].receiver_user_id).toBe(2);
+  });
+});
+
+describe('the cron tick', () => {
+  const tick = async () => { await worker.scheduled({}, env, ctx()); await settle(); };
+
+  it('finds out there is nothing to do in two round trips', async () => {
+    sql.exec("UPDATE firings SET next_nag_at = next_nag_at + 86400000, fired_at = fired_at + 86400000");
+    await tick(); // reads the timezone once, then keeps it
+    ops.length = 0;
+    await tick();
+    expect(ops).toHaveLength(2);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('still fires a chore that is due, and redraws the board once', async () => {
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000} WHERE id = 9`);
+    await tick();
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 9 AND state = 'nagging'").get().n).toBe(1);
+    expect(calls.some((c) => c.method === 'sendMessage' && /water plants/.test(c.body.text))).toBe(true);
+    expect(boardEdits()).toHaveLength(1);
+  });
+});
+
+// The chat review (8 Nov 2026): the changes that act, not just reword.
+describe('chat polish', () => {
+  async function say(text) {
+    await worker.fetch(new Request('https://nag.test/webhook', {
+      method: 'POST',
+      headers: { 'X-Telegram-Bot-Api-Secret-Token': 'hook' },
+      body: JSON.stringify({ update_id: updateId++, message: {
+        message_id: 900 + updateId, from: nick, chat: { id: 1 }, date: 0, text,
+      } }),
+    }), env, ctx());
+    await settle();
+  }
+
+  it('puts ▶️ Resume on a chore paused on its own, and the button resumes it', async () => {
+    await say('/pause take out trash');
+    const card = calls.filter((c) => c.method === 'editMessageText' && c.body.message_id === 700).at(-1);
+    expect(card.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data)).toEqual(['rs:8']);
+    const answer = await tap('rs:8');
+    await settle();
+    expect(answer.text).toBe('Resumed ▶️');
+    expect(sql.prepare('SELECT paused FROM reminders WHERE id = 8').get().paused).toBe(0);
+  });
+
+  it('tells the typer a nagging chore was resumed', async () => {
+    sql.exec('UPDATE reminders SET paused = 1 WHERE id = 8');
+    await say('/resume take out trash');
+    expect(calls.some((c) => c.method === 'sendMessage' && /Resumed <b>take out trash<\/b> — it's nagging again/.test(c.body.text)))
+      .toBe(true);
+  });
+
+  it('answers a bare "done" with two chores nagging by offering a Done for each', async () => {
+    sql.exec(`INSERT INTO firings (id, reminder_id, chat_id, reminder_text, fired_at, state, next_nag_at, last_message_id, scored)
+      VALUES (6, 9, 1, 'water plants', ${NOW - HOUR}, 'nagging', ${NOW + HOUR}, 701, 1)`);
+    await say('done');
+    const ask = calls.find((c) => c.method === 'sendMessage' && /which one/.test(c.body.text));
+    expect(ask.body.reply_markup.inline_keyboard.map((row) => row[0].callback_data)).toEqual(['d:5', 'd:6', 'ok']);
+  });
+
+  it('lets an expired nag go quietly: the card comes down, the tombstone is silent', async () => {
+    sql.exec(`UPDATE firings SET fired_at = ${NOW - 25 * HOUR}, next_nag_at = ${NOW - 60000} WHERE id = 5`);
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW + DAY} WHERE id = 8`);
+    await worker.scheduled({}, env, ctx());
+    await settle();
+    expect(firing().state).toBe('expired');
+    expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 700)).toBe(true);
+    const tomb = calls.find((c) => c.method === 'sendMessage' && /24 hours and nobody did it/.test(c.body.text));
+    expect(tomb.body.text.startsWith('🪦')).toBe(true);
+    expect(tomb.body.disable_notification).toBe(true);
   });
 });

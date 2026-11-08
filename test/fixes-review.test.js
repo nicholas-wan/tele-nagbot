@@ -152,7 +152,7 @@ describe('a typed time resolves only the typer\'s own draft', () => {
     refuse = (method) => (method === 'editEphemeralMessageText' ? 'Bad Request: message to edit not found' : null);
     await say(anne, '10am', 42);
     expect(sql.prepare('SELECT text FROM reminders').get()).toEqual({ text: 'fold the laundry' });
-    const confirmation = sent('sendMessage').find((c) => c.body.receiver_user_id === 2 && /First reminder/.test(c.body.text));
+    const confirmation = sent('sendMessage').find((c) => c.body.receiver_user_id === 2 && /First nag/.test(c.body.text));
     expect(confirmation, 'a private confirmation was sent instead').toBeTruthy();
     expect(JSON.stringify(confirmation.body.reply_markup)).toContain('Undo');
   });
@@ -229,7 +229,7 @@ describe('the snooze picker keeps a parked ephemeral card parked', () => {
     await tap(anne, 's:5', cbMessage);
     const edit = sent('editEphemeralMessageText').at(-1);
     expect(edit.body.text.startsWith('😴')).toBe(true);
-    expect(JSON.stringify(edit.body.reply_markup)).toContain('↩️ Back');
+    expect(JSON.stringify(edit.body.reply_markup)).toContain('← Back');
   });
 
   it('renders a live nag as a nag', async () => {

@@ -4,10 +4,10 @@
 import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
          editRef, deleteRef, msgRef, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
 import { nextOccurrence, fmtLocal, fmtClock, localParts } from './time.js';
-import { sendCelebrationSticker } from './stickers.js';
+import { pickCelebration, sendCelebration } from './stickers.js';
 import { isScored } from './household.js';
 import { coverChildren, coverLine } from './nesting.js';
-import { updateDashboard } from './dashboard.js';
+import { updateDashboard, fmtWhen, fmtSince } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
 export const EXPIRE_AFTER_MS = 24 * 3600000;
@@ -38,12 +38,13 @@ export function snoozedButtons(firingId, scored = true) {
       { text: '🕐 Change snooze', callback_data: `s:${firingId}` },
     ],
     [
-      { text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` },
       // Puts the 😴 card away while the chore stays parked (zh: in handlers).
       // It is still the firing's live card, so the daily sweep spares it — a
       // two-week postponement left it in the chat for two weeks with nothing
       // to dismiss it by. The nag comes back as a fresh card when it is due.
-      { text: '✅ OK', callback_data: `zh:${firingId}` },
+      // 🙈 Hide, not ✅ OK: ✅ is Done on the row above.
+      { text: '🙈 Hide', callback_data: `zh:${firingId}` },
+      { text: scored ? '🗑 Delete chore' : '🗑 Delete reminder', callback_data: `x:${firingId}` },
     ],
   ] };
 }
@@ -66,10 +67,11 @@ export function receiptButtons(firingId) {
 // existed name the household.
 export function firingCard(reminder, firing, tz, now = Date.now()) {
   if (isHouseholdDeferred(firing, now)) {
-    return [snoozedHtml(reminder, firing.next_nag_at, firing.snoozed_by || 'the household', tz),
+    return [snoozedHtml(reminder, firing.next_nag_at, firing.snoozed_by || 'the household', tz,
+      firing.fired_at > now),
       snoozedButtons(firing.id, isScored(firing))];
   }
-  if (isOverdue(firing, now)) return [overdueHtml(reminder), nagButtons(firing.id, isScored(firing))];
+  if (isOverdue(firing, now)) return [overdueHtml(reminder, firing.fired_at, tz), nagButtons(firing.id, isScored(firing))];
   return [nagHtml(reminder, firing.nag_count || 0, firing.cat || 'both'), nagButtons(firing.id, isScored(firing))];
 }
 
@@ -116,7 +118,7 @@ export function snoozeButtons(firingId, tz) {
       [z('30m', '30'), z('1h', '60'), z('2h', '120')],
       [z('3h', '180'), z('6h', '360'), z(tonight ? '🌙 9pm today' : '🌙 9pm tomorrow', 't')],
       [z('📅 Tomorrow', 'day'), z('📅 1 week', 'w1'), z('📅 2 weeks', 'w2')],
-      [z('↩️ Back', 'b')],
+      [z('← Back', 'b')],
     ],
   };
 }
@@ -166,12 +168,19 @@ export function nagHtml(reminder, nagCount, cat = 'both') {
   return `${head}\n${who}${line}`;
 }
 
-export function snoozedHtml(reminder, until, by, tz) {
-  return `${titleHtml('😴', reminder)}\nSnoozed by ${esc(by)} until ${fmtLocal(until, tz)}.${assignedLine(reminder)}`;
+// A 📅 postponement says so, as the toast that set it did. The time reads as
+// the board does ("tomorrow 9:00 PM"), not as a full date for tonight.
+export function snoozedHtml(reminder, until, by, tz, postponed = false) {
+  const when = postponed ? `— back ${fmtWhen(until, tz)}` : `until ${fmtWhen(until, tz)}`;
+  return `${titleHtml('😴', reminder)}\n${postponed ? 'Postponed' : 'Snoozed'} by ${esc(by)} ${when}.`
+    + assignedLine(reminder);
 }
 
-export function overdueHtml(reminder) {
-  return `${titleHtml('⏰', reminder)}\n24 hours and counting — the cats are still waiting.${assignedLine(reminder)}`;
+// Says since when, as the board does: "24 hours and counting" read the same
+// a week later.
+export function overdueHtml(reminder, firedAt, tz) {
+  const since = firedAt != null && tz ? `Nagging since ${fmtSince(firedAt, tz)}` : 'Over 24 hours now';
+  return `${titleHtml('⏰', reminder)}\n${since} — the cats are still waiting.${assignedLine(reminder)}`;
 }
 
 // Past the 24h window. A recurring firing is expired here; a one-off stays
@@ -243,12 +252,8 @@ export async function showPausedCard(env, firing, reminder, by, tz, until = null
   const state = until
     ? `Household paused until ${fmtLocal(until, tz)}.`
     : by ? `Paused by ${esc(by)}.` : 'Paused.';
-  await editNag(env, firing, `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, emptyKeyboard());
-}
-
-async function silenceOldNag(env, firing, text, note) {
-  if (!firing.last_message_id) return;
-  await editNag(env, firing, `${note} <s>${esc(text)}</s>`, emptyKeyboard());
+  await editNag(env, firing, `⏸️ <b>${esc(reminder.text)}</b>\n${state}`, until ? emptyKeyboard()
+    : { inline_keyboard: [[{ text: '▶️ Resume', callback_data: `rs:${reminder.id}` }]] });
 }
 
 // `onClaim` runs the moment the Done is won, before any of the redrawing: it
@@ -271,16 +276,16 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   if (!claim.meta.changes) return false;
   firing = (after.results || [])[0] || firing;
   if (onClaim) await onClaim();
-  // Independent of each other, so they run together: the chores under this
-  // one are covered by it (nesting.js) and the receipt says so; the nag's
-  // sticker goes; and a celebration sticker names the cat for the purr line.
+  // What the receipt says, worked out together: the chores under this one are
+  // covered by it (nesting.js) and the receipt names them; the celebration
+  // sticker is chosen (not yet sent) so the purr line can name its cat.
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
-  const [covered, celebration] = await Promise.all([
+  const [covered, pick] = await Promise.all([
     coverChildren(env, reminder, firing.id, tz),
-    isEphemeralNag(firing) ? { cat: 'both' } : sendCelebrationSticker(env, nagChat(firing), firing.id),
-    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+    isEphemeralNag(firing) ? null : pickCelebration(env, nagChat(firing), firing.id),
   ]);
+  const celebration = { cat: pick ? pick.cat : 'both' };
   const also = coverLine(covered);
   const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
     : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
@@ -305,7 +310,7 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
       // earned a day; its receipt only needs to be glanced at.
       await Promise.all([
         editNag(env, firing,
-          `😻 <s>${esc(reminder.text)}</s>\nDone by ${esc(byName)} at ${when}${also}`,
+          `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`,
           receiptButtons(firing.id)),
         retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS),
       ]);
@@ -332,7 +337,12 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
       env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id),
     ]);
   };
-  await Promise.all([card(), receipt(), stash()]);
+  // The nag's own sticker goes and the celebration arrives alongside.
+  await Promise.all([
+    card(), receipt(), stash(),
+    pick ? sendCelebration(env, nagChat(firing), pick) : null,
+    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
+  ]);
   await updateDashboard(env, firing.chat_id);
   return true;
 }
@@ -351,14 +361,18 @@ export async function expireFiring(env, firing, reminder, { silent } = {}) {
   ]);
   if (!claim.meta.changes) return false;
   firing = (after.results || [])[0] || firing;
+  // The card goes rather than staying struck through beside the tombstone:
+  // one message says what happened, and a superseded nag (silent) is simply
+  // replaced by the new one.
   await Promise.all([
-    silenceOldNag(env, firing, reminder.text, '🙀'),
+    firing.last_message_id ? deleteNag(env, firing) : null,
     firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
   ]);
   if (!silent) {
     // The tombstone always lands in the group — accountability is household-wide.
     await sendMessage(env, firing.chat_id,
-      `🙀 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`);
+      `🪦 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`,
+      null, { silent: true });
   }
   await updateDashboard(env, firing.chat_id);
   return true;

@@ -90,26 +90,33 @@ export async function createStickerSet(env, userId) {
 // tongue-out, cozy nap, snuggle). Falls back to any sticker in the pack.
 const CELEBRATION_UIDS = new Set(['AgADxB8AAhaJwFc', 'AgADlh0AAqbNwVc', 'AgADIB4AA1nBVw', 'AgADQB4AAqSUwVc']);
 
-export async function sendCelebrationSticker(env, chatId, seed) {
+// The celebration sticker for a Done, and which cat is on it, chosen without
+// sending it: the receipt names the cat ("Latte purrs approvingly"), and once
+// the choice is known the receipt and the sticker can go out together rather
+// than one after the other. Null when there is no pack. Never throws.
+export async function pickCelebration(env, chatId, seed) {
   try {
     const name = await activeSetName(env, chatId);
-    if (!name) return { cat: 'both' };
+    if (!name) return null;
     const stickers = await setStickers(env, name);
-    if (!stickers) return { cat: 'both' };
+    if (!stickers) return null;
     const fav = stickers.filter((s) => CELEBRATION_UIDS.has(s.uid));
     const pool = fav.length ? fav : stickers;
     const pick = pool[Math.abs(seed) % pool.length];
-    // Celebration stickers are pure décor — a couple of hours is plenty. The
-    // send and the cat lookup are independent, so they run together.
-    const [, tag] = await Promise.all([
-      tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id })
-        .then((sent) => recordSentMessage(env, chatId, sent, { ttlMs: RECEIPT_TTL_MS })),
-      stickerCat(env, pick.uid),
-    ]);
-    return { cat: tag };
+    return { ...pick, cat: await stickerCat(env, pick.uid) };
   } catch (e) {
-    console.log(`sendCelebrationSticker failed: ${e}`);
-    return { cat: 'both' };
+    console.log(`pickCelebration failed: ${e}`);
+    return null;
+  }
+}
+
+// Celebration stickers are pure décor — a couple of hours is plenty.
+export async function sendCelebration(env, chatId, pick) {
+  try {
+    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id, disable_notification: true }),
+      { ttlMs: RECEIPT_TTL_MS });
+  } catch (e) {
+    console.log(`sendCelebration failed: ${e}`);
   }
 }
 
@@ -129,18 +136,56 @@ export async function deleteSticker(env, chatId, index) {
   return { ...res, remaining: stickers.length - 1 };
 }
 
+// The chat's pack and each sticker's cat change only through the sticker
+// commands, yet every nag and every Done read them — so each isolate keeps
+// them for a while, keyed by the database binding like the tz. A command in
+// this isolate forgets what it changes at once; another isolate's copy is at
+// most ten minutes stale, and all it can get wrong is which cat purrs.
+const STICKER_TTL_MS = 10 * 60000;
+const packCache = new WeakMap(); // DB -> chat id -> { name, at }
+const catCache = new WeakMap(); // DB -> file uid -> { cat, at }
+
+function cacheFor(store, env) {
+  let map = store.get(env.DB);
+  if (!map) store.set(env.DB, map = new Map());
+  return map;
+}
+
+function fresh(map, key) {
+  const hit = map.get(key);
+  return hit && Date.now() - hit.at < STICKER_TTL_MS ? hit : null;
+}
+
+// For /usepack, which changes a chat's pack, and for the tagging commands.
+export function forgetPack(env, chatId) {
+  if (env.DB) cacheFor(packCache, env).delete(chatId);
+}
+function forgetCat(env, uid) {
+  if (env.DB) cacheFor(catCache, env).delete(uid);
+}
+
 // Which cat is on a sticker, by its stable id; 'both' when untagged.
 async function stickerCat(env, uid) {
+  const cache = cacheFor(catCache, env);
+  const hit = fresh(cache, uid);
+  if (hit) return hit.cat;
   const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?').bind(uid).first();
-  return (tag && tag.cat) || 'both';
+  const cat = (tag && tag.cat) || 'both';
+  cache.set(uid, { cat, at: Date.now() });
+  return cat;
 }
 
 // Sends a random Latte & Mocha sticker; silently does nothing if the set
 // hasn't been created yet. Never throws.
 async function activeSetName(env, chatId) {
+  const cache = cacheFor(packCache, env);
+  const hit = fresh(cache, chatId);
+  if (hit) return hit.name;
   const row = await env.DB.prepare('SELECT sticker_set FROM settings WHERE chat_id = ?')
     .bind(chatId).first();
-  return (row && row.sticker_set) || await stickerSetName(env);
+  const name = (row && row.sticker_set) || await stickerSetName(env);
+  if (name) cache.set(chatId, { name, at: Date.now() });
+  return name;
 }
 
 async function setStickers(env, name) {
@@ -165,6 +210,7 @@ export async function autoTagPack(env, chatId, { redo } = {}) {
   if (redo) {
     for (const s of set.result.stickers) {
       await env.DB.prepare('DELETE FROM sticker_tags WHERE file_uid = ?').bind(s.file_unique_id).run();
+      forgetCat(env, s.file_unique_id);
     }
   }
 
@@ -183,6 +229,7 @@ export async function autoTagPack(env, chatId, { redo } = {}) {
     counts[cat]++;
     await env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)')
       .bind(s.file_unique_id, cat).run();
+    forgetCat(env, s.file_unique_id);
   }
   return { ok: true, counts, processed, remaining };
 }
@@ -256,7 +303,7 @@ export async function sendRandomSticker(env, chatId, seed) {
     // The nag lifecycle usually deletes this itself; the sweep is the backstop
     // for any path that loses track of it. Deleting twice is harmless.
     const [sent, cat] = await Promise.all([
-      tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id })
+      tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id, disable_notification: true })
         .then((res) => recordSentMessage(env, chatId, res)),
       stickerCat(env, pick.uid),
     ]);
@@ -279,6 +326,7 @@ export async function tagSticker(env, chatId, index, cat) {
   }
   await env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)')
     .bind(stickers[index - 1].uid, cat).run();
+  forgetCat(env, stickers[index - 1].uid);
   return { ok: true };
 }
 

@@ -16,13 +16,13 @@ export function editorText(r, tz) {
   const nags = JSON.parse(r.nag_intervals).join('/');
   const assignee = r.assignee_name ? esc(r.assignee_name) : 'Anyone';
   const next = r.next_fire_at != null ? fmtLocal(r.next_fire_at, tz) : 'nagging now';
-  return `✏️ <b>Edit #${r.display_num}: ${esc(r.text)}</b>\n` +
+  return `✏️ <b>Edit: ${esc(r.text)}</b>\n` +
     `Schedule: ${esc(describeSchedule(r))}\n` +
     `Next: ${next}\n` +
     `Assigned: ${assignee}\n` +
     `Nag pace: ${nags} min\n` +
     `Rotation: ${d.rotate ? 'on' : 'off'}\n` +
-    `Points: ${r.scored ? 'counts on the board' : 'no points'}${r.paused ? '\nStatus: paused' : ''}`;
+    `Points: ${r.scored ? 'counts on the leaderboard' : 'no points'}${r.paused ? '\nStatus: paused' : ''}`;
 }
 
 export async function editorButtons(env, r) {
@@ -265,11 +265,15 @@ export async function skipNext(env, r, tz) {
 // there is one, else the upcoming occurrence, done early. Returns 'done',
 // 'early', 'raced' when somebody else got there first, or 'idle' for a chore
 // with nothing to complete (paused, or a one-off with nothing scheduled).
-export async function completeNow(env, r, credit, tz) {
+// `expect: 'now'` is a Done tapped on a nag the page showed as live: when the
+// nag has gone meanwhile (finished from the chat, or the same tap twice) it is
+// 'raced', not a Done early on the next occurrence.
+export async function completeNow(env, r, credit, tz, { expect } = {}) {
   const firing = await env.DB.prepare(
     "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
   ).bind(r.id).first();
   if (!firing) {
+    if (expect === 'now') return 'raced';
     if (r.paused || r.next_fire_at == null) return 'idle';
     return await completeEarly(env, r, credit, tz) ? 'early' : 'raced';
   }
@@ -337,7 +341,7 @@ async function chorePickerMarkup(env, chatId, tz) {
     { text: `✏️ ${buttonText(r, tz)}`, callback_data: `m:item:${r.id}` },
   ]);
   if (results.length > 20) rows.push([{ text: '…use /list for the rest', callback_data: 'm:close' }]);
-  rows.push([{ text: '← Done', callback_data: 'm:close' }]);
+  rows.push([{ text: '✕ Close', callback_data: 'm:close' }]);
   return { inline_keyboard: rows };
 }
 
@@ -406,7 +410,7 @@ export async function handleManageCallback(env, cb) {
   const tz = await getTz(env, r.chat_id);
   if (action === 'item') {
     await renderManager(env, cb, await choreActionsMarkup(env, r, tz));
-    return answerCallback(env, cb.id, buttonText(r, tz));
+    return answerCallback(env, cb.id, '');
   }
   if (action === 'edit') {
     await renderManager(env, cb, await editorButtons(env, r));
@@ -428,13 +432,13 @@ export async function handleManageCallback(env, cb) {
     // is unchanged and cannot be relied on to say which chore this is.
     await renderManager(env, cb, { inline_keyboard: [
       [{ text: clip(`🗑 Delete · ${r.text}`), callback_data: `m:confirm:${r.id}` }],
-      [{ text: '← Back to chores', callback_data: `m:item:${r.id}` }],
+      [{ text: '← Back', callback_data: `m:item:${r.id}` }],
     ] });
     return answerCallback(env, cb.id, 'This removes the chore for everyone.');
   }
   if (action === 'confirm') {
     await deleteReminder(env, r);
-    return answerCallback(env, cb.id, 'Deleted — Undo is available below.');
+    return answerCallback(env, cb.id, 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.');
   }
 
   if (action === 'pause' || action === 'resume') {

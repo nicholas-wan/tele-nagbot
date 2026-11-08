@@ -3,7 +3,7 @@
 
 import { tg, sendPrivate, esc, recordSentMessage } from './tg.js';
 import { ParseError } from './parse.js';
-import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags } from './stickers.js';
+import { createStickerSet, deleteSticker, lookupPack, tagSticker, autoTagPack, listTags, forgetPack } from './stickers.js';
 
 export async function cmdMakeStickers(env, ctx, msg) {
   const res = await createStickerSet(env, msg.from.id);
@@ -97,6 +97,7 @@ export async function cmdUsePack(env, ctx, args) {
     await env.DB.prepare(
       'INSERT INTO settings (chat_id, sticker_set) VALUES (?, NULL) ON CONFLICT(chat_id) DO UPDATE SET sticker_set = NULL'
     ).bind(chatId).run();
+    forgetPack(env, chatId);
     return sendPrivate(env, ctx, '🐾 Back to the Latte &amp; Mocha pack.');
   }
   const pack = await lookupPack(env, raw);
@@ -106,6 +107,7 @@ export async function cmdUsePack(env, ctx, args) {
   await env.DB.prepare(
     'INSERT INTO settings (chat_id, sticker_set) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET sticker_set = excluded.sticker_set'
   ).bind(chatId, pack.name).run();
+  forgetPack(env, chatId);
   await sendPrivate(env, ctx,
     `🐾 Nag stickers switched to <b>${esc(pack.title)}</b> (${pack.count} stickers).`);
 }

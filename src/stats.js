@@ -127,7 +127,7 @@ async function statsHtml(env, chatId, tz, view) {
     if (!s.total && !s.expired) {
       return view === 'last'
         ? `📅 <b>Last week</b> — ${ofWeek}\n\nNothing was completed. The cats pretend not to remember.`
-        : '🏆 Fresh week, empty board — first chore takes the lead! (Resets every Monday.)';
+        : '🏆 Fresh week, empty leaderboard — first chore takes the lead! (Resets every Monday.)';
     }
     const streak = view === 'week' && s.people.length
       ? await winnerStreak(env, chatId, tz, s.people[0][0]) : 0;
