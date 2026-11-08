@@ -10,7 +10,7 @@ import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
 import { primePack, tagReads } from './stickers.js';
-import { localParts, weekStart, deferQuietHours } from './time.js';
+import { localParts, weekStart, deferQuietHours, zonedEpoch } from './time.js';
 import { recoverUpdates, recoveryStatements, pruneOldUpdatesStatement } from './updates.js';
 
 // What this tick has to do, in one round trip. Nearly every minute the answer
@@ -360,14 +360,26 @@ export async function sendDigests(env, now, paused = null, chats = null) {
       // come (isHouseholdDeferred, in SQL) is due when they said, not this
       // morning — listing it with a ✅ under the thumb is how a chore that
       // was not even due got marked done by mistake.
+      // Re-nags run before this digest. A card delivered since 08:00 already
+      // says it, so leave that chore out. Check the persisted send, not just
+      // next_nag_at: a failed send must still get its chance in the digest,
+      // and another cron isolate must see the same decision.
+      const morning = zonedEpoch(p.y, p.mo, p.d, 8, 0, tz);
       const nagging = await env.DB.prepare(
         `SELECT f.id FROM firings f JOIN reminders r ON r.id = f.reminder_id
          WHERE f.chat_id = ? AND f.state = 'nagging' AND r.paused = 0
            AND (r.schedule_kind = 'once' OR f.fired_at > ?)
            AND f.fired_at < ?
            AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at IS NOT NULL
-                    AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)`
-      ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now).all();
+                    AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)
+           AND NOT (f.nag_count > 0 AND EXISTS (
+             SELECT 1 FROM sent_messages s
+             WHERE s.chat_id = COALESCE(f.nag_chat_id, f.chat_id)
+               AND s.message_id = f.last_message_id
+               AND s.is_ephemeral = f.last_message_ephemeral
+               AND (s.is_ephemeral = 0 OR s.receiver_user_id = f.nag_user_id)
+               AND s.created_at >= ?))`
+      ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now, morning).all();
       if (!nagging.results.length) continue;
       const view = await digestView(env, chat_id, nagging.results.map((f) => f.id));
       await sendMessage(env, chat_id, view.html, view.markup, { silent: true });

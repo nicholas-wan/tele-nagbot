@@ -4,7 +4,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { sendDigests } from '../src/cron.js';
+import { runCron, sendDigests } from '../src/cron.js';
 import { handleUpdate } from '../src/handlers.js';
 import { d1 } from './d1.js';
 
@@ -40,6 +40,32 @@ const tap = (data, markup, chatId = 1, from = { id: 2, first_name: 'Nick', usern
   } });
 
 describe('the 8am digest', () => {
+  it('lets the cron re-nag first, then names only the other chores in its digest', async () => {
+    await runCron(env);
+    expect(firing(5).nag_count).toBe(1);
+    expect(buttons(digest().body.reply_markup)).toEqual([['✅ Done · clear poop', 'dg:6'], ['✅ OK', 'ok']]);
+  });
+
+  it.each([false, true])('omits a re-nag delivered this morning (private: %s)', async (privateNag) => {
+    sql.prepare('UPDATE firings SET nag_count = 1, last_message_ephemeral = ?, nag_user_id = ? WHERE id = 6')
+      .run(Number(privateNag), privateNag ? 2 : null);
+    sql.prepare(`INSERT INTO sent_messages
+      (chat_id, receiver_user_id, message_id, is_ephemeral, delete_after, created_at)
+      VALUES (1, ?, 778, ?, ?, ?)`)
+      .run(privateNag ? 2 : null, Number(privateNag), EIGHT_AM + 86400000, EIGHT_AM);
+    await sendDigests(env, EIGHT_AM + 60000);
+    expect(buttons(digest().body.reply_markup)).toEqual([['✅ Done · singlife', 'dg:5'], ['✅ OK', 'ok']]);
+  });
+
+  it('keeps a due re-nag with no successful send, and an older card', async () => {
+    sql.exec('UPDATE firings SET nag_count = 2');
+    sql.prepare(`INSERT INTO sent_messages
+      (chat_id, message_id, is_ephemeral, delete_after, created_at)
+      VALUES (1, 778, 0, ?, ?)`).run(EIGHT_AM + 86400000, EIGHT_AM - 60000);
+    await sendDigests(env, EIGHT_AM);
+    expect(buttons(digest().body.reply_markup)).toHaveLength(3);
+  });
+
   it('names each chore left nagging with a Done button for it, silently', async () => {
     await sendDigests(env, EIGHT_AM);
     const d = digest();
