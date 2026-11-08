@@ -37,8 +37,17 @@ export function undoButtons(reminderId, sourceMsgId = null) {
 // the legacy handles.
 export async function findReminder(env, chatId, args, cmd = 'delete') {
   const raw = String(args).replace('#', '').trim();
-  if (!raw) throw new ParseError(`Which chore? e.g. /${cmd} nails (see /list).`);
   const { results } = await env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ?').bind(chatId).all();
+  if (!raw) {
+    // The example is one of this household's own chores, ready to tap-copy,
+    // rather than "nails", which nobody here has.
+    const err = new ParseError(`Which chore? e.g. /${cmd} nails (see /list).`);
+    const first = [...results].sort((a, b) => (a.display_num || 0) - (b.display_num || 0))[0];
+    err.html = first
+      ? `😿 Which chore? e.g. <code>/${esc(cmd)} ${esc(first.text)}</code> — see /list.`
+      : '😺 No chores yet — add one with <code>/chore trash 7pm daily</code>.';
+    throw err;
+  }
   // Only an argument that is nothing but a number is a legacy handle — a name
   // that merely starts with digits ("10pm meds") must reach the name match.
   if (/^\d+$/.test(raw)) {

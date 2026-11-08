@@ -297,6 +297,23 @@ describe('marking done in words', () => {
   });
 });
 
+describe('the 8am digest', () => {
+  it('is the receipt for a private chore finished from it — no second line beside it', async () => {
+    reminder({ assignee_name: '@zack', assignee_user_id: 3 });
+    nagging({ last_message_ephemeral: 1, nag_user_id: 3, last_message_id: 700 });
+    const digest = {
+      chat: { id: 1 }, message_id: 90, text: '☀️ Mrow. Still waiting on:\n• trash',
+      reply_markup: { inline_keyboard: [[{ text: '✅ Done · trash', callback_data: 'dg:5' }], [{ text: '✅ OK', callback_data: 'ok' }]] },
+    };
+    await tap(zack, 'dg:5', digest);
+    expect(firing().state).toBe('done');
+    expect(sent('sendMessage').some((c) => /done by/.test(c.body.text))).toBe(false);
+    const redraw = sent('editMessageText').find((c) => c.body.message_id === 90);
+    expect(redraw.body.text).toContain('😻 <s>trash</s> — done by @zack');
+    expect(redraw.body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data)).toContain('nd:5');
+  });
+});
+
 describe('command replies', () => {
   it('pauses with a ▶️ Resume to tap, which turns the reply into the resumed line', async () => {
     reminder();
@@ -331,6 +348,14 @@ describe('command replies', () => {
     expect(texts().at(-1)).toBe('😿 The cats can\'t find a chore matching "mpps". See /list.');
     await say(anne, '/done mos');
     expect(texts().at(-1)).toBe('😿 The cats can\'t find a chore matching "mos". See /list.');
+  });
+
+  it('asks "which chore?" with one of the household\'s own', async () => {
+    await say(anne, '/skip');
+    expect(texts().at(-1)).toBe('😺 No chores yet — add one with <code>/chore trash 7pm daily</code>.');
+    reminder({ text: 'clear poop' });
+    await say(anne, '/skip');
+    expect(texts().at(-1)).toBe('😿 Which chore? e.g. <code>/skip clear poop</code> — see /list.');
   });
 
   it('dates a done-early receipt as the board does', async () => {

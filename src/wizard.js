@@ -28,7 +28,8 @@ export async function startTextPrompt(env, ctx, from, scored) {
     : mentionHtml(from.first_name || 'you', from.id);
   const prompt = await sendPrivate(env, ctx,
     `🐾 ${mention} — what should Latte &amp; Mocha nag about? Reply with the chore, ` +
-    'e.g. <code>trash 7pm daily</code>, <code>dishes now</code>, or <code>@jane plants mon 8am</code>.',
+    // The assignee example is one of this household's shortcuts when it has any.
+    `e.g. <code>trash 7pm daily</code>, <code>dishes now</code>, or <code>${esc([...nicknames(env).keys()].pop() || '@jane')} plants mon 8am</code>.`,
     { force_reply: true, selective: true });
   const pRef = msgRef(prompt);
   if (pRef) {

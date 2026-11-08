@@ -907,6 +907,9 @@ async function handleCallback(env, cb) {
       if (!r) return answerCallback(env, cb.id, 'That one is gone.');
       won = await completeFiring(env, live, r, senderName(cb.from), await getTz(env, chatId), {
         onClaim: () => answerCallback(env, cb.id, 'Purrs 😻 — ↩️ Not done is right there if that was a slip'),
+        // The digest is redrawn below with the chore struck through and its
+        // ↩️ Not done: that is the receipt, so a private nag gets no second one.
+        receipt: false,
       });
     }
     if (!won) await answerCallback(env, cb.id, 'Already handled 👍');
