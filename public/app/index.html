@@ -44,6 +44,8 @@ window.earlyFetch = (() => {
     --separator: var(--tg-theme-section-separator-color, rgba(128, 128, 128, 0.22));
     --radius: 12px;
     --thumb: var(--section);
+    /* How strongly a tinted button (a list row's Done) takes the accent. */
+    --tint: 14%;
     /* Urgent text: dark enough on white to read (5.3:1), lighter on dark. */
     --alert: #a85500;
   }
@@ -51,10 +53,10 @@ window.earlyFetch = (() => {
     :root:not(.tg) {
       --bg: #101014; --section: #1c1c22; --text: #f2f2f5; --hint: #8d8d96;
       --link: #5aa9ef; --accent: #3a8fd9; --header: #8d8d96; --alert: #ff9f0a;
-      --thumb: color-mix(in srgb, var(--text) 16%, var(--section));
+      --thumb: color-mix(in srgb, var(--text) 16%, var(--section)); --tint: 22%;
     }
   }
-  :root.tg.dark { --alert: #ff9f0a; --thumb: color-mix(in srgb, var(--text) 16%, var(--section)); }
+  :root.tg.dark { --alert: #ff9f0a; --thumb: color-mix(in srgb, var(--text) 16%, var(--section)); --tint: 22%; }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); }
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -109,7 +111,7 @@ window.earlyFetch = (() => {
   .row .main { flex: 1; min-width: 0; }
   .row .title { font-weight: 600; overflow-wrap: anywhere; }
   .row .meta { color: var(--hint); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .field .meta { color: var(--hint); font-size: 14px; }
+  .field .meta { color: var(--hint); font-size: 14px; text-wrap: balance; }
   .row .meta.status { white-space: normal; }
   .meta.alert { color: var(--alert); }
   .row.link { color: var(--link); }
@@ -153,15 +155,17 @@ window.earlyFetch = (() => {
   .chev { flex: none; display: grid; place-items: center; width: 10px; color: color-mix(in srgb, var(--hint) 70%, transparent); transition: transform 0.15s; }
   .chev svg { display: block; width: 8px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .chev.open { transform: rotate(90deg); }
+  /* A list row's Done: a tinted pill, as Telegram's own Open and Join are, so
+     two nags at once are not two solid slabs. It fills the moment it is
+     tapped. */
   .quick {
-    position: relative; flex: none; min-width: 72px; height: 34px; padding: 0 14px; border: 0; border-radius: 999px;
-    background: var(--accent); color: var(--accent-text); font-weight: 600; font-size: 15px; cursor: pointer;
+    position: relative; flex: none; min-width: 68px; height: 32px; padding: 0 14px; border: 0; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) var(--tint), transparent); color: var(--accent);
+    font-weight: 600; font-size: 15px; cursor: pointer;
   }
-  .quick::after { content: ""; position: absolute; inset: -7px -4px; }
-  .quick:active { opacity: 0.75; }
-  .quick.done, .quick.done:disabled {
-    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); opacity: 1;
-  }
+  .quick::after { content: ""; position: absolute; inset: -8px -4px; }
+  .quick:active { background: color-mix(in srgb, var(--accent) calc(var(--tint) + 10%), transparent); }
+  .quick.done, .quick.done:disabled { background: var(--accent); color: var(--accent-text); opacity: 1; }
   .bar { display: flex; gap: 8px; align-items: stretch; margin: 0 0 14px; }
   .bar .seg { flex: 1; margin: 0; }
   .seg {
@@ -215,13 +219,13 @@ window.earlyFetch = (() => {
   }
   .field input[type=time]::-webkit-calendar-picker-indicator { display: none; }
   .field input[type=time]::-webkit-date-and-time-value { text-align: right; }
-  .field.stack { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px 14px 14px; }
-  .field.stack label { color: var(--hint); font-size: 13px; }
+  .label[for] { display: block; }
+  .field.stack { flex-direction: column; align-items: stretch; gap: 4px; padding: 0 14px 12px; }
   .field.stack input {
-    width: 100%; min-height: 46px; padding: 10px 12px; border: 0; border-radius: 10px;
-    background: var(--bg); font-size: 17px;
+    width: 100%; min-height: 50px; padding: 0; border: 0; border-radius: 0;
+    background: none; font-size: 17px; caret-color: var(--accent);
   }
-  .field.stack input:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  .field.stack input::placeholder { color: color-mix(in srgb, var(--hint) 75%, transparent); }
   .chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -14px; padding: 2px 14px; }
   .chips::-webkit-scrollbar { display: none; }
   .chip {
@@ -261,6 +265,7 @@ window.earlyFetch = (() => {
     transform: translateY(calc(100% + 40px)); visibility: hidden; z-index: 10;
     transition: transform 0.22s ease-out, visibility 0s linear 0.22s;
   }
+  .toast .glyph { flex: none; align-self: flex-start; padding-top: 5px; line-height: 1.35; margin-right: -2px; }
   .toast .msg { flex: 1; min-width: 0; padding: 4px 0; overflow-wrap: anywhere; }
   .toast .act {
     flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 8px; background: none;
@@ -315,7 +320,7 @@ const ICONS = {
   together: '<circle cx="9" cy="8.5" r="3.1"/><path d="M3.6 19c.6-3.1 2.7-4.9 5.4-4.9s4.8 1.8 5.4 4.9"/><path d="M15.2 5.6a3 3 0 0 1 0 5.8M17 14.4c1.9.5 3.1 2 3.5 4.4"/>',
   person: '<circle cx="12" cy="8.3" r="3.5"/><path d="M5.6 19.5c.7-3.6 3.2-5.6 6.4-5.6s5.7 2 6.4 5.6"/>',
   skip: '<path d="M6 6.2l7.5 5.8L6 17.8z"/><path d="M17.5 6v12"/>',
-  pause: '<rect x="6.5" y="5.5" width="3.6" height="13" rx="1"/><rect x="13.9" y="5.5" width="3.6" height="13" rx="1"/>',
+  pause: '<path d="M9 6.5v11M15 6.5v11" style="stroke-width: 2.6"/>',
   resume: '<path d="M8 5.6l10.5 6.4L8 18.4z"/>',
   trash: '<path d="M4.5 7h15M9.5 7V5.2h5V7M6.5 7l.9 12.3h9.2l.9-12.3M10.2 10.8v5M13.8 10.8v5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -357,7 +362,13 @@ let toastTimer;
 function toast(message, kind = 'success', action = null) {
   if (!message) return;
   const node = document.getElementById('toast');
-  node.replaceChildren(...[h('div', { class: 'msg' }, message),
+  // The emoji a message leads with gets a column of its own, so a second
+  // line starts under the words rather than under the emoji.
+  const glyph = String(message).match(LEADING_EMOJI);
+  const words = glyph ? String(message).slice(glyph[0].length) : message;
+  node.replaceChildren(...[
+    glyph ? h('span', { class: 'glyph', 'aria-hidden': 'true' }, glyph[0].trim()) : null,
+    h('div', { class: 'msg' }, words),
     action ? h('button', {
       class: 'act', type: 'button',
       onclick: () => { hideToast(); action.run(); },
@@ -727,7 +738,7 @@ function chore() {
       doNow ? h('button', {
         class: 'primary first', onclick: (event) => done(event.currentTarget, c, { how: 'me' }),
       }, 'Done') : null,
-      h('div', { style: doNow ? 'margin-top: 10px' : 'margin-top: 16px' }, bones(c.paused ? 1 : doNow ? 2 : 3, 'action')),
+      h('div', { style: doNow ? 'margin-top: 12px' : 'margin-top: 16px' }, bones(c.paused ? 1 : doNow ? 2 : 3, 'action')),
       h('div', { class: 'label' }, ' '),
       bones(3, 'setting'),
     ];
@@ -765,7 +776,7 @@ function chore() {
     }
     lead.push(
       nagging ? h('button', { class: 'primary first', onclick: doneAs({ how: 'me' }) }, 'Done') : null,
-      h('div', { class: 'section', style: nagging ? 'margin-top: 10px' : 'margin-top: 16px' }, rows),
+      h('div', { class: 'section', style: nagging ? 'margin-top: 12px' : 'margin-top: 16px' }, rows),
       early ? h('div', { class: 'note' }, 'Counts on the board and skips the next reminder.') : null);
   }
 
@@ -787,7 +798,7 @@ function chore() {
   // litter box clears the poop. Only recurring chores can sit under one.
   const resetsWith = (c.parents || []).length || c.parentId != null
     ? h('div', { class: 'field' }, h('span', { class: 'name' },
-      h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'When that one is done, this resets too')),
+      h('div', null, 'Resets with'), h('div', { class: 'meta' }, 'When that one is done')),
       select('Resets with', [['0', 'Nothing'], ...(c.parents || []).map((p) => [String(p.id), p.text])],
         c.parentId != null ? String(c.parentId) : '0', (event) => edit('parent', event.target.value),
         c.under || 'Nothing'))
@@ -797,10 +808,13 @@ function chore() {
   const fam = c.family || [];
   const relation = { above: 'doing it resets this', below: 'reset when this is done', self: 'this chore' };
   const famRows = fam.map((m) => {
+    const when = m.rel === 'self' ? '' : keepTime(String(m.status || '').replace(LEADING_EMOJI, ''));
     const body = [h('span', { class: 'emo', 'aria-hidden': 'true' }, emoji(m)), h('div', { class: 'main' },
       h('div', { class: 'title' }, m.text),
-      h('div', { class: 'meta' }, [m.rel === 'self' ? null : keepTime(String(m.status || '').replace(LEADING_EMOJI, '')),
-        relation[m.rel]].filter(Boolean).join(' · ')))];
+      // When it is due, then how it is related, each on a line of its own,
+      // as a list row's are: a deep row never breaks one in the middle.
+      when ? h('div', { class: 'meta' }, when) : null,
+      relation[m.rel] ? h('div', { class: 'meta' }, relation[m.rel]) : null)];
     const props = { class: `row fam${m.depth ? ' nested' : ''}${m.rel === 'self' ? ' self' : ''}`, style: `--d: ${m.depth}` };
     return m.rel === 'self' ? h('div', { ...props, 'aria-current': 'page' }, body)
       : h('button', { ...props, type: 'button', onclick: () => openChore(m.id) }, body, chevron());
@@ -858,9 +872,12 @@ function chore() {
       // does it from the Family section.
       fam.length ? null : resetsWith),
 
-    h('div', { class: 'section', style: 'margin-top: 28px' },
-      c.canSkip && !c.paused ? action('link', 'skip', 'Skip next', (event) => act(event.currentTarget, 'skip')) : null,
-      c.paused ? null : action('link', 'pause', 'Pause', (event) => act(event.currentTarget, 'pause')),
+    // Skip and Pause together; Delete in a group of its own, as Telegram
+    // keeps its own destructive rows apart.
+    c.paused ? null : h('div', { class: 'section', style: 'margin-top: 28px' },
+      c.canSkip ? action('link', 'skip', 'Skip next', (event) => act(event.currentTarget, 'skip')) : null,
+      action('link', 'pause', 'Pause', (event) => act(event.currentTarget, 'pause'))),
+    h('div', { class: 'section', style: c.paused ? 'margin-top: 28px' : 'margin-top: 16px' },
       action('danger', 'trash', 'Delete chore', (event) => remove(event.currentTarget))),
   ];
 }
@@ -894,9 +911,11 @@ function add() {
   }, text);
   return [
     header(values.scored ? 'Add chore' : 'Add reminder'),
-    h('div', { class: 'section gap' },
+    // The text is a plain row of its section, as Telegram's own fields are:
+    // its heading above, no box inside the box.
+    h('label', { class: 'label', for: 'text' }, 'What, and when'),
+    h('div', { class: 'section' },
       h('div', { class: 'field stack' },
-        h('label', { for: 'text' }, 'What, and when'),
         h('input', {
           id: 'text', type: 'text', value: values.text, placeholder: 'trash 7pm daily', maxLength: 240,
           autocomplete: 'off', autocapitalize: 'off', enterKeyHint: 'done',
@@ -948,7 +967,8 @@ function stats() {
       h('div', { class: 'label' }, `Week of ${s.week} · ${s.total} done`),
       h('div', { class: 'section' }, people,
         s.together ? h('div', { class: 'row' }, h('span', { class: 'emo', 'aria-hidden': 'true' }, '🤝'),
-          h('div', { class: 'main' }, 'Done together'), h('span', { class: 'count' }, s.together)) : null),
+          h('div', { class: 'main' }, h('div', { class: 'title' }, 'Done together')),
+          h('span', { class: 'count' }, s.together)) : null),
       s.expired ? h('div', { class: 'note' },
         `🪦 ${s.expired} ${s.expired === 1 ? 'chore' : 'chores'} expired with nobody on it`) : null,
       s.recent.length ? [
@@ -956,13 +976,15 @@ function stats() {
         h('div', { class: 'section' }, s.recent.map((item) => h('div', { class: 'row' },
           h('span', { class: 'emo', 'aria-hidden': 'true' }, item.emoji && item.emoji !== PIN ? item.emoji : ''),
           h('div', { class: 'main' },
-            h('div', { class: 'wrap' }, item.text),
+            h('div', { class: 'title' }, item.text),
             h('div', { class: 'meta' }, `${item.who.includes(' & ') ? 'together' : item.who} · ${keepTime(item.when)}`))))),
       ] : null,
     ] : h('div', { class: 'empty' }, h('div', { class: 'big' }, '🏆'),
       h('div', { class: 'what' }, s.view === 'last' ? 'Nothing done last week' : 'Nothing done yet this week'),
       h('div', null, s.view === 'last' ? 'The cats pretend not to remember.' : 'The first chore done takes the lead.')),
-    h('div', { class: 'note', style: 'text-align: center; margin-top: 16px' }, 'Chores count; reminders do not. The week starts on Monday.'),
+    // Centred under the empty state; under a list it keeps the list's edge.
+    h('div', { class: 'note', style: s && (s.total || s.expired) ? 'margin-top: 16px' : 'text-align: center; margin-top: 16px' },
+      'Chores count; reminders do not. The week starts on Monday.'),
   ];
 }
 
