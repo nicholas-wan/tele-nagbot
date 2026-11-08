@@ -494,22 +494,28 @@ export async function setReminderPaused(env, r, pause, tz, by) {
   if (!pause && !r.paused) return { firing: null, next: r.next_fire_at };
   let next = r.next_fire_at;
   let restamped = null;
+  // The live nag is read back in the same batch as the flag's write.
+  const liveNag = env.DB.prepare(
+    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
+  ).bind(r.id);
+  let read;
   if (pause) {
     // Only the flag. Writing next_fire_at back as well was the one move of
     // that column with no compare-and-swap: a fire claimed between the read
     // and this write had its consumed slot put back, to fire again on resume.
-    await env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id).run();
+    [, read] = await env.DB.batch([
+      env.DB.prepare('UPDATE reminders SET paused = 1 WHERE id = ?').bind(r.id), liveNag,
+    ]);
   } else {
     // Firings first: paused = 0 is what re-arms the cron, so a tick that sees
     // it must already be looking at the restamped clock.
     next = resumeNextFire(r, now, tz);
     restamped = await restampLiveNags(env, r, now, tz);
-    await env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?')
-      .bind(next, r.id).run();
+    [, read] = await env.DB.batch([
+      env.DB.prepare('UPDATE reminders SET paused = 0, next_fire_at = ? WHERE id = ?').bind(next, r.id), liveNag,
+    ]);
   }
-  const firing = await env.DB.prepare(
-    "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
-  ).bind(r.id).first();
+  const firing = (read.results || [])[0] || null;
   if (firing) await later(env, async () => {
     if (pause) {
       await showPausedCard(env, firing, r, by, tz);

@@ -21,7 +21,7 @@ import {
   choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, boardStatements, boardFrom,
   deferBoards, flushBoards, later, takeRides,
 } from './dashboard.js';
-import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
+import { completeNow, editorPlan, flagPlan, skipPlan, JUST_FIRED, NAG_PACES } from './manage.js';
 import { reminderInsert, deleteReminder, removalStatements, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
@@ -301,11 +301,14 @@ const routes = [
     return choreReply(env, chatId, r.id, tz, user, { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome] }, pending);
   }, { chore: true }],
 
+  // The skip's compare-and-swap rides in the batch the reply reads.
   ['POST', /^chore\/(\d+)\/skip$/, async ({ env, chatId, tz, user, r, pending }) => {
-    const next = await skipNext(env, r, tz);
-    if (next === 'once') return json({ ok: false, message: 'One-off chores cannot be skipped.' });
-    if (next == null) return json({ ok: false, message: JUST_FIRED });
-    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtLocal(next, tz)}` }, pending);
+    const plan = skipPlan(env, r, tz);
+    if (plan === 'once') return json({ ok: false, message: 'One-off chores cannot be skipped.' });
+    const snap = await snapshot(env, chatId, tz, [plan.statement, ...pending.splice(0)]);
+    if (!snap.before[0].meta.changes) return json({ ok: false, message: JUST_FIRED });
+    await updateDashboard(env, chatId);
+    return choreReply(env, chatId, r.id, tz, user, { message: `⏭️ Skipped — next ${fmtLocal(plan.next, tz)}` }, [], snap);
   }, { chore: true }],
 
   ['POST', /^chore\/(\d+)\/(pause|resume)$/, async ({ env, chatId, tz, user, r, match, pending }) => {

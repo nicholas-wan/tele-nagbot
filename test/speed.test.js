@@ -705,6 +705,24 @@ describe('the Mini App, round trips before its answer', () => {
     expect(sql.prepare("SELECT COUNT(*) AS n FROM trash WHERE json_extract(payload, '$._cover') IS NOT NULL").get().n).toBe(1);
   });
 
+  it('a skip: two, its compare-and-swap inside the answer\'s batch; a pause: three, the flag with its nag', async () => {
+    const skip = await appWaves('chore/9/skip', {});
+    expect(skip.reply).toMatchObject({ ok: true });
+    expect(skip.reply.message).toMatch(/^⏭️ Skipped — next /);
+    expect(skip.waves).toBe(2);
+    expect(sql.prepare('SELECT next_fire_at FROM reminders WHERE id = 9').get().next_fire_at).toBe(NOW + 14 * HOUR + DAY - HOUR / 2);
+    // A slot the cron claimed meanwhile: the swap loses, and says so.
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW + 3 * DAY} WHERE id = 9`);
+    const { skipPlan } = await import('../src/manage.js');
+    const stale = { ...sql.prepare('SELECT * FROM reminders WHERE id = 9').get(), next_fire_at: NOW + 14 * HOUR };
+    expect((await skipPlan(env, stale, 'Asia/Singapore').statement.run()).meta.changes).toBe(0);
+    const pause = await appWaves('chore/8/pause', {});
+    expect(pause.reply).toMatchObject({ ok: true, message: '⏸️ Paused' });
+    expect(pause.waves).toBe(3);
+    await settle();
+    expect(calls.find((c) => c.method === 'editMessageText' && c.body.message_id === 700).body.text).toMatch(/Paused by/);
+  });
+
   it('an edit and an add: two, the write inside the answer\'s batch', async () => {
     const edit = await appWaves('chore/9/edit', { field: 'nag', value: '30' });
     expect(edit.reply.chore.paceKey).toBe('30');

@@ -279,13 +279,24 @@ export function flagPlan(env, r, kind, on, tz) {
 // a skip that read the slot just before it fired used to write the value the
 // cron had already written and report a skip that changed nothing.
 export async function skipNext(env, r, tz) {
-  if (r.schedule_kind === 'once' || !r.next_fire_at) return 'once';
-  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
-  const res = await env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-    .bind(next, r.id, r.next_fire_at).run();
+  const plan = skipPlan(env, r, tz);
+  if (plan === 'once') return 'once';
+  const res = await plan.statement.run();
   if (!res.meta.changes) return null;
   await updateDashboard(env, r.chat_id);
-  return next;
+  return plan.next;
+}
+
+// The skip's write, for a batch of the caller's own (the Mini App's answer):
+// { next, statement }, or 'once' for a chore with no next slot to skip.
+export function skipPlan(env, r, tz) {
+  if (r.schedule_kind === 'once' || !r.next_fire_at) return 'once';
+  const next = nextOccurrence(r.schedule_kind, JSON.parse(r.schedule_detail), r.next_fire_at, tz);
+  return {
+    next,
+    statement: env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+      .bind(next, r.id, r.next_fire_at),
+  };
 }
 
 // Done from the board or the Mini App, credited to `credit`: the live nag if
