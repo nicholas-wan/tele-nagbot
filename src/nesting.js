@@ -127,13 +127,18 @@ export async function coverChildren(env, parent, parentFiringId, tz, { nested = 
   }
   const reset = covered.filter((c) => c.removed.length || c.after != null)
     .map(({ r, removed, after }) => ({ id: r.id, text: r.text, before: r.next_fire_at, after, firings: removed }));
+  // The record ↩️ Not done puts the children back from. Only the receipt
+  // offers that, and the receipt is sent after this (later, in order), so in
+  // the Mini App the record waits for the answer too.
   if (reset.length && parentFiringId) {
-    try {
-      await env.DB.prepare('INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)')
-        .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: reset }), now).run();
-    } catch (e) {
-      console.log(`stashing the reset under ${parent.id} failed: ${e.stack || e}`);
-    }
+    await later(env, async () => {
+      try {
+        await env.DB.prepare('INSERT INTO trash (chat_id, payload, created_at) VALUES (?, ?, ?)')
+          .bind(parent.chat_id, JSON.stringify({ _cover: parentFiringId, at: now, children: reset }), now).run();
+      } catch (e) {
+        console.log(`stashing the reset under ${parent.id} failed: ${e.stack || e}`);
+      }
+    });
   }
   return reset.map((c) => c.text);
 }

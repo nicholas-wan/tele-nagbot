@@ -22,7 +22,7 @@ import {
   deferBoards, flushBoards, later,
 } from './dashboard.js';
 import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
-import { createReminder, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
+import { reminderInsert, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
 import { parentChoicesIn, setParent } from './nesting.js';
@@ -367,11 +367,14 @@ const routes = [
       p.assigneeUserId = member.userId;
     }
     p.scored = body.scored !== false;
-    const { id } = await createReminder(env, chatId, p, senderName(user), tz);
+    // The chore's INSERT rides in the batch the reply reads.
+    const snap = await snapshot(env, chatId, tz, [reminderInsert(env, chatId, p, senderName(user)), ...pending.splice(0)]);
+    const id = snap.before[0].meta.last_row_id;
+    await updateDashboard(env, chatId);
     await later(env, () => fireIfDue(env, id, tz, { dueAt: p.firstFireAt }));
     return choreReply(env, chatId, id, tz, user, {
       message: `📝 Added — first reminder ${fmtLocal(p.firstFireAt, tz)}`,
-    }, pending);
+    }, [], snap);
   }],
 
   // The leaderboard's two weekly tabs, counted as /stats counts them, read in

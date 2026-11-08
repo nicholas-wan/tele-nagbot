@@ -8,9 +8,11 @@
 //
 // "reply" is when the person sees something: the webhook response that
 // carries a tap's toast, or the Mini App's JSON. "all" is when every last
-// edit, board redraw and bookkeeping write has finished. Cold runs in a fresh
-// process (empty per-isolate caches); warm repeats it in the same process.
-// D1_MS and TG_MS override the assumed costs.
+// edit, board redraw and bookkeeping write has finished. "msg" is when the
+// first message or edit reached Telegram — for a typed command or a cron tick,
+// what the household first sees. Cold runs in a fresh process (empty
+// per-isolate caches); warm repeats it in the same process. D1_MS and TG_MS
+// override the assumed costs, AI_MS the Workers AI guess (default 1500).
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -18,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const D1_MS = Number(process.env.D1_MS || 20);
 const TG_MS = Number(process.env.TG_MS || 25);
+const AI_MS = Number(process.env.AI_MS || 1500);
 const CHAT = -1004418632524;
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
@@ -110,6 +113,7 @@ function stubTelegram(counts) {
     const method = String(url).split('/').pop();
     counts.tg++;
     counts.methods.push(method);
+    if (counts.firstMsg == null && /^(send|edit)/.test(method)) counts.firstMsg = realNow();
     await sleep(TG_MS);
     const result = method === 'getMe' ? { id: 1000, username: 'TwoShotsNagBot' }
       : method === 'getStickerSet' ? { stickers: [{ file_id: 's1', file_unique_id: 'u1' }, { file_id: 's2', file_unique_id: 'u2' }] }
@@ -168,18 +172,24 @@ const SCENARIOS = {
   'app-chore': { label: 'Mini App: open a chore', run: () => app('chore/4') },
   'app-done': { label: 'Mini App: Done', run: () => app('chore/4/done', {}) },
   'app-edit': { label: 'Mini App: change time', run: () => app('chore/5/edit', { field: 'time', value: '20:00' }) },
+  'app-add': { label: 'Mini App: add a chore', run: () => app('chores', { text: 'dishes 9pm daily' }) },
+  'wizard': { label: '/chore with no time (wizard)', run: () => typed('/chore water the cat') },
+  'cron-renag': { label: 'Cron tick, one re-nag due', cron: true, renag: true },
   'cron-idle': { label: 'Cron tick, nothing due', cron: true },
   'cron-fire': { label: 'Cron tick, one chore due', cron: true, due: 6 },
 };
 
 async function measure(name) {
   const scenario = SCENARIOS[name];
-  const counts = { d1: 0, tg: 0, methods: [] };
+  const counts = { d1: 0, tg: 0, methods: [], firstMsg: null };
   const sql = freshDb();
   if (scenario.due) sql.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ?').run(Date.now() - 1000, scenario.due);
+  if (scenario.renag) sql.prepare('UPDATE firings SET next_nag_at = ? WHERE id = 50').run(Date.now() - 1000);
   const env = {
     BOT_TOKEN: 'token', WEBHOOK_SECRET: 'hook', ALLOWED_CHATS: String(CHAT),
     MINI_APP_URL: 'https://t.me/TwoShotsNagBot/chores', DB: slowD1(sql, counts),
+    // Workers AI's schedule guess, which only the wizard asks for.
+    AI: { run: async () => { await sleep(AI_MS); return { response: '{"kind":"daily","h":20,"mi":0}' }; } },
   };
   stubTelegram(counts);
   const tasks = [];
@@ -198,7 +208,8 @@ async function measure(name) {
   for (let i = 0; i < tasks.length; i++) await tasks[i];
   const all = realNow() - t0;
   sql.close();
-  return { reply, all, d1: counts.d1, tg: counts.tg, methods: counts.methods };
+  const msg = counts.firstMsg == null ? null : counts.firstMsg - t0;
+  return { reply, all, msg, d1: counts.d1, tg: counts.tg, methods: counts.methods };
 }
 
 const self = fileURLToPath(import.meta.url);
@@ -217,10 +228,11 @@ if (mode === '--one') {
     rows.push({ name, label: SCENARIOS[name].label, cold, warm });
   }
   console.log(`D1 ${D1_MS}ms and Telegram ${TG_MS}ms per call\n`);
-  console.log('scenario                          reply cold/warm   all cold/warm    D1   TG');
+  console.log('scenario                          reply cold/warm   msg cold/warm    all cold/warm    D1   TG');
+  const ms = (n) => String(n == null ? '-' : n).padStart(5);
   for (const { label, cold, warm } of rows) {
-    console.log(`${label.padEnd(33)} ${String(cold.reply).padStart(5)} /${String(warm.reply).padStart(5)} ms`
-      + `  ${String(cold.all).padStart(5)} /${String(warm.all).padStart(5)} ms  ${String(warm.d1).padStart(4)} ${String(warm.tg).padStart(4)}`);
+    console.log(`${label.padEnd(33)} ${ms(cold.reply)} /${ms(warm.reply)} ms  ${ms(cold.msg)} /${ms(warm.msg)} ms`
+      + `  ${ms(cold.all)} /${ms(warm.all)} ms  ${String(warm.d1).padStart(4)} ${String(warm.tg).padStart(4)}`);
   }
   if (process.env.VERBOSE) for (const r of rows) console.log(r.name, r.warm.methods.join(' '));
 }

@@ -78,7 +78,7 @@ export async function createReminder(env, chatId, p, by, tz) {
 
 // The chore's INSERT. `gated` makes it a no-op unless the statement before it
 // in the batch changed a row — a draft's claim (createFromDraft).
-function reminderInsert(env, chatId, p, by, { gated = false } = {}) {
+export function reminderInsert(env, chatId, p, by, { gated = false } = {}) {
   const cols = `INSERT INTO reminders (chat_id, display_num, text, assignee_name, assignee_user_id, schedule_kind,
        schedule_detail, next_fire_at, nag_intervals, created_by, created_at, scored)`;
   const values = `?, ${FREE_NUMBER}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`;

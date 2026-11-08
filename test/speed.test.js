@@ -17,7 +17,7 @@ const DAY = 24 * HOUR;
 const NOW = Date.UTC(2026, 9, 10, 11, 30); // Sat 10 Oct 19:30 Asia/Singapore
 const BOARD = 99;
 
-let sql, env, calls, ops, tasks;
+let sql, env, calls, ops, tasks, answered;
 beforeEach(() => {
   vi.spyOn(Date, 'now').mockReturnValue(NOW);
   sql = new DatabaseSync(':memory:');
@@ -33,8 +33,17 @@ beforeEach(() => {
       next_nag_at, last_message_id, scored)
     VALUES (5, 8, 1, 'take out trash', ${NOW - HOUR}, 'nagging', 1, ${NOW + HOUR}, 700, 1)`);
   // Every D1 call in order: a batch is one entry, as it is one round trip.
+  // Each call answers a timer tick later, as a network call would, and is
+  // stamped with how many calls had answered when it started: calls that
+  // start before any of their neighbours answers share a `wave`, which is one
+  // round trip of waiting however many run side by side.
   ops = [];
+  answered = 0;
   const db = d1(sql);
+  const slow = (entry, work) => {
+    ops.push({ ...entry, wave: answered });
+    return new Promise((resolve) => setTimeout(resolve, 0)).then(work).finally(() => { answered++; });
+  };
   env = {
     BOT_TOKEN: TOKEN, WEBHOOK_SECRET: 'hook', ALLOWED_CHATS: '1',
     DB: {
@@ -42,16 +51,15 @@ beforeEach(() => {
         const wrap = (stmt) => ({
           ...stmt,
           bind: (...args) => wrap(stmt.bind(...args)),
-          first: () => { ops.push({ kind: 'first', sql: query }); return stmt.first(); },
-          all: () => { ops.push({ kind: 'all', sql: query }); return stmt.all(); },
-          run: () => { ops.push({ kind: 'run', sql: query }); return stmt.run(); },
+          first: () => slow({ kind: 'first', sql: query }, () => stmt.first()),
+          all: () => slow({ kind: 'all', sql: query }, () => stmt.all()),
+          run: () => slow({ kind: 'run', sql: query }, () => stmt.run()),
           query,
         });
         return wrap(db.prepare(query));
       },
       batch(statements) {
-        ops.push({ kind: 'batch', sql: statements.map((s) => s.query) });
-        return db.batch(statements);
+        return slow({ kind: 'batch', sql: statements.map((s) => s.query) }, () => db.batch(statements));
       },
     },
   };
@@ -67,7 +75,14 @@ beforeEach(() => {
     return new Response(JSON.stringify({ ok: true, result: { message_id: 500 + calls.length } }));
   }));
 });
-afterEach(() => { sql.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+// Work a test left running after its answer finishes before the database
+// closes, so none of it lands in the next test's counts.
+afterEach(async () => {
+  for (let i = 0; i < tasks.length; i++) await tasks[i].catch(() => {});
+  sql.close();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 const nick = { id: 2, first_name: 'Nick', username: 'nicholaswan' };
 let updateId = 1000;
@@ -343,5 +358,398 @@ describe('chat polish', () => {
     const tomb = calls.find((c) => c.method === 'sendMessage' && /24 hours and nobody did it/.test(c.body.text));
     expect(tomb.body.text.startsWith('🪦')).toBe(true);
     expect(tomb.body.disable_notification).toBe(true);
+  });
+});
+
+// The second speed pass (8 Nov 2026, afternoon): every flow it changed, pinned
+// by its round trips. A round trip is a `wave` of D1 calls (see beforeEach):
+// calls started side by side cost one wait between them.
+const waves = (list = ops) => new Set(list.map((o) => o.wave)).size;
+
+describe('round trips before the toast', () => {
+  // Through the update runner rather than the webhook, so the toast goes to
+  // Telegram as its own call: the waves before that call are what the tapper
+  // waited for, on top of the intake's one batch (pinned above).
+  async function wavesBeforeToast(data, { messageId = 700, from = nick, chatId = 1 } = {}) {
+    const { runClaimedUpdate } = await import('../src/updates.js');
+    const inner = globalThis.fetch;
+    let seen = null;
+    let text = null;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (seen == null && String(url).endsWith('/answerCallbackQuery')) {
+        seen = waves();
+        text = JSON.parse(init.body).text;
+      }
+      return inner(url, init);
+    }));
+    ops.length = 0;
+    await runClaimedUpdate(env, { update_id: updateId++, callback_query: {
+      id: `cb-${data}`, data, from, message: { message_id: messageId, chat: { id: chatId } },
+    } }, { memberRecorded: true });
+    await settle();
+    vi.stubGlobal('fetch', inner);
+    return { waves: seen, text };
+  }
+  const warmTz = async () => { const { getTz } = await import('../src/household.js'); await getTz(env, 1); };
+
+  it('✅ Done and 🤝 Done together: one, the claim sent with its reads', async () => {
+    expect(await wavesBeforeToast('d:5')).toEqual({ waves: 1, text: 'Purrs 😻' });
+    expect(firing().state).toBe('done');
+    sql.exec("UPDATE firings SET state = 'nagging', done_by = NULL, done_at = NULL WHERE id = 5");
+    expect((await wavesBeforeToast('b:5')).waves).toBe(1);
+    expect(firing().done_by).toBe('@nicholaswan & @Dodgerblueee');
+  });
+
+  it('😴 a snooze preset: one', async () => {
+    await warmTz();
+    const { waves: n, text } = await wavesBeforeToast('z:5:60');
+    expect(n).toBe(1);
+    expect(text).toMatch(/^Snoozed until .* · 2 snoozes left$/);
+    expect(firing()).toMatchObject({ snoozes_used: 1, next_nag_at: NOW + HOUR, snoozed_until: NOW + HOUR });
+  });
+
+  it('caps a snooze at the expiry in the same write, and says so', async () => {
+    await warmTz();
+    sql.exec(`UPDATE firings SET fired_at = ${NOW - 23 * HOUR} WHERE id = 5`);
+    const { text } = await wavesBeforeToast('z:5:180');
+    expect(text).toMatch(/as late as it goes before it expires/);
+    expect(firing().next_nag_at).toBe(NOW - 23 * HOUR + DAY - 60000);
+  });
+
+  it('still refuses another household, and another member\'s private nag, in the claim itself', async () => {
+    env.ALLOWED_CHATS = '1,2';
+    expect((await wavesBeforeToast('d:5', { chatId: 2 })).text).toBe('Already handled 👍');
+    expect((await wavesBeforeToast('z:5:60', { chatId: 2 })).text).toBe('Already handled 👍');
+    sql.exec('UPDATE firings SET last_message_ephemeral = 1, nag_user_id = 3 WHERE id = 5');
+    expect((await wavesBeforeToast('d:5')).text).toBe('That nag is someone else\'s 🙈');
+    expect((await wavesBeforeToast('z:5:60')).text).toBe('That nag is someone else\'s 🙈');
+    expect(firing()).toMatchObject({ state: 'nagging', snoozes_used: 0 });
+  });
+
+  it('↩️ Not done, Together too, Not done early and Restore: two', async () => {
+    await warmTz();
+    await wavesBeforeToast('d:5');
+    expect((await wavesBeforeToast('nd:5')).waves).toBe(2);
+    expect(firing().state).toBe('nagging');
+    // A Done early from the confirmation, then its receipt's buttons.
+    await wavesBeforeToast('c:9');
+    const early = sql.prepare("SELECT id FROM firings WHERE reminder_id = 9 AND state = 'done'").get().id;
+    expect((await wavesBeforeToast(`g:${early}`)).waves).toBe(2);
+    expect((await wavesBeforeToast(`ne:${early}`)).waves).toBe(2);
+    expect(sql.prepare('SELECT next_fire_at FROM reminders WHERE id = 9').get().next_fire_at).toBe(NOW + 14 * HOUR);
+    // Undo a chore, then Restore it.
+    await wavesBeforeToast('u:9');
+    const stash = sql.prepare('SELECT id FROM trash ORDER BY id DESC').get().id;
+    expect((await wavesBeforeToast(`t:${stash}`)).waves).toBe(2);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM reminders WHERE id = 9').get().n).toBe(1);
+  });
+
+  it('help, stats tabs and editor screens answer first; an editor change once it is made', async () => {
+    await warmTz();
+    expect((await wavesBeforeToast('h:more', { messageId: 300 })).waves).toBe(0);
+    expect((await wavesBeforeToast('st:last', { messageId: 300 })).waves).toBe(0);
+    expect((await wavesBeforeToast('e:menu:9', { messageId: 300 })).waves).toBe(1);
+    expect((await wavesBeforeToast('e:setnag:9:30', { messageId: 300 }))).toEqual({ waves: 2, text: 'Updated ✓' });
+    expect(sql.prepare('SELECT nag_intervals FROM reminders WHERE id = 9').get().nag_intervals).toBe('[30]');
+  });
+
+  it('a wizard time: the draft read, then its claim and the new chore together', async () => {
+    await warmTz();
+    sql.exec(`INSERT INTO drafts (id, chat_id, text, schedule_kind, schedule_detail, nag_intervals, created_at, scored, user_id)
+      VALUES (40, 1, 'feed fish', 'daily', '{}', '[15,30,60]', ${NOW}, 1, 2)`);
+    expect(await wavesBeforeToast('w:40:h21', { messageId: 300 })).toEqual({ waves: 2, text: 'Scheduled 📝' });
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM reminders WHERE text = 'feed fish'").get().n).toBe(1);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM drafts').get().n).toBe(0);
+    // The same tap again finds the draft gone and creates nothing.
+    expect((await wavesBeforeToast('w:40:h21', { messageId: 300 })).text).toMatch(/expired/);
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM reminders WHERE text = 'feed fish'").get().n).toBe(1);
+  });
+});
+
+describe('replies, reactions and typed commands', () => {
+  async function send(update) {
+    await worker.fetch(new Request('https://nag.test/webhook', {
+      method: 'POST',
+      headers: { 'X-Telegram-Bot-Api-Secret-Token': 'hook' },
+      body: JSON.stringify({ update_id: updateId++, ...update }),
+    }), env, ctx());
+    await settle();
+  }
+  const typed = (id, text) => ({ message: {
+    message_id: id, from: nick, chat: { id: 1 }, date: 0, text,
+    entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+  } });
+
+  it('a 👍 reads the nag and its chore in one round trip, then claims it', async () => {
+    await send({ message_reaction: {
+      chat: { id: 1 }, message_id: 700, user: nick, new_reaction: [{ type: 'emoji', emoji: '👍' }],
+    } });
+    expect(firing().state).toBe('done');
+    const read = ops.find((o) => o.kind === 'batch' && o.sql.some((q) => /last_message_id = \?/.test(q)));
+    expect(read.sql.join('\n')).toMatch(/FROM firings f[\s\S]*FROM reminders r JOIN firings f/);
+    expect(ops.some((o) => o.kind === 'first' && /SELECT \* FROM reminders WHERE id = \?/.test(o.sql))).toBe(false);
+    expect(ops.some((o) => /nag_chat_id/.test(String(o.sql)))).toBe(false);
+  });
+
+  it('a typed /chore writes its sweep records in one batch, after the work', async () => {
+    await send(typed(950, '/chore dishes 9pm daily'));
+    expect(ops.some((o) => o.kind === 'run' && /INSERT INTO sent_messages/.test(o.sql))).toBe(false);
+    const records = ops.filter((o) => o.kind === 'batch' && o.sql.every((q) => /INSERT INTO sent_messages/.test(q)));
+    expect(records).toHaveLength(1);
+    // The kept command and its confirmation.
+    expect(records[0].sql).toHaveLength(2);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM sent_messages').get().n).toBe(2);
+  });
+
+  it('sends the wizard card before the AI guess, and edits the ✨ in when it comes', async () => {
+    let release;
+    env.AI = { run: () => new Promise((resolve) => { release = resolve; }) };
+    const done = send(typed(951, '/chore feed the fish'));
+    await vi.waitFor(() => expect(calls.some((c) => c.method === 'sendMessage' && /When should/.test(c.body.text))).toBe(true));
+    expect(calls.some((c) => c.method === 'editMessageText')).toBe(false);
+    release({ response: '{"kind":"daily","h":20,"mi":0}' });
+    await done;
+    const edit = calls.find((c) => c.method === 'editMessageText' && /When should/.test(c.body.text));
+    expect(edit.body.reply_markup.inline_keyboard[0][0].text).toBe('✨ daily 8pm');
+    expect(JSON.parse(sql.prepare('SELECT ai_json FROM drafts').get().ai_json).kind).toBe('daily');
+  });
+
+  it('never loses the card to a guess that does not come', async () => {
+    env.AI = { run: () => new Promise(() => {}) };
+    await send(typed(952, '/chore feed the fish'));
+    const card = calls.find((c) => c.method === 'sendMessage' && /When should/.test(c.body.text));
+    expect(card.body.reply_markup.inline_keyboard.flat().some((b) => /^✨/.test(b.text))).toBe(false);
+    expect(calls.some((c) => c.method === 'editMessageText')).toBe(false);
+    const draft = sql.prepare('SELECT ai_json, wizard_msg_id FROM drafts').get();
+    expect(draft.ai_json).toBe(null);
+    expect(draft.wizard_msg_id).toBeTruthy();
+  }, 10000);
+});
+
+describe('the intake when its batch answers with an error', () => {
+  it('handles an update whose batch committed anyway, and asks Telegram to retry one that did not', async () => {
+    const real = env.DB.batch;
+    let fail = 'after';
+    env.DB.batch = async (statements) => {
+      if (fail && statements[0].query.includes('INSERT INTO webhook_updates')) {
+        const mode = fail;
+        fail = null;
+        if (mode === 'after') await real(statements);
+        throw new Error('D1_ERROR: Network connection lost.');
+      }
+      return real(statements);
+    };
+    const answer = await tap('d:5');
+    await settle();
+    expect(answer.text).toBe('Purrs 😻');
+    expect(firing().state).toBe('done');
+
+    fail = 'before';
+    const response = await worker.fetch(new Request('https://nag.test/webhook', {
+      method: 'POST',
+      headers: { 'X-Telegram-Bot-Api-Secret-Token': 'hook' },
+      body: JSON.stringify({ update_id: 5555, callback_query: {
+        id: 'cb-x', data: 'ok', from: nick, message: { message_id: 900, chat: { id: 1 } },
+      } }),
+    }), env, ctx());
+    expect(response.status).toBe(503);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM webhook_updates WHERE update_id = 5555').get().n).toBe(0);
+  });
+});
+
+describe('the Mini App, round trips before its answer', () => {
+  // The answer is ready when the API builds its JSON response: the waves by
+  // then are what the page waited for. Telegram's own answers are built by
+  // the fetch stub and carry no Cache-Control, so they are not counted.
+  async function appWaves(path, body, user = nick) {
+    const fields = { auth_date: String(Math.floor(NOW / 1000)), start_param: 'g1', user: JSON.stringify(user) };
+    fields.hash = await signInitData(TOKEN, fields);
+    const Real = globalThis.Response;
+    let atReply = null;
+    globalThis.Response = class extends Real {
+      constructor(b, init) {
+        super(b, init);
+        if (atReply == null && init && init.headers && init.headers['Cache-Control'] === 'no-store') atReply = waves();
+      }
+    };
+    ops.length = 0;
+    try {
+      const response = await worker.fetch(new Request(`https://nag.test/api/app/${path}`, {
+        method: body ? 'POST' : 'GET',
+        headers: { Authorization: `tma ${new URLSearchParams(fields)}`, 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      }), env, ctx());
+      return { reply: { status: response.status, ...(await response.json()) }, waves: atReply };
+    } finally {
+      globalThis.Response = Real;
+    }
+  }
+  const asked = () => calls.filter((c) => c.method === 'getChatMember').length;
+
+  it('the list and a chore\'s screen: one, with Telegram asked once in a while', async () => {
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => (String(url).endsWith('/getChatMember')
+      ? (calls.push({ method: 'getChatMember' }), new Response(JSON.stringify({ ok: true, result: { status: 'member' } })))
+      : inner(url, init))));
+    const list = await appWaves('chores');
+    expect(list.reply.ok).toBe(true);
+    expect(list.waves).toBe(1);
+    expect((await appWaves('chore/9')).waves).toBe(1);
+    expect(asked()).toBe(1);
+    expect(ops.some((o) => /SELECT tz FROM settings/.test(String(o.sql)))).toBe(false);
+  });
+
+  it('asks Telegram beside the reads, not in front of them', async () => {
+    const inner = globalThis.fetch;
+    let readsStarted = null;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const res = await inner(url, init);
+      if (String(url).endsWith('/getChatMember')) readsStarted = ops.length;
+      return res;
+    }));
+    await appWaves('chores');
+    expect(readsStarted).toBe(1);
+  });
+
+  it('Done on a live nag: three — the gate, the claim, the answer — and the card after', async () => {
+    const { reply, waves: n } = await appWaves('chore/8/done', { expect: 'now' });
+    expect(reply).toMatchObject({ ok: true, message: 'Purrs 😻 — done.' });
+    expect(n).toBe(3);
+    expect(calls.some((c) => c.method === 'editMessageText' && c.body.message_id === 700)).toBe(false);
+    await settle();
+    expect(calls.find((c) => c.method === 'editMessageText' && c.body.message_id === 700).body.text).toMatch(/done by @nicholaswan/);
+    expect(boardEdits()).toHaveLength(1);
+  });
+
+  it('Done early: three as well', async () => {
+    const { reply, waves: n } = await appWaves('chore/9/done', {});
+    expect(reply).toMatchObject({ ok: true, message: 'Done early 😻' });
+    expect(n).toBe(3);
+  });
+
+  it('an edit and an add: two, the write inside the answer\'s batch', async () => {
+    const edit = await appWaves('chore/9/edit', { field: 'nag', value: '30' });
+    expect(edit.reply.chore.paceKey).toBe('30');
+    expect(edit.waves).toBe(2);
+    const add = await appWaves('chores', { text: 'feed fish 9pm daily' });
+    expect(add.reply.ok).toBe(true);
+    expect(add.reply.chore.text).toBe('feed fish');
+    expect(add.waves).toBe(2);
+  });
+
+  it('turns away someone Telegram says has left, even with a members row, writing nothing', async () => {
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => (String(url).endsWith('/getChatMember')
+      ? new Response(JSON.stringify({ ok: true, result: { status: 'left' } }))
+      : inner(url, init))));
+    const { reply } = await appWaves('chore/8/done', {});
+    await settle();
+    expect(reply.status).toBe(403);
+    expect(firing().state).toBe('nagging');
+    expect(ops.filter((o) => o.kind !== 'batch' || o.sql.some((q) => !/^\s*SELECT/i.test(q)))).toHaveLength(0);
+    expect(sql.prepare('SELECT last_seen FROM members WHERE user_id = 2').get().last_seen).toBe(0);
+  });
+
+  it('when Telegram does not answer: lets a known housemate in, and asks anyone else to retry', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: false, error_code: 502 }))));
+    expect((await appWaves('chores')).reply.ok).toBe(true);
+    const stranger = await appWaves('chores', null, { id: 9, first_name: 'Mei' });
+    await settle();
+    expect(stranger.reply).toMatchObject({ status: 503, retry: true });
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM members WHERE user_id = 9').get().n).toBe(0);
+    // Nothing was remembered: the next request asks again.
+    const { chatMemberRole } = await import('../src/household.js');
+    expect(await chatMemberRole(env, 1, 2)).toBe('unknown');
+  });
+});
+
+describe('the cron, round trips per job', () => {
+  it('fires a chore in three batches: claim and reads, the new nag, its ids and records', async () => {
+    const { fireReminder } = await import('../src/firing.js');
+    const { deferBoards } = await import('../src/dashboard.js');
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000}, schedule_detail = '{"h":9,"mi":0,"rotate":true}' WHERE id = 9`);
+    const r = sql.prepare('SELECT * FROM reminders WHERE id = 9').get();
+    ops.length = 0;
+    await fireReminder(deferBoards(env), r, NOW, 'Asia/Singapore');
+    const batches = ops.filter((o) => o.kind === 'batch');
+    expect(batches).toHaveLength(3);
+    expect(batches[0].sql.join('\n')).toMatch(/UPDATE reminders SET next_fire_at[\s\S]*FROM firings WHERE reminder_id[\s\S]*FROM members[\s\S]*GROUP BY done_by/);
+    expect(batches[1].sql.join('\n')).toMatch(/INSERT INTO firings/);
+    expect(batches[2].sql.join('\n')).toMatch(/UPDATE firings SET last_message_id[\s\S]*INSERT INTO sent_messages/);
+    expect(sql.prepare("SELECT last_message_id FROM firings WHERE reminder_id = 9 AND state = 'nagging'").get().last_message_id)
+      .toBeTruthy();
+  });
+
+  it('never posts to the group a private nag whose send timed out', async () => {
+    const { fireReminder } = await import('../src/firing.js');
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000}, assignee_name = '@nicholaswan' WHERE id = 9`);
+    const r = sql.prepare('SELECT * FROM reminders WHERE id = 9').get();
+    const seen = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      seen.push({ method: String(url).split('/').pop(), body: JSON.parse(init.body) });
+      if (JSON.parse(init.body).receiver_user_id) throw new DOMException('The operation timed out.', 'TimeoutError');
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+    }));
+    await fireReminder(env, r, NOW, 'Asia/Singapore');
+    const sends = seen.filter((c) => /^send/.test(c.method));
+    expect(sends).toHaveLength(1);
+    expect(sends[0].body.receiver_user_id).toBe(2);
+  });
+
+  it('re-nags from one read, taking the old card down beside the new send', async () => {
+    const { renagPending } = await import('../src/cron.js');
+    sql.exec(`UPDATE firings SET next_nag_at = ${NOW - 1000} WHERE id = 5`);
+    let open = 0;
+    let most = 0;
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      open++;
+      most = Math.max(most, open);
+      try { return await inner(url, init); } finally { open--; }
+    }));
+    ops.length = 0;
+    await renagPending(env, NOW);
+    expect(ops[0].kind).toBe('batch');
+    expect(ops[0].sql.join('\n')).toMatch(/FROM firings WHERE[\s\S]*FROM reminders r WHERE r.id IN/);
+    expect(ops.some((o) => /SELECT \* FROM reminders WHERE id = \?/.test(String(o.sql)))).toBe(false);
+    expect(most).toBeGreaterThanOrEqual(2);
+    expect(firing().nag_count).toBe(2);
+    expect(firing().last_message_id).not.toBe(700);
+  });
+
+  it('a /pause landing after the tick read the chore stops its re-nag', async () => {
+    const { renagPending } = await import('../src/cron.js');
+    sql.exec(`UPDATE firings SET next_nag_at = ${NOW - 1000} WHERE id = 5`);
+    // The tick's read sees the chore unpaused; the pause lands just after.
+    const real = env.DB.batch;
+    env.DB.batch = async (statements) => {
+      const out = await real(statements);
+      if (statements.some((s) => /FROM reminders r WHERE r.id IN/.test(s.query))) sql.exec('UPDATE reminders SET paused = 1 WHERE id = 8');
+      return out;
+    };
+    await renagPending(env, NOW);
+    expect(firing().nag_count).toBe(1);
+    expect(calls.some((c) => c.method === 'sendMessage')).toBe(false);
+  });
+
+  it('sweeps six at a time and drops the rows in one statement', async () => {
+    for (let i = 0; i < 9; i++) {
+      sql.exec(`INSERT INTO sent_messages (chat_id, message_id, is_ephemeral, delete_after, created_at)
+        VALUES (1, ${2000 + i}, 0, ${NOW - 1000}, ${NOW - DAY})`);
+    }
+    let open = 0;
+    let most = 0;
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      open++;
+      most = Math.max(most, open);
+      try { return await inner(url, init); } finally { open--; }
+    }));
+    sql.exec("UPDATE firings SET next_nag_at = next_nag_at + 86400000, fired_at = fired_at + 86400000");
+    await worker.scheduled({}, env, ctx());
+    await settle();
+    expect(most).toBe(6);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM sent_messages').get().n).toBe(0);
+    expect(ops.filter((o) => /DELETE FROM sent_messages/.test(String(o.sql)))).toHaveLength(1);
   });
 });

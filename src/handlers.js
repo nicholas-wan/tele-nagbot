@@ -1146,7 +1146,9 @@ async function doneTapped(env, cb, firingId, together) {
 // already handled) are the claim's conditions, and its read-back says which.
 async function snoozeTapped(env, cb, firingId, code) {
   const chatId = cb.message.chat.id;
-  const tz = await getTz(env, chatId);
+  // The timezone decides the time only for a postponement and "9pm"; for the
+  // others it is only needed for the toast, so it is read beside the write.
+  const zone = getTz(env, chatId);
   const now = Date.now();
   // "Tomorrow" is a postponement, not a snooze: the hour presets are clamped
   // to the 24h expiry, which would collapse a full day down to "just before
@@ -1156,8 +1158,8 @@ async function snoozeTapped(env, cb, firingId, code) {
   // 📅 1 week and 📅 2 weeks are the same move, further out.
   const days = POSTPONE_DAYS[code];
   const postpone = days != null;
-  const want = postpone ? deferQuietHours(now + days * 86400000, tz)
-    : code === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, now, tz)
+  const want = postpone ? deferQuietHours(now + days * 86400000, await zone)
+    : code === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, now, await zone)
     : now + (+code) * 60000;
   // Never promise a nag past a recurring chore's 24h expiry — capped at one
   // last call before it (expiresBefore, in SQL). A one-off never expires.
@@ -1170,7 +1172,7 @@ async function snoozeTapped(env, cb, firingId, code) {
   const set = postpone
     ? { sql: 'next_nag_at = ?, fired_at = ?, snoozed_until = ?', args: [want, want, want] }
     : { sql: `next_nag_at = ${until}, snoozed_until = ${until}`, args: [want, want, want, want] };
-  const [res, f, r] = await env.DB.batch([
+  const [[res, f, r], local] = await Promise.all([env.DB.batch([
     env.DB.prepare(
       `UPDATE firings SET snoozes_used = snoozes_used + 1, ${set.sql}, snoozed_by = ?
        WHERE id = ? AND chat_id = ? AND state = 'nagging' AND snoozes_used < ?
@@ -1181,7 +1183,7 @@ async function snoozeTapped(env, cb, firingId, code) {
       `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
        WHERE f.id = ? AND f.chat_id = ?`
     ).bind(firingId, chatId),
-  ]);
+  ]), zone]);
   const firing = (f.results || [])[0] || null;
   const reminder = (r.results || [])[0] || null;
   if (!res.meta.changes || !firing) {
@@ -1198,16 +1200,16 @@ async function snoozeTapped(env, cb, firingId, code) {
   const at = capped ? firing.fired_at + EXPIRE_AFTER_MS - 60000 : want;
   // Tomorrow keeps its old rule (the next occurrence, if it comes first,
   // supersedes it); a week or two out moves the schedule past it.
-  const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, at, tz) : 0;
+  const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, at, local) : 0;
   // The toast as soon as the snooze is decided; the card and the board follow.
   const left = MAX_SNOOZES - firing.snoozes_used;
   const remaining = left > 0 ? ` · ${left} ${left === 1 ? 'snooze' : 'snoozes'} left` : ' · last snooze';
   await answerCallback(env, cb.id, (postpone
-    ? `Postponed — back ${fmtWhen(at, tz)} 📅` +
+    ? `Postponed — back ${fmtWhen(at, local)} 📅` +
       (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : '')
-    : `Snoozed until ${fmtWhen(at, tz)} 😴${capped ? ' — as late as it goes before it expires' : ''}`) + remaining);
+    : `Snoozed until ${fmtWhen(at, local)} 😴${capped ? ' — as late as it goes before it expires' : ''}`) + remaining);
   if (reminder && firing.last_message_id) {
-    await editNag(env, firing, snoozedHtml(reminder, at, by, tz, postpone), snoozedButtons(firing.id, isScored(firing)));
+    await editNag(env, firing, snoozedHtml(reminder, at, by, local, postpone), snoozedButtons(firing.id, isScored(firing)));
   }
   // The board shows a parked chore by when it comes back.
   await updateDashboard(env, chatId);

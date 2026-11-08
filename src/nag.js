@@ -339,57 +339,17 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
   }
   firing = claimed.firing || firing;
   if (onClaim) await onClaim();
-  // What the receipt says, worked out together: the chores under this one are
-  // covered by it (nesting.js) and the receipt names them; the celebration
-  // sticker is chosen (not yet sent) so the purr line can name its cat.
+  // What the receipt says: the chores under this one are covered by it
+  // (nesting.js) and the receipt names them; the celebration sticker is
+  // chosen (not yet sent) so the purr line can name its cat. The cover is
+  // part of the Done — what it resets is what the board and the Mini App's
+  // answer show — while the sticker choice only feeds the receipt, so it is
+  // started now and waited for with the receipt.
   // An ephemeral nag had no sticker to begin with — one now would be visible to
   // the whole group and give away a chore only one person could see.
-  const [covered, pick] = await Promise.all([
-    coverChildren(env, reminder, firing.id, tz, { nested: claimed.nested }),
-    isEphemeralNag(firing) ? null : pickCelebration(env, nagChat(firing), firing.id),
-  ]);
-  const celebration = { cat: pick ? pick.cat : 'both' };
+  const picking = isEphemeralNag(firing) ? Promise.resolve(null) : pickCelebration(env, nagChat(firing), firing.id);
+  const covered = await coverChildren(env, reminder, firing.id, tz, { nested: claimed.nested });
   const also = coverLine(covered);
-  const purr = celebration.cat === 'latte' ? 'Latte purrs approvingly.'
-    : celebration.cat === 'mocha' ? 'Mocha purrs approvingly.'
-    : 'The cats purr approvingly.';
-  const when = `${fmtClock(now, tz)}. ${purr}`;
-  // The card and the public receipt touch different things, so they go out
-  // together rather than one round trip after another.
-  const card = async () => {
-    if (isEphemeralNag(firing)) {
-      // A private nag's card is put away, not turned into a receipt: the public
-      // receipt below tells the whole household, and the one who did the chore
-      // was seeing both (20 Oct 2026). Forgetting the card is what lets ↩️ Not
-      // done on that receipt send them a fresh private nag (see redrawNag).
-      await Promise.all([
-        deleteNag(env, firing),
-        env.DB.prepare(
-          'UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0 WHERE id = ? AND last_message_id = ?'
-        ).bind(firing.id, firing.last_message_id).run(),
-      ]);
-    } else if (firing.last_message_id) {
-      // A receipt lives two hours; the clock time is all it needs. The nag
-      // earned a day; its receipt only needs to be glanced at.
-      await Promise.all([
-        editNag(env, firing,
-          `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`,
-          receiptButtons(firing.id)),
-        retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS),
-      ]);
-    }
-  };
-  // A privately-nagged chore leaves a quiet public receipt: the household still
-  // gets to see the chore was done, just not that it was pending.
-  // So does one with no card left to edit — a parked chore whose 😴 card was
-  // put away with OK, then finished from the board.
-  const receipt = async () => {
-    if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
-      await sendMessage(env, firing.chat_id,
-        `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${when}${also}`, receiptButtons(firing.id),
-        { silent: true, ttl: RECEIPT_TTL_MS });
-    }
-  };
   // A finished one-off goes to the trash rather than straight out, so that
   // ↩️ Not done can bring it back for as long as the trash keeps it. Stash
   // and removal are one batch: the claim's own, unless the claim was made
@@ -401,17 +361,57 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
       env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(reminder.id),
     ]);
   };
-  // The nag's own sticker goes and the celebration arrives alongside. In the
-  // Mini App these wait for the page's answer (later): the database already
-  // says the chore is done, and they only show it.
-  await Promise.all([
-    stash(),
-    later(env, () => Promise.all([
+  // The card, the receipt and the stickers. In the Mini App they wait for the
+  // page's answer (later): the database already says the chore is done, and
+  // these only show it.
+  const show = async () => {
+    const pick = await picking;
+    const purr = pick && pick.cat === 'latte' ? 'Latte purrs approvingly.'
+      : pick && pick.cat === 'mocha' ? 'Mocha purrs approvingly.'
+      : 'The cats purr approvingly.';
+    const line = `😻 <s>${esc(reminder.text)}</s> — done by ${esc(byName)} at ${fmtClock(now, tz)}. ${purr}${also}`;
+    // The card and the public receipt touch different things, so they go out
+    // together rather than one round trip after another.
+    const card = async () => {
+      if (isEphemeralNag(firing)) {
+        // A private nag's card is put away, not turned into a receipt: the
+        // public receipt below tells the whole household, and the one who did
+        // the chore was seeing both (20 Oct 2026). Forgetting the card is what
+        // lets ↩️ Not done on that receipt send them a fresh private nag (see
+        // redrawNag).
+        await Promise.all([
+          deleteNag(env, firing),
+          env.DB.prepare(
+            'UPDATE firings SET last_message_id = NULL, last_message_ephemeral = 0 WHERE id = ? AND last_message_id = ?'
+          ).bind(firing.id, firing.last_message_id).run(),
+        ]);
+      } else if (firing.last_message_id) {
+        // A receipt lives two hours; the clock time is all it needs. The nag
+        // earned a day; its receipt only needs to be glanced at.
+        await Promise.all([
+          editNag(env, firing, line, receiptButtons(firing.id)),
+          retimeSentMessage(env, nagChat(firing), nagRef(firing), RECEIPT_TTL_MS),
+        ]);
+      }
+    };
+    // A privately-nagged chore leaves a quiet public receipt: the household
+    // still gets to see the chore was done, just not that it was pending.
+    // So does one with no card left to edit — a parked chore whose 😴 card was
+    // put away with OK, then finished from the board.
+    const receipt = async () => {
+      if (isEphemeralNag(firing) || nagChat(firing) !== firing.chat_id || !firing.last_message_id) {
+        await sendMessage(env, firing.chat_id, line, receiptButtons(firing.id),
+          { silent: true, ttl: RECEIPT_TTL_MS });
+      }
+    };
+    // The nag's own sticker goes and the celebration arrives alongside.
+    await Promise.all([
       card(), receipt(),
       pick ? sendCelebration(env, nagChat(firing), pick) : null,
       firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
-    ])),
-  ]);
+    ]);
+  };
+  await Promise.all([stash(), later(env, show)]);
   await updateDashboard(env, firing.chat_id);
   return true;
 }
