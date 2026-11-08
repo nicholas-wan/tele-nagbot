@@ -2,7 +2,6 @@
 // sticker accompanies nags. file_ids are cached per isolate.
 
 import { tg, recordSentMessage, RECEIPT_TTL_MS } from './tg.js';
-import { STICKERS } from './stickers-data.js';
 
 let cachedUsername = null;
 const fileIdCache = new Map(); // set name -> [file_id]
@@ -29,6 +28,9 @@ function b64ToBytes(b64) {
 
 // Creates the set owned by userId (the person who ran /makestickers).
 export async function createStickerSet(env, userId) {
+  // The pack's images are a large module that only /makestickers needs, so it
+  // is loaded here rather than with every isolate.
+  const { STICKERS } = await import('./stickers-data.js');
   const name = await stickerSetName(env);
   if (!name) return { ok: false, description: 'could not resolve bot username' };
 
@@ -207,31 +209,54 @@ export async function autoTagPack(env, chatId, { redo } = {}) {
   const set = await tg(env, 'getStickerSet', { name });
   if (!set.ok) return { ok: false, description: 'could not load the active pack' };
 
-  if (redo) {
-    for (const s of set.result.stickers) {
-      await env.DB.prepare('DELETE FROM sticker_tags WHERE file_uid = ?').bind(s.file_unique_id).run();
-      forgetCat(env, s.file_unique_id);
-    }
+  const stickers = set.result.stickers;
+  if (redo && stickers.length) {
+    await env.DB.batch(stickers.map((s) =>
+      env.DB.prepare('DELETE FROM sticker_tags WHERE file_uid = ?').bind(s.file_unique_id)));
+    for (const s of stickers) forgetCat(env, s.file_unique_id);
   }
 
+  // Every tag the pack already has, in one read; then the untagged ones are
+  // classified a few at a time (each is a file download and a vision model
+  // call), and their tags written in one batch.
+  const tagged = await tagsFor(env, stickers.map((s) => s.file_unique_id));
   const counts = { latte: 0, mocha: 0, both: 0, skipped: 0 };
-  let processed = 0;
+  const todo = [];
   let remaining = 0;
-  for (const s of set.result.stickers) {
-    const existing = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
-      .bind(s.file_unique_id).first();
-    if (existing) continue;
+  for (const s of stickers) {
+    if (tagged.has(s.file_unique_id)) continue;
     if (s.is_animated || s.is_video) { counts.skipped++; continue; }
-    if (processed >= 10) { remaining++; continue; }
-    processed++;
-    const cat = await classifySticker(env, s.file_id);
-    if (!cat) { counts.skipped++; continue; }
-    counts[cat]++;
-    await env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)')
-      .bind(s.file_unique_id, cat).run();
-    forgetCat(env, s.file_unique_id);
+    if (todo.length >= 10) { remaining++; continue; }
+    todo.push(s);
   }
-  return { ok: true, counts, processed, remaining };
+  const found = [];
+  for (let i = 0; i < todo.length; i += CLASSIFY_PARALLEL) {
+    const group = todo.slice(i, i + CLASSIFY_PARALLEL);
+    const cats = await Promise.all(group.map((s) => classifySticker(env, s.file_id)));
+    group.forEach((s, j) => {
+      if (!cats[j]) { counts.skipped++; return; }
+      counts[cats[j]]++;
+      found.push([s.file_unique_id, cats[j]]);
+    });
+  }
+  if (found.length) {
+    await env.DB.batch(found.map(([uid, cat]) =>
+      env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)').bind(uid, cat)));
+    for (const [uid] of found) forgetCat(env, uid);
+  }
+  return { ok: true, counts, processed: todo.length, remaining };
+}
+
+// How many stickers /autotag classifies at once.
+const CLASSIFY_PARALLEL = 4;
+
+// The tags of the given stickers, one read: uid → cat.
+async function tagsFor(env, uids) {
+  if (!uids.length) return new Map();
+  const { results } = await env.DB.prepare(
+    `SELECT file_uid, cat FROM sticker_tags WHERE file_uid IN (${uids.map(() => '?').join(',')})`
+  ).bind(...uids).all();
+  return new Map((results || []).map((r) => [r.file_uid, r.cat]));
 }
 
 const CLASSIFY_PROMPT =
@@ -283,12 +308,8 @@ export async function listTags(env, chatId) {
   fileIdCache.delete(name);
   const stickers = await setStickers(env, name);
   if (!stickers) return { ok: false, description: 'could not load the active pack' };
-  const entries = [];
-  for (let i = 0; i < stickers.length; i++) {
-    const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?')
-      .bind(stickers[i].uid).first();
-    entries.push({ pos: i + 1, cat: tag ? tag.cat : null, fileId: stickers[i].id, uid: stickers[i].uid });
-  }
+  const tags = await tagsFor(env, stickers.map((s) => s.uid));
+  const entries = stickers.map((s, i) => ({ pos: i + 1, cat: tags.get(s.uid) ?? null, fileId: s.id, uid: s.uid }));
   return { ok: true, name, entries };
 }
 // Returns which cat is on the sent sticker plus its message id so it can be

@@ -10,12 +10,31 @@ export const INIT_DATA_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 const encoder = new TextEncoder();
 
-async function hmac(key, message) {
-  const imported = await crypto.subtle.importKey(
+function importKey(key) {
+  return crypto.subtle.importKey(
     'raw', typeof key === 'string' ? encoder.encode(key) : key,
     { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   );
+}
+
+async function hmac(key, message) {
+  const imported = key instanceof CryptoKey ? key : await importKey(key);
   return new Uint8Array(await crypto.subtle.sign('HMAC', imported, encoder.encode(message)));
+}
+
+// The key that checks launch data depends only on the bot's token, so it is
+// derived and imported once per isolate rather than twice per request. A
+// failed derivation is not kept.
+const launchKeys = new Map(); // token -> Promise<CryptoKey>
+
+function launchKey(botToken) {
+  let key = launchKeys.get(botToken);
+  if (!key) {
+    key = hmac('WebAppData', botToken).then(importKey);
+    key.catch(() => launchKeys.delete(botToken));
+    launchKeys.set(botToken, key);
+  }
+  return key;
 }
 
 const hex = (bytes) => [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -36,8 +55,7 @@ function sameHex(a, b) {
 export async function signInitData(botToken, fields) {
   const check = Object.keys(fields).filter((key) => key !== 'hash').sort()
     .map((key) => `${key}=${fields[key]}`).join('\n');
-  const secret = await hmac('WebAppData', botToken.trim());
-  return hex(await hmac(secret, check));
+  return hex(await hmac(await launchKey(botToken.trim()), check));
 }
 
 // Returns { user, startParam } for launch data Telegram signed within the last

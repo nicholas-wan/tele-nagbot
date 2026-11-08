@@ -23,7 +23,6 @@ import { handleEditorCallback, handleManageCallback, editorText, editorButtons }
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats, handleStatsCallback } from './stats.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
-import { cmdInvite } from './invite.js';
 import { digestView } from './cron.js';
 import { coveredStatement, coveredNamesFrom } from './nesting.js';
 
@@ -193,7 +192,9 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
     else if (cmd === 'done') result = await cmdDone(env, ctx, args, by, tz);
     else if (cmd === 'poke' || cmd === 'nagall') result = await cmdPoke(env, ctx);
     else if (cmd === 'stats') result = await cmdStats(env, ctx, tz, args);
-    else if (cmd === 'invite') result = await cmdInvite(env, ctx, args, tz);
+    // chrono-node is the biggest dependency and only /invite uses it, so the
+    // module comes in when the command does, not with every isolate.
+    else if (cmd === 'invite') result = await (await import('./invite.js')).cmdInvite(env, ctx, args, tz);
     else if (cmd === 'makestickers') result = await cmdMakeStickers(env, ctx, msg);
     else if (cmd === 'delsticker') result = await cmdDelSticker(env, ctx, args);
     else if (cmd === 'usepack') result = await cmdUsePack(env, ctx, args);
