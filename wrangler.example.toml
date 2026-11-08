@@ -1,0 +1,56 @@
+name = "nag-bot"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+[vars]
+# Chats the bot answers (comma-separated Telegram chat ids). Updates from any
+# other chat, stranger DMs included, are ignored before touching D1 or AI.
+# Promoting the bot can upgrade a basic group to a supergroup, which mints a
+# new id; `npx wrangler tail` logs the id of any chat the bot ignores.
+ALLOWED_CHATS = "-123456789"
+# Optional. Typed assignee shortcuts: "/chore nic clear poop 9pm" or "... for
+# yx". Each value is the person's roster spelling: "@username", or the bare
+# first name of a member who has no username.
+# NICKNAMES = "nic=@nicholaswan, yx=@Dodgerblueee"
+# Optional. The Mini App's direct link from @BotFather (/newapp), registered
+# with the URL https://<your-worker>/app/. It makes the pinned board's button
+# 🐾 Chores, opening the app over the chat; without it the button is ⚙️ Manage.
+# MINI_APP_URL = "https://t.me/YourBot/chores"
+# Optional. "0" makes every message public again (kill switch for ephemeral
+# replies).
+# EPHEMERAL = "0"
+
+# Secrets set with `wrangler secret put`: BOT_TOKEN, WEBHOOK_SECRET and
+# ADMIN_SECRET. Keep ADMIN_SECRET separate from Telegram's webhook secret.
+
+# Fires the scheduled handler every minute to send due reminders and re-nags.
+[triggers]
+crons = ["* * * * *"]
+
+# Create the database next to the Worker: `npx wrangler d1 create nagbot-eu
+# --location weur`. The npm scripts name `nagbot-eu`.
+[[d1_databases]]
+binding = "DB"
+database_name = "nagbot-eu"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# Vision model for /autotag (classifying which cat is on each sticker) and the
+# time wizard's suggestion.
+[ai]
+binding = "AI"
+
+# The Mini App's page, served at /app/. Any path without a file here reaches
+# the worker, so /webhook, /setup and /admin are unaffected.
+[assets]
+directory = "./public"
+
+# Run beside the database and Telegram's API wherever the request came from.
+# Webhooks already arrive from Amsterdam, but a Mini App request comes from the
+# member's phone, which in Singapore meant a worker in Singapore paying a round
+# trip to Europe on every D1 query and Telegram call.
+[placement]
+region = "gcp:europe-west4"
+
+# Persisted Workers Logs, so "why didn't it nag?" is answerable after the fact.
+[observability]
+enabled = true

@@ -1,161 +1,236 @@
-# Nag-Bot 🐈
+<p align="center">
+  <img src="assets/nag-bot-avatar.jpg" alt="Latte and Mocha, the two cats who front the bot" width="180">
+</p>
 
-Telegram chore bot that nags until someone marks a chore done. Cloudflare Workers + D1 + a one-minute cron. [@TwoShotsNagBot](https://t.me/TwoShotsNagBot) · Worker `nag-bot.lattemocha.workers.dev` · group `-1004418632524` · Asia/Singapore.
+<h1 align="center">Nag-Bot</h1>
 
-> **The live database is `nagbot-eu`.** `nagbot` is the retired APAC original, kept as the pre-migration backup and read by nothing — querying it by the old name returns plausible, wrong answers. Always name the database.
+<p align="center">
+  A Telegram group bot that keeps a household's chores on one pinned board and nags until someone marks them done.
+</p>
 
-## Use
+<p align="center">
+  <a href="https://github.com/nicholas-wan/tele-nagbot/actions/workflows/test.yml"><img src="https://github.com/nicholas-wan/tele-nagbot/actions/workflows/test.yml/badge.svg?branch=master" alt="Tests"></a>
+</p>
+
+<p align="center">
+  <a href="https://nicholaswan.me/projects#nag-bot">Interactive demo</a> ·
+  <a href="docs/design.md">Design notes</a> ·
+  <a href="docs/operations.md">Operations</a>
+</p>
+
+Nag-Bot runs on Cloudflare Workers with a D1 database and a one-minute cron.
+Someone adds a chore by typing it the way they would say it, the bot pins a
+board of everything that is due, and when a chore comes up it nags the group
+(or just the person it is assigned to) every so often until somebody taps
+Done. Our two cats, Latte and Mocha, do the nagging.
+
+## Features
+
+- **Plain-language chores.** `/chore trash 7pm daily`, `every mon,thu 8am`,
+  `every other saturday` or `pay tax friday` become schedules. A missing time
+  opens a picker with a suggested slot; anything the parser cannot read safely
+  is refused rather than misread.
+- **Nags that keep going.** Re-nags at 15, 30 and 60 minutes, with Done,
+  Done together, Snooze and Delete on every card. Replying `done`,
+  `snooze 2h` or reacting 👍 works too. Quiet hours hold re-nags until 8am.
+- **One pinned board.** Every chore in urgency order, two short lines each,
+  edited in place rather than reposted.
+- **Fair shares.** Assign a chore to someone, rotate it to whoever has done it
+  least, or leave it to anyone. `/chore` scores on a weekly leaderboard with
+  streaks; `/remind` is the same thing without points.
+- **Nested chores.** A chore can reset others under it: washing the litter box
+  covers clearing it.
+- **Undo everywhere.** Every Done, delete and add can be taken back for a day.
+- **Private by default.** Replies, wizards and assigned nags are ephemeral
+  messages only the recipient sees; the group sees only what it shares.
+- **Mini App.** A Telegram Mini App for the chore list, each chore's settings
+  and the stats, opened from the board.
+- **Extras.** An 8am digest of anything left overnight, a Sunday wrap,
+  vacation mode (`/pause all 14`), cat stickers tagged by Workers AI, and
+  `/invite` for calendar files.
+
+## How it works
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": false}}}%%
+flowchart TB
+    TG["Telegram"] -- "webhook" --> W["Cloudflare Worker"]
+    W -- "Bot API" --> TG
+    APP["Mini App"] -- "/api/app" --> W
+    CRON["Cron (every minute)"] --> W
+    W <--> DB[("D1 database")]
+    W --> AI["Workers AI"]
+```
+
+- **Webhook** (`POST /webhook`): messages, button taps, reactions and
+  membership changes. Each update is stored and claimed once, so a redelivery
+  is never handled twice.
+- **Cron**: fires due chores, sends re-nags, expires old ones, posts the
+  digest and weekly wrap, and sweeps old messages. An idle tick is one
+  database round trip.
+- **Mini App**: a static page served from `public/app/`. Its requests are
+  checked against Telegram's signed launch data and the user's membership of
+  the group.
+- **D1**: chores, firings (one per occurrence), completions and the message
+  log. Every state change is a conditional update, so racing taps and cron
+  ticks cannot double-fire or double-count. The Worker is placed in Europe,
+  next to the database and Telegram's servers.
+
+## Getting started
+
+### Prerequisites
+
+- Node.js 24 (the tests use `node:sqlite`)
+- A Cloudflare account with Workers, D1 and Workers AI
+- A Telegram bot from [@BotFather](https://t.me/BotFather)
+
+### Set up
+
+1. Add the bot to the group as an admin with **Pin Messages** and
+   **Delete Messages**. Admin status is also what lets it send ephemeral
+   messages.
+2. Install, configure and create the database:
+
+   ```powershell
+   npm install
+   Copy-Item wrangler.example.toml wrangler.toml
+   npx wrangler login
+   npx wrangler d1 create nagbot-eu --location weur
+   ```
+
+   Put the new database's id in `wrangler.toml` under `[[d1_databases]]` and
+   fill in the [configuration](#configuration).
+
+3. Create the tables, add the secrets and deploy:
+
+   ```powershell
+   npm run db:init
+   npx wrangler secret put BOT_TOKEN
+   npx wrangler secret put WEBHOOK_SECRET
+   npx wrangler secret put ADMIN_SECRET
+   npm run deploy
+   ```
+
+   `npm run deploy` runs the test suite first and refuses to ship if it fails.
+
+4. Register the webhook and command menu:
+
+   ```powershell
+   curl.exe -X POST -H "Authorization: Bearer YOUR_ADMIN_SECRET" `
+     https://YOUR-WORKER.workers.dev/setup
+   ```
+
+An existing database also needs the numbered migrations: `npm run db:migrate`.
+See [Migrations](docs/operations.md#migrations).
+
+### Admin endpoints
+
+All except the health check are `POST` and need
+`Authorization: Bearer <ADMIN_SECRET>`.
+
+| Path | What it does |
+|---|---|
+| `/setup` | Registers the webhook and command menu |
+| `/admin?info` | Reads back the webhook and registered commands from Telegram |
+| `/admin?diag[=<chat>]` | Membership, admin rights and whether the chat id changed |
+| `/admin?board` | Rebuilds and re-pins the board |
+| `/admin?stickers&chat=<id>` | Lists sticker tags |
+| `/` | Health check |
+
+## Configuration
+
+Set these under `[vars]` in `wrangler.toml`. `wrangler.example.toml` has a
+commented example of each.
+
+| Variable | Purpose |
+|---|---|
+| `ALLOWED_CHATS` | Comma-separated chat ids the bot answers in. Everything else is ignored; missing config fails closed |
+| `NICKNAMES` | Optional. Assignee shortcuts, as `nic=@handle, yx=@handle` |
+| `MINI_APP_URL` | Optional. The Mini App's BotFather link; turns the board's button into 🐾 Chores |
+| `EPHEMERAL` | Optional. `"0"` makes every message public again |
+
+Secrets, set with `npx wrangler secret put`:
+
+| Secret | Purpose |
+|---|---|
+| `BOT_TOKEN` | The bot's token from BotFather |
+| `WEBHOOK_SECRET` | Checked on every webhook call |
+| `ADMIN_SECRET` | Protects the admin endpoints |
+
+The D1 database is bound as `DB` and Workers AI as `AI`. Each chat's timezone
+defaults to `Asia/Singapore`.
+
+## Usage
 
 ```text
 /chore trash 7pm daily        counts on the leaderboard
-/remind pay tax friday        same syntax, no leaderboard points
-/chore @jane dishes now       assignee · rotate = fair-share it
-/list · /edit · /done · /pause · /resume · /skip · /delete    (by chore name; an exact name beats a longer one containing it)
-/poke · /stats (tabs: This week · Last week · 6 months) · /pause all 14 · /resume all
-/invite bday lunch 13 sep 12pm at Fu Yuan, 80 Middle Rd    calendar file, tap to add
+/remind pay tax friday        same syntax, no points
+/chore @jane dishes now       assign it; or rotate to fair-share it
+/invite bday lunch 13 sep 12pm at Fu Yuan, 80 Middle Rd
 ```
 
-Schedules: `7pm daily`, `every mon,thu 8am` (also `every tue and fri`, `tue/fri`, `mon wed fri`, `on tuesdays`, `weekly on mon and thu`; a bare list repeats only when it ends the message, before the time, so `pack for mon and tue trip` stays a one-off), `every 8 days` (or `every three days`), `weekly` / `every week` (seven days from the first nag, or from a day named beside it or closing the message: `weekly shop sat 10am`; `every sat weekly` is simply every Sat), `fortnightly`, `monthly`, `yearly`, `every 1st` / `the 1st of every month`, `every 2 weeks`, `every other saturday`, `every month`, `every 3 months`, `on the 1st`, `weekdays`, `starting 29 aug`, `tomorrow 9:30am` (`tmr`, `tmrw` and the usual misspellings also work), `730pm`, `at 1930`, `this evening`, `in 20m`, `now`, `noon`, `nag:10m`. Refused rather than misread: two days on a fortnightly chore (`every 2 weeks on mon and thu`), a weekday of the month (`every 2nd tuesday`), two days of the month (`every 1st and 15th`), and two times — `take meds 8am and 8pm daily` is refused with a note to add the 8pm one separately, rather than becoming a chore called "take meds and 8pm". Omit the time for a guided picker (with a Workers-AI suggestion that only applies when tapped); a bare time typed afterwards (`10am`, not as a reply) resolves only the typer's own draft (`drafts.user_id`), so two open wizards cannot take each other's time. A bare `/chore` or `/remind` — a menu tap — asks what to nag about; the reply is the rest of the command.
+Schedules read the way people type them: `every mon,thu 8am`, `tue/fri`,
+`every 8 days`, `weekly shop sat 10am`, `fortnightly`, `every 1st`,
+`every other saturday`, `weekdays`, `starting 29 aug`, `tmr 730pm`,
+`in 20m`, `nag:10m`. More in [docs/design.md](docs/design.md#adding-chores).
 
-Common conversational filler at the edges of a task is removed automatically: `please remind me to buy milk tmr 9am thanks` creates `buy milk`, and `remind yx to feed cats tmr 7am` creates `feed cats` for yx. Words inside the meaningful task text are preserved (`remind landlord about the leak` keeps its "remind").
-
-Assign with `@username`, a text mention, or a configured shortcut: `NICKNAMES = "nic=@nicholaswan, yx=@Dodgerblueee"` in `wrangler.toml` makes `/chore nic clear poop 9pm` and `/remind cancel grab for yx tmr 10am` assign to those members (a leading `for` goes with the shortcut). Only a whole word counts, an explicit mention wins, two shortcuts named together (`nic and yx clean house`) mean the chore is everyone's and assign nobody, and each value must be the person's roster spelling (`@username`, or the bare first name of a member without one) so the nag resolves through `members` like a mention does. `/help` → Scheduling examples lists the shortcuts in force.
-
-A `/chore` or `/remind` is **not** deleted when it is handled. It stays in the group until the confirmation's ✅ OK, so a misread chore can be checked against what was actually typed and copied back after ↩️ Undo (which leaves the command standing until the Undone line's OK — the id rides on from the confirmation's own `ok:<id>`, and on through ↩️ Restore). Undo removes the chore through the same trash as `/delete`, so the Undone line carries ↩️ Restore for a day — the button sits on a confirmation for up to a day, and the chore may have fired since. The confirmation also carries ✅ Done (`c:<id>[:<command id>]`): it completes the live nag if the chore has fired, otherwise the upcoming occurrence (done early, as Manage → Done does). The completion draws the one receipt (the card's, or the done-early line); the confirmation and the command it kept both go, since Done is as good as OK for a parse. The confirmation itself has one shape, public or private: `📝 @who added <b>text</b> [for @assignee] [· reminder]` and `First nag: <when, as the board says it> [· <cadence>]`; the public one is silent, since the group just watched the command being typed. The daily sweep is the backstop if nobody taps. Every other command is still tidied away at once — whether it succeeded, was refused ("no such chore", a one-off `/skip`) or failed — as is a bare `/chore` from the menu, and `/help`; there is nothing in them to keep. A `/chore` the parser refuses stays too, since that is the one most worth copying back, and its refusal's OK is `ok:<command id>`. Through the time wizard, the command's id rides on the draft (`drafts.source_msg_id`) so the eventual confirmation's OK still removes it — and so does the ✕ Cancelled line's.
-
-Nags carry Done / Done together / Snooze / Delete. Replying `done`, `done together`, `done with @jane` (or a shortcut: `done with nic`), `snooze 2h`, `snooze 1 hour`, `snooze till 9pm` or `snooze tomorrow` (a postponement, as 📅 Tomorrow is) works, as does a 👍/✅ reaction. A bare `done` or `/done` finishes the one live nag the typer can see; with several — or when the only one is parked by a snooze or postponement — the cats ask which, and the typed `done` goes once the buttons have answered it. When the only nags out are someone else's private ones, the typer is told so rather than met with silence. Max 3 snoozes. A private nag's card is deleted when it is done, not redrawn as a receipt: the public receipt (`— done by @who at 2:43 PM. The cats purr approvingly.`) is the one the doer sees too, so they no longer get two. Every done receipt — the card itself, the public receipt of a private nag, a digest line — carries **↩️ Not done** (`nd:<firing id>`) for a day: the firing returns to nagging with its credit withdrawn, a finished one-off comes back from the trash with nothing scheduled (the firing it has is the occurrence; its stash carries `_firing`, so a chore deleted since is never mistaken for it — Not done then answers "gone for good", and the delete's own Undo still works), the card is redrawn as what it should be showing (a private one, whose card went with the Done, is sent afresh to its owner), and the group gets a quiet "not done after all, says @who" line — or, when the tap was on a public receipt or a done-early receipt, that receipt itself becomes the line, so one tap leaves one message. A postponed nag taken back waits for the time the household chose. The done-early receipt (`/done` before the nag, Manage → Done early, the confirmation's Done) has its own way back, `ne:<firing id>`: `completeEarly` stashes the reminder row as it was in `trash` under the done row's id, and the undo deletes the done row and puts the old slot back (or the whole one-off), refused once a later occurrence has fired or the chore has been deleted since. 🤝 Together too redraws the same receipt, so Not done stays on it. Receipts show a clock time; they live two hours.
-
-Every redraw of a live card — `/poke`, resume, the 🏆 Points toggle, ↩️ Back, an undone Done — goes through `firingCard`, which picks the 😴 notice while a snooze or postponement is in force, the ⏰ card of a one-off past 24h, else the nag, from the firing's state rather than the card's text. The 😴 and ⏰ cards keep the `(reminder — no points)` marker, and the 😴 card names who snoozed it (`firings.snoozed_by`, written with every snooze and postponement; rows from before the column say "the household"). The household roster (Done together, `done with`, the Assignee menu, rotation) is everyone currently in the chat that the bot has seen (`members`, pruned on `left_chat_member` / `chat_member` updates), spelled `@username` or first name. `done with jane` also matches `@janedoe` by first name — unless that spelling could mean two members (another `@jane`, or two Janes), in which case it matches nobody; a name that matches nobody is dropped with a private note rather than becoming a phantom housemate. Rotation only counts credits for names on that roster, so an old typo in `done_by` can no longer win a turn — and it counts every completion, `/remind` ones included, since fairness is about who did the work rather than who scored.
-
-## Behavior
-
-- Re-nags at 15/30/60 min (or `nag:` pace), one live nag per chore, first re-nag silent. A one-off never expires: after 24h it keeps nagging **hourly** (`OVERDUE_NAG_MIN`, quiet hours aside) on the ⏰ card, and shows on the pinned board as ⏰ overdue, until someone completes or deletes it — vacation mode included: its wake clears recurring chores' stale nags but keeps a one-off's, redrawn as what it now is (⏰ once past 24h, since the holiday froze its clock rather than excusing it), and the hourly nag carries on from there. The ⏰ card has the full nag keyboard, Snooze included. (Until 20 Oct 2026 an overdue one-off went quiet instead, parked with `next_nag_at` NULL; the cron treats such a row as due and picks the hourly nag back up.) Recurring occurrences still expire after 24h; their schedules remain.
-- Snooze offers 30m / 1h / 2h / 3h / 6h / 🌙 9pm (labelled today or tomorrow, whichever 9pm comes next) — clamped, on a recurring chore, to its 24h expiry; a one-off has no expiry, so its snooze is honoured as chosen — plus **📅 Tomorrow**, **📅 1 week** and **📅 2 weeks** — postponements, not snoozes: they carry `fired_at` forward so the expiry window moves with the nag (`POSTPONE_DAYS`, quiet hours pushing a landing between 11pm and 8am to 8am). All count against the 3-snooze cap, and all record the chosen time in `firings.snoozed_until`. If the schedule's next occurrence arrives before a postponed-to-tomorrow nag returns, the postponed one is dropped as superseded — it is not counted as expired. A week or two out would nearly always be superseded that way, so those move the schedule past the postponed nag instead (`skipPastPostponement`): every occurrence up to it is skipped, intervals keep their own beat, and the toast says how many were skipped. The board shows a parked chore as `😴 <when it returns>` rather than as nagging. A chore that is nagging says since when (`🔔 nagging since yesterday 11:00 PM`, `⏰ overdue · nagging since Sun 11:00 PM`), from the live firing's `fired_at` — so a postponement or a resume, which restamp it, restart the clock. The 😴 card ("Snoozed by @who until tomorrow 9:00 PM", or "Postponed by @who — back in 7 days · …") carries 🙈 Hide (`zh:<firing id>` — not ✅ OK, since ✅ is Done on the row above), which puts the card away while the chore stays parked — it is still the live card, so the sweep would otherwise leave it up for the whole postponement — and the cron sends a fresh nag when the snooze is up; a chore finished from the board meanwhile still gets its public receipt. Hide on a 😴 card whose snooze has run out redraws it as the nag it now is. Snooze toasts say how many snoozes are left. The ⏰ card of an overdue one-off says since when it has been nagging. A chore paused on its own keeps ▶️ Resume (`rs:<reminder id>`) on its ⏸️ card — no OK, since a card put away that way would leave the firing holding a deleted message and a later Done without its receipt; vacation's card has no buttons. When a recurring nag expires, its card is deleted and a silent 🪦 tombstone says so.
-- Commands that name a chore match it by name. A name that matches nothing but is a letter or two from exactly one chore (`/done trsh`) is answered with that chore as a command to tap-copy — offered, never acted on, since a near miss can be a different real word. A command with no name (`/skip`) asks with one of the household's own chores as the example. Every refusal leads with 😿, like the bot's other lines, and every time in a reply reads as the board says it (`today 8:00 PM`, `in 3 days · Fri 5:00 PM`): the done-early receipt's `Next:`, `/skip`, `/resume`, the editor and the Hide toast all used the full date before.
-- `/pause <chore>` answers with a ▶️ Resume to tap, which turns that reply into the resumed line; `/skip` says which slot went and when the chore is next.
-- The time wizard names who the chore is for and what it already knows — `(every Sun)`, `(Sat)`, `(tomorrow)`, `(monthly, starting 31 Jan)` — and labels its presets as the board words times (`Today 7:00 PM`, `Tomorrow 9:00 AM`). Intervals read as words everywhere (`weekly`, `monthly`, `yearly`, never `every 1 week`).
-- `/poke` re-sends each outstanding card as what it already is (`firingCard`): a nag, the 😴 notice of a snoozed or postponed one, or the ⏰ card of an overdue one-off — never a plain nag in place of a 😴 notice or a ⏰ card.
-- A deletion changes the household's board, so its log is public however it was triggered — typed `/delete`, the nag's 🗑, or Manage — and carries Undo for a day.
-- `/pause` freezes a live nag: no re-nags, and no expiry either — `/resume` hands it a fresh 24h window, except a nag the household itself deferred (postponed with 📅 Tomorrow, or snoozed to a time still ahead), which keeps that and is redrawn as the 😴 snooze card. "Still ahead" means `next_nag_at` still equals `snoozed_until` (`isHouseholdDeferred`): once the cron has moved the nag on — a re-nag, or a quiet-hours push to 8am — the snooze has been honoured and spent, and the firing is the bot's to restamp. `snoozes_used` cannot say this; it is a cap and stays set. `/resume` on a chore that isn't paused changes nothing and says so. If the card it wants to redraw is gone (Telegram says so, not a transient error), resume sends a fresh one rather than leave the board saying "nagging now" with nothing to tap. Resume never moves a chore that is still due in the future, and an interval chore advances from its own anchor rather than a full gap from now. The cron's expiry claims bind the `fired_at` they decided on, so a resume racing the cron wins.
-- Month intervals remember the intended day (`schedule_detail.dom`): "every month starting 31 jan" lands on the 28th in February and back on the 31st in March. A stated start date survives the no-time wizard too — it rides in the draft's `schedule_detail.startDate` and is stripped before the chore is created. Interval roll-forward is arithmetic, not hop-by-hop — a `starting <date>` far in the past costs microseconds, not the Worker's CPU budget.
-- **One confirmation per new chore, never two.** Unassigned: a public "added" line carrying Done, Undo and OK. Assigned: a private copy only, so the group is not pinged about someone else's chore. (The pinned board still lists it with its assignee — the privacy is about noise, not secrecy.) The Done matters most on the assigned copy: the nag that follows is private too, and a private nag sent while the assignee is offline is not guaranteed to reach them, so the confirmation is the one message they are sure to have. The board's ⚙️ Manage → chore → ✅ Done is the other route.
-- Doing a chore before it nags still counts: `/done <chore>` (or ✅ Done early in Manage) records the credit. Day intervals restart from the completion date (so an early `every 2 weeks` chore is next due two weeks later); other recurring schedules advance past the upcoming slot, and a one-off is spent outright.
-- **Nested chores** (`reminders.parent_id`, `src/nesting.js`, 6 Nov 2026): a recurring chore can sit under another, set with **Resets with** in the Mini App, whose chore screen then shows the whole family (top tier first, this chore highlighted, each other member a tap away). The list and the pinned board stay in plain urgency order on purpose: grouping a family would keep a six-weekly parent near the top whenever its four-daily child is due. Doing the parent — Done on its nag or done early — resets everything under it, at any depth: wash neakasa → clear poop → shake neakasa. A child is *covered*, not completed: no done row, no points, nothing in `/stats`. Its live nag is taken down as superseded, and an interval child restarts its gap from now (never earlier than a slot it was already skipped or postponed to); a weekly or monthly child keeps its slots and only loses a live nag. Paused children are skipped (their own children are still covered). The parent's receipt says `↪️ Resets too: …`. What was changed is stashed in `trash` as `{ _cover: <parent firing id>, children }`, so ↩️ Not done on the parent puts each child's `next_fire_at` back (compare-and-swap on what cover wrote) and re-sends any nag it took down, within the day the trash keeps it. A re-sent nag gets back the hours it was hidden (its `fired_at` moves on by that much, so the 24h expiry counts only time on show); one whose chore was paused since, or during vacation mode, comes back without a card. A reset that fails is logged and never blocks the parent's Done. A one-off cannot sit under another chore, and the picker never offers a chore's own descendants, so there are no loops.
-- `/chore` scores, `/remind` does not, and they look identical otherwise — so a reminder is flagged `(reminder — no points)` on its nag and `· reminder` on the board. Chores are the default and stay unmarked. **Done together stays on both**: it records who did the work, points or not.
-- Every message the bot sends is recorded in `sent_messages` and swept — a day for most, ~2h for done-receipts and celebration stickers (`RECEIPT_TTL_MS`). The pinned dashboard (`keep: true`) is the sole exception; ✅ OK just gets there sooner. The sweep also skips a card that is still some nagging firing's `last_message_id` (a paused, postponed, or overdue nag outlives its day); the row keeps coming due and goes with the pass after the firing ends or re-nags.
-- Quiet hours 11pm–8am: bot-initiated re-nags and expiry notices wait for 8am. Scheduled fire times are honored as set.
-- Pinned dashboard lists every chore, urgency-ordered, two short lines each so nothing wraps on a phone. Refreshed on every change and each morning.
-- Manage, edit, and delete happen **in place on the pinned message** (or in the [Mini App](#mini-app), once it is set up) — only its `reply_markup` changes, never its text. So every button names the chore it acts on (`✏️ 💩 clear poop · Tue 9:00 PM`); internal numbers never appear in labels. The Assignee menu's buttons carry the member's `user_id`, not a position in the roster — the menu sits on the shared board for hours and the roster re-sorts as people come and go.
-- Lost the pin (group upgraded, someone unpinned it)? `/list` rebuilds and re-pins it, as does `POST /admin?board`. A board edit that fails for a transient reason (network, a 429 that outlived the retry) keeps the existing board; only a "message not found" style error recreates it, so a blip no longer pins a duplicate.
-- Toggling 🏆 Points in the editor also updates the chore's live nag and redraws it through `firingCard`. A paused chore's card, or any card during vacation mode, is left alone.
-- The 8am digest speaks only when something was left nagging overnight — the board already carries the day's agenda — and carries a `✅ Done · <chore>` button per chore it names (`dg:<firing id>`), which completes that firing like the nag card's Done and redraws the digest from the ids its buttons still carry (`digestView`), so nothing that fires later joins a digest about yesterday. A recurring firing already past its 24h is left out: quiet hours held its expiry back to 8am, and the same cron tick tombstones it before the digest, so a ✅ for it would be dead on arrival. Overdue one-offs stay, since they are never expired. A chore the household parked — postponed with 📅 Tomorrow, or snoozed to a time still ahead — is left out too: it is due when they said, and listing it with a ✅ under the thumb is how a chore that was not even due got marked done by mistake. A re-nag successfully delivered since 8am is left out as well: the re-nag takes priority over repeating the chore in the digest. The send record must match the current card, its public/private visibility and, for a private card, its recipient; a failed re-nag still gets a digest entry. The digest always ends with ✅ OK, so it can be put away without finishing anything, and a chore finished from it stays on as a struck line with ↩️ Not done — that line is the receipt, so a privately nagged chore finished there gets no second, public receipt (`completeFiring`'s `receipt: false`). Weekly wrap Sunday 8pm, naming the winner once (or everyone tied) and the rest below. Both silent; so are celebration and nag stickers, the delete log and the end of vacation. Streaks 🔥 for repeat weekly winners.
-- Chore icons come from a keyword table in `dashboard.js`; lead the text with your own emoji to override.
-- Sticker on first nag and on Done, once a pack exists (`/makestickers` or `/usepack`). Latte is the light calico, Mocha the dark tortie, and the nag line names whichever the sticker shows — so a wrong tag reads as the wrong cat. Fix with `/tagsticker N latte|mocha|both`; `/tags` lists them.
-
-## Ephemeral messages (Bot API 10.2)
-
-Replies are private to the sender; the command that asked for them is deleted the moment it is handled. The group only ever sees shared content.
-
-| Private (ephemeral) | Public |
+| Command | What it does |
 |---|---|
-| Command replies, help, `/list`, `/stats` | Pinned dashboard and its ⚙️ Manage flow |
-| Wizard, prompts, confirmations, errors | Unassigned nags, `/invite` files |
-| **Nags for an assigned chore** | Done receipts, tombstones, vacation mode, welcomes |
+| `/chore`, `/remind` | Add a chore (scores) or a reminder (no points) |
+| `/list` | Show and re-pin the board |
+| `/done`, `/skip` | Finish a chore now or early, or skip its next slot |
+| `/edit`, `/delete` | Change or remove a chore, by name |
+| `/pause`, `/resume` | Pause one chore |
+| `/pause all 14`, `/resume all` | Vacation mode for up to 90 days |
+| `/poke` | Re-send every outstanding nag |
+| `/stats` | This week, last week and six months |
+| `/invite` | A calendar file for an event, with the address detected |
+| `/makestickers`, `/usepack`, `/tagsticker`, `/tags`, `/autotag` | Set up and tag the cat sticker pack |
+| `/help` | Examples and the shortcuts in force |
 
-Manage is deliberately **shared**: tapping ⚙️ swaps the pinned message's buttons in place, so either of you can pick up where the other left off. Only replies to a typed command are private.
+Commands that name a chore match it by name; a near miss is offered back as a
+command to tap rather than acted on.
 
-- Commands are registered **without** `is_ephemeral`. An ephemeral command is never delivered to a bot with Group Privacy on, which is how this bot runs — commands simply vanished. So a command arrives as an ordinary group message, visible for the moment before `deleteMessage` clears it. Reply privacy is unaffected: it comes from `receiver_user_id` on the send. Verify with `POST /admin?info`.
-- A private send needs `receiver_user_id`; within 15s of a tap it also carries `callback_query_id`, which is what lets the bot reach a member it has no other recent contact with. The bot must be a group admin, and delivery to an offline user is not guaranteed — `sendPrivate` falls back to public when Telegram refuses.
-- Ephemeral messages report `message_id: 0` plus a separate `ephemeral_message_id`, and need `editEphemeralMessageText` / `deleteEphemeralMessage`. Stored ids travel as `{ id, ephemeral }` refs (`drafts.*_msg_ephemeral`, `firings.last_message_ephemeral` + `nag_user_id`). Guard any `deleteMessage` with `isPublicMessage()` — never call it with id 0.
-- The nag lifecycle goes through `sendNag` / `editNag` / `deleteNag`; never touch `last_message_id` with the public helpers, or a private nag becomes unreachable. There is no reply-markup-only edit for ephemeral messages, so those paths re-render the text too.
-- DM nag routing is **gone**. `nag_chat_id` is always NULL; `members.dm_ok` is vestigial and no longer written. A known member who DMs the bot gets one line pointing them back to the group; strangers are ignored.
-- Every nag button (`d:`, `b:`, `s:`, `z:`, `x:`, `g:`, `nd:`, `ne:`), the digest's `dg:`, and the confirmation's `c:` and `u:`, resolves its firing or chore scoped to the chat the tap came from, so a forged callback id from another household is inert. Callback data is not bound to the button it came from, so within the household it is checked too: an ephemeral nag's buttons answer only to its recipient (`nagBelongsTo`) — as do a reply, a reaction and a bare `done`, which otherwise finished another member's private chore in the typer's name — `ok:<id>` deletes only a message the bot kept on the sweep, and every editor value (`e:set…`), wizard code (`w:`) and snooze preset (`z:`, `SNOOZE_CODES`) is validated against what the buttons offer before it is applied.
-- Kill switch: set `EPHEMERAL = "0"` in `wrangler.toml` `[vars]` and deploy to make everything public again.
-
-## Mini App
-
-Once `MINI_APP_URL` is set, the pinned board's one button becomes **🐾 Chores**, which opens a sheet over the chat instead of swapping the board's buttons (squashbot's Mini App, the same design). It has:
-
-- the chore list in board order, with each chore's status line as the board words it and a Done on anything nagging;
-- each chore's screen: Done / Done together / Done by… (or the early versions ahead of the nag), any time of day, repeats, nag pace, assignee, rotation and points, Resets with and the Family section (see nested chores above), ⏭️ Skip next, pause and delete;
-- ➕ Add chore (the **+** beside the Chores · Stats switch), which takes what follows `/chore` (`trash 7pm daily`), chore or reminder, optional assignee. A missing time is asked for rather than opening the wizard;
-- 🏆 Stats: This week and Last week, counted as `/stats` counts them.
-
-Until it is set the button stays ⚙️ Manage, and the `m:` callbacks keep working on any board still carrying it. Snooze stays on the nag card.
-
-- **Who.** `src/miniapp-auth.js` checks Telegram's signed launch data (a day old at most) — the page and anything it sends are not believed. `startapp=g<chat id>` names the household, and every request asks Telegram (`getChatMember`, `chatMemberRole` in household.js) whether the person is in that chat, beside the request's reads, with real answers kept three minutes per isolate (a leave clears its entry, and a kept yes for someone no longer on the roster is asked again, since the leave may have landed on another isolate); Telegram gets four seconds; nothing is written until it passes. When Telegram does not answer, someone with a `members` row is let in and anyone else gets a 503 with `retry`, which the page retries twice. Inside it everyone may do everything, as on Manage.
-- **Same rules as the chat.** Every action goes through what the buttons use — `completeNow`, `skipNext`, `applyEditorChoice`, `setEditorFlag` (manage.js), `setReminderPaused`, `deleteReminder`, `createReminder`, `fireIfDue` — so receipts, the public delete log with its Undo, and board refreshes are unchanged. An add posts no confirmation: the page shows it, and the board lists the chore for everyone. Rotation and points are *set* to a value rather than flipped, so a screen drawn before somebody else's tap cannot undo it. Time and repeats are refused on a chore nagging with nothing scheduled, as the editor hides them.
-- **One list.** `choreBoard` (dashboard.js) is the board's chore list as data — order, status line, state — and the pin, `/list` and the app all draw from it.
-- **Setup.** @BotFather → `/newapp` → pick the bot, upload `miniapp-photo.jpg` when it asks for a 640×360 photo (Latte and Mocha, cropped from `bot-avatar.jpg`), skip the GIF, give the URL `https://nag-bot.lattemocha.workers.dev/app/` and a short name such as `chores`. Put the direct link it gives in `[vars]` as `MINI_APP_URL = "https://t.me/TwoShotsNagBot/chores"`, deploy, then `POST /admin?board` to redraw the button (or wait for the next chore change). The page is served from `public/` by `[assets]`; the API is `/api/app/*`.
-- **Feel (8 Nov 2026 review).** Nothing dims the whole page on a tap: only the tapped control is held, and it looks busy only past 300ms. A chore's screen draws at once from its list row (details fetched as the finger lands), Back redraws the previous screen instantly and refreshes it quietly, and a setting change answers with a haptic tick rather than a toast. Done on the list turns into a ✓ at once; any Done returns to the list with a toast naming the chore and its next time. Because taps are no longer blocked page-wide, one Done per chore is in flight at a time, a Done on a nag sends `expect: 'now'` (so a nag finished meanwhile answers "Already handled" rather than completing the next occurrence early — `completeNow`), and replies apply newest-first and only to the screen they are for. A nagging chore's Done is the screen's one filled button; with two in the household, Done by is a single row naming the other person. Assigned and rotation are one choice (Anyone / Take turns / a person). Values read as plain text with iOS chevrons; urgent text is #a85500 on light, #ff9f0a on dark.
-- **Undo, as the chat offers it (8 Nov 2026 review).** A Done, a delete and an add each answer with a toast carrying **Undo** for six seconds: the reply's `undo` token (`{ kind: 'done' | 'delete' | 'add', id }`) goes to `POST /api/app/undo`, which takes the chat's own step — the receipt's ↩️ Not done (`undoCompletion`, or `undoEarly` for a Done early, told apart by `fired_at = done_at`), the delete log's ↩️ Undo (the stash is claimed in the read's batch, and only a deleted chore's stash: never a Done's or a reset record), and the new-chore confirmation's quiet ↩️ Undo (`removeReminder`). The chat's own button on that log or receipt then answers "Already restored" / "Too late". A Done's Not done is announced to the group as the chat's is.
-- **Polish (8 Nov 2026 review).** Actions draw line icons in their own colour (the chores keep their emoji); separators start where a row's text does; the screen's state line stands in for a heading over Done or Resume, and Assigned, Points and Resets with sit in their own group under the schedule. In Telegram the add screen's Add is Telegram's bottom button (it stays above the keyboard), a half-typed chore asks before the sheet is swiped away, delete confirms with Telegram's red-button popup, and a time chip swaps the previous one rather than appending. Switching between Chores and Stats draws what each last showed and freshens it; a sheet brought back into view freshens too. A first load that fails (offline, or Telegram slow past both retries) shows the reason and **Try again** instead of a skeleton that never ends. No pinch or double-tap zoom.
-- **Preview.** Serve `public/` on localhost (`python -m http.server 4191 --directory public`, open `http://localhost:4191/app/`): outside Telegram it draws sample chores and never reaches the bot.
-
-## Code
-
-| File | Purpose |
-|---|---|
-| `src/index.js` · `src/updates.js` | webhook + `/setup` + `/admin` routes, cron entry · webhook intake, dedup, recovery |
-| `src/handlers.js` | command dispatcher, nag replies/reactions, callback router, help |
-| `src/nag.js` | nag messages, buttons, completion/expiry state transitions |
-| `src/chores.js` | chore actions: create, find, delete, pause, done-early, vacation wake |
-| `src/nesting.js` | nested chores: cover children when a parent is done, undo it, the Resets with picker |
-| `src/dashboard.js` | pinned board rendering, schedule/emoji text helpers |
-| `src/manage.js` | ⚙️ Manage and ✏️ editor flows (the `m:`/`e:` callbacks) |
-| `src/wizard.js` | no-time drafts, time picker, custom-time replies (`w:` callbacks) |
-| `src/stats.js` | leaderboard, 6-month log, winner streaks |
-| `src/household.js` | settings, member tracking, names, combined credit |
-| `src/cron.js` | fire/re-nag/expire, digest, weekly wrap, sweep, retention, vacation wake |
-| `src/firing.js` | fire-one-reminder, assignee routing, rotation |
-| `src/parse.js` | `/chore` and `/remind` parser — recurrence lives here (200-char cap) |
-| `src/invite.js` | `/invite`: chrono-node dates, address detection, `.ics` builder |
-| `src/time.js` | timezone, next-occurrence, interval anchoring, quiet hours |
-| `src/stickers.js` · `src/sticker-commands.js` | runtime pack behavior · setup/tagging commands |
-| `src/ai.js` · `src/tg.js` | schedule suggestion · API client, ephemeral refs, sweep bookkeeping |
-| `src/miniapp-api.js` · `src/miniapp-auth.js` · `src/miniapp-link.js` | Mini App API · signed launch data · the board's link |
-| `public/app/index.html` | the Mini App page (plain HTML/JS, Telegram theme) |
-
-Two parsers on purpose: `parse.js` owns recurrence, which chrono-node cannot do; `/invite` is always a one-off, so it uses chrono for far better natural-language dates. chrono reasons in the *system* timezone (UTC in a Worker), so it is handed a reference built from the chat's wall clock and its components are rebuilt with `zonedEpoch` — never trust its `Date` directly. Addresses stay hand-rolled: libpostal is a C library and cannot run in a Worker.
-
-Concurrency rule: every state transition is a conditional `UPDATE … WHERE state = ?` (or a conditional draft delete) whose `meta.changes` is checked before side effects. Keep it that way — it prevents zombie nags, double fires, and duplicate reminders. The same goes for the two columns that several writers move: `firings.last_message_id` is written `WHERE last_message_id IS <the id that was read>` by every re-send (first fire, cron re-nag, `/poke`), and the loser deletes the card it just sent; `reminders.next_fire_at` is written `WHERE next_fire_at = <the value read>` by `/skip` and the editor as well as the fire claim, and a lost swap is reported as "that one just fired"; pausing writes only the flag and leaves the column alone. Vacation wake (`wakeChat`) clears `paused_until` last, after the backlog is rolled — it is the only thing keeping the cron's fire loop off reminders that came due during the holiday. `fireReminder` claims an occurrence before inserting its firing and releases the claim if anything throws in between; without that, a fire that failed mid-way advanced the schedule and lost the nag with no trace.
-
-Speed rule: the data is tiny (SQL runs in under a millisecond), so every cost is a round trip — the Worker runs in Amsterdam beside Telegram (`[placement] region = "gcp:europe-west4"`, so a Mini App request from a phone in Singapore runs there too rather than in SIN), D1's primary is in Marseille, about 20ms a query. Keep them few and out of the way (8 Nov 2026):
-- **One intake batch.** A webhook stores, claims and records the sender's `members` row in one D1 batch (`acceptUpdate`); a repeated delivery writes nothing. When this isolate's copies are stale, the chat's timezone, sticker pack and cat tags ride in it too (`chatReads` in context.js), so no later step — a Done's card, a typed `/chore` — waits on a read of its own. A batch that answers with an error is checked: a row carrying this claim's own timestamps was committed and is handled, no row means Telegram retries.
-- **A tap is one round trip after the intake.** ✅ Done, 🤝 Done together, ✅ on the digest, 🗑 Delete and a snooze preset send their conditional write together with the reads they need (`doneClaim` in nag.js, `deleteTapped` in chores.js, `snoozeTapped` in handlers.js): the chat the tap came from, the owner of a private nag and the chore's existence are conditions of the write, and the rows read back only say why a lost write lost. 🗑's stash is built in SQL from the row it deletes (`REMINDER_COLUMNS`, which a test holds to the schema), and each later write in its batch is gated on the one before (`changes() = 1`). The ↩️ family, Restore, the wizard's time and a confirmation's ✅ read in one batch and write in a second. Help, stats tabs and editor navigation answer before reading anything.
-- **Toast first.** A tap is answered the moment its outcome is decided — the `onClaim` hook on `completeFiring`, `completeEarly`, `completeNow`, `undoCompletion`, `undoEarly`, `removeReminder` and `deleteReminder` — and the answer rides the webhook's own response. The sticker, the cards, the delete log and the board follow, the ones that touch different messages together.
-- **The Mini App answers from its gate.** The list and a chore's screen are one D1 batch (the board's own read, timezone included). A chore's POST reads the roster, settings, the chore and its live nag in the gate; an edit's write, an add's INSERT, a delete's removal, a skip's swap and the roster refresh ride in the batch the reply reads (`loadBoard`'s `before`), and so do a parent's cover writes (`withReply`: queued until that batch, their results handed back to the receipt, which waits for them after the reply). A pause reads its nag back in the flag's batch. A POST's gate also carries the chat's sticker reads when stale (`chatReads`). What Telegram has to show of a change — card edits, receipts, stickers, the delete log, an added chore's first fire — runs after the reply (`later(env, task)` in a `deferBoards(env, { afterReply: true })` scope); without that scope `later` runs the task at once. The page starts its first `/api/app/chores` fetch from an inline script before Telegram's SDK loads and uses it only if the SDK's `initData` matches.
-- **One board redraw, last.** `updateDashboard` inside a webhook update, a Mini App request or a cron tick only notes the chat (`deferBoards`); `flushBoards` draws each board once when the work is done, and for the Mini App after the response. A caller that draws the pin itself (the editor living on it) says so with `boardDrawn`. The board's data is one batch (`loadBoard`).
-- **Sweep records are written at the end.** Inside a scope, `recordForSweep` queues the row and `flushBoards` writes them all in one batch (a fire folds them into its last write). Nothing reads a record in the request that made it; `retimeSentMessage` re-times a queued one in the queue.
-- **The cron.** A fire is three batches (the claim with the previous nag, roster and rotation tally; the new nag's writes; its card ids, a one-off's release and the records — the scope's whole queue, put back if that batch fails). A failed claim batch is not swapped back: a racing fire claims the same value. Re-nags read their chores with the due firings, and take the old card down while the new one goes out. The order is wake, fire, re-nag, boards, then digests (which leave out what this tick fired: `fired_at < now`), the weekly wrap, inbox recovery and housekeeping. The sweep deletes six at a time and drops its rows in one statement. The due check carries the inbox's recovery reads and the chat list (settings plus `ALLOWED_CHATS`, priming the timezone and sticker pack caches, and the cat tags when stale), so an idle tick is one round trip and a fire picks its sticker and its cat without a read.
-- **Batch what goes together; parallelise what is independent.** A nested chore's cover reads beside the Done's claim and writes in one batch. Stickers, card edits and receipts that touch different things run in `Promise.all`. The tz, sticker packs, cat tags (the whole table, so an unseen sticker is no read either), the Mini App's launch key and membership answers are cached per isolate. chrono-node (only `/invite`) and the sticker images (only `/makestickers`) load on demand.
-- `node bench/latency.mjs` replays the common flows on the real schema with 20ms D1 and 25ms Telegram calls and prints reply, first-message and total times (`TRACE=1 node bench/latency.mjs --one <scenario>` prints each call as it starts); `test/speed.test.js` pins the shapes above, counting round trips as waves of D1 calls. Its warm run is a fresh database binding, so the per-isolate caches keyed by it start cold, as they mostly are for a household that taps a few times an hour. Measured on 8 Nov 2026 (warm, reply): ✅ Done 657 → 123 → 43ms, 😴 Snooze 407 → 123 → 42ms, Mini App list 163 → 60 → 28ms, Mini App Done 780 → 248 → 70ms, idle cron tick 95 → 21ms, the wizard's card 1633 → 64ms (it no longer waits for the AI guess). The third pass, same day: 🗑 Delete 89 → 41ms, ✅ Done's card edited 87 → 40ms after the tap (all done 181 → 135ms), `/chore`'s reply 65 → 43ms, Mini App Done early on a parent 89 → 70ms, delete 67 → 48ms, skip 68 → 47ms, pause 88 → 68ms, a cron fire's first message 102 → 82ms. At 170ms a call, which is what a Mini App request paid from SIN before the placement: list 347 → 174ms and Done 1374 → 513ms from the code alone.
-
-## Ops
+## Testing
 
 ```powershell
 npm test
-npm run db:migrate
-npm run deploy
-npx wrangler tail
 ```
 
-- `npm run deploy` runs the tests first (`predeploy`); CI runs them on every push (`.github/workflows/test.yml`).
+The suite uses [Vitest](https://vitest.dev/) and runs the database tests
+against an in-memory SQLite copy of the schema. GitHub Actions runs it on every
+push and pull request. `node bench/latency.mjs` replays the common flows with
+simulated D1 and Telegram latency and prints reply times.
 
-- Secrets: `BOT_TOKEN` (never handle it — hand the user the command), `WEBHOOK_SECRET` (Telegram's header only), `ADMIN_SECRET`. Keep local copies in `.dev.vars` (gitignored, and what `wrangler dev` reads) rather than `%TEMP%`, which Windows cleans up. `/setup` refuses to register a webhook while `WEBHOOK_SECRET` is unset — a secretless webhook would fail the header check on every delivery.
-- Allowed chats live in `wrangler.toml` `[vars] ALLOWED_CHATS`; missing config fails closed. The bot needs Pin Messages and Delete Messages, and admin status is also what makes ephemeral sends possible.
-- Wrangler is a local `devDependency` locked by `package-lock.json` (the range in `package.json` is a caret) — the floating `npx` release broke once, so always run it through the project.
-- Register webhook + command menu (also after changing the menu, and after any change to `allowed_updates` — `chat_member` is not delivered unless explicitly requested here):
+## Project structure
 
-```powershell
-curl.exe -X POST -H "Authorization: Bearer <ADMIN_SECRET>" https://nag-bot.lattemocha.workers.dev/setup
+```text
+src/
+  index.js        Webhook, cron, Mini App and admin routes
+  updates.js      Webhook intake, dedup and recovery
+  handlers.js     Commands, replies, reactions and button taps
+  parse.js        Reads free-text chores and schedules
+  wizard.js       The time picker for chores typed without a time
+  nag.js          Nag cards and the completion/expiry state machine
+  chores.js       Create, find, delete, pause, done early, vacation
+  nesting.js      Nested chores
+  cron.js         Fire, re-nag, expire, digest, weekly wrap, sweep
+  dashboard.js    The pinned board
+  manage.js       Manage and editor flows on the board
+  stats.js        Leaderboard, history and streaks
+  miniapp-*.js    Mini App API, sign-in check and link
+  ...
+public/app/       The Mini App page
+schema.sql        Full database schema
+migrations/       Upgrades for databases created before a change
+test/             Vitest suites
+bench/            Latency replay
+docs/             Design notes and operations
 ```
 
-- Other admin actions, same bearer token: `?info` (webhook + registered commands, read back from Telegram), `?diag[=<chat>][&user=<id>]` (membership, admin rights, whether the chat id changed), `?board` (rebuild and re-pin the dashboard), `?stickers&chat=<id>` and `?stickerimg=N&chat=<id>` (list tags, fetch one image).
-- `?board` walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pinned message a human *authored* (`pinned_message.from` is the author, not whoever pinned it — a bot message a human pinned is treated as the bot's). Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
-- Migrations live in `migrations/`, with the resulting schema mirrored in `schema.sql`. **Run `npm run db:migrate` before any deploy that adds one** — the Worker expects the schema it ships with, and a missing `webhook_updates` table turns every webhook into a 503. `0002_nested_chores.sql` adds `reminders.parent_id`; every Done reads it, so it must be applied before the Worker that uses it. `0001_adversarial_review.sql` repairs duplicate per-chat chore numbers (preserving the first owner), enforces uniqueness, and creates the webhook inbox. `0003_hot_path_indexes.sql` adds indexes only (a chore's live firing, the cron's expiry clause, a sent message by id), so the Worker runs with or without it. The live `nagbot-eu` has all three applied (0001 on 27 Sep, 0002 on 6 Nov, 0003 on 8 Nov 2026, tracked in `d1_migrations`); nothing is pending.
-- Webhooks are persisted before acknowledgement and claimed once by `update_id`, in the same batch (so a delivery is never left stored but unstarted by the webhook itself). Cron still recovers `pending` rows — written by the earlier two-step intake, or by `enqueueUpdate`. A handler interrupted after starting is marked failed after 15 minutes and the requester is told to check `/list` before retrying; it is not replayed automatically because some mutations may have completed. Finished/failed inbox payloads are retained seven days for diagnosis. A database outage before persistence returns HTTP 503 so Telegram can retry.
-- Early completion uses a D1 transaction for consuming the slot, recording credit, and stashing Undo. Chore numbers are allocated inside their INSERT, including restores. Assignment edits move the active card and future re-nags to the new recipient without changing the snooze or schedule.
-- Tests: `test/fixes-*.test.js` are regression tests for specific past bugs (ephemeral editor, duplicate boards, postpone/pause accounting, roster); keep them when refactoring.
-- Deploys take ~30s to propagate — re-run before concluding a change didn't work. Debug with `wrangler tail`, or by querying `firings` / `reminders` / `settings` in `nagbot-eu`; they explain almost every "the bot didn't do X" report.
-- A group upgraded to a supergroup gets a **new chat id** and loses its pin. Rejected group chats are logged, so `wrangler tail` shows the new id immediately; update `ALLOWED_CHATS`, migrate the D1 rows, then `?board`.
+## Further reading
+
+- [docs/design.md](docs/design.md): how chores, nags, the board, privacy and
+  the Mini App behave, and why
+- [docs/operations.md](docs/operations.md): configuration in full,
+  deployment, admin endpoints, migrations, performance and debugging
