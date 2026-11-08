@@ -461,7 +461,9 @@ describe('round trips before the toast', () => {
     expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 700)).toBe(true);
     // The stash is built in SQL from the row the delete found.
     const stash = sql.prepare('SELECT * FROM trash ORDER BY id DESC').get();
-    expect(JSON.parse(stash.payload)).toEqual(before);
+    const { _log: log, ...payload } = JSON.parse(stash.payload);
+    expect(payload).toEqual(before);
+    expect(log).toBeTruthy(); // the log's id, for an Undo from the Mini App
     await wavesBeforeToast(`t:${stash.id}`);
     // A chore that was nagging with nothing scheduled comes back due now.
     expect(sql.prepare('SELECT * FROM reminders WHERE id = 8').get()).toEqual({ ...before, next_fire_at: NOW });

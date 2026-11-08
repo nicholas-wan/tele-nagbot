@@ -299,7 +299,29 @@ describe('undo from the toast', () => {
     const res = await call('undo', del.undo);
     expect(res).toMatchObject({ ok: true, message: '↩️ Restored slutbed' });
     expect(reminder(8)).toMatchObject({ text: 'slutbed', next_fire_at: TUE_7PM });
+    // The group's delete log says so, and loses its Undo.
+    const edit = calls.find((c) => c.url.endsWith('/editMessageText') && /Restored/.test(c.body.text));
+    expect(edit.body).toMatchObject({ chat_id: 1, message_id: 99 });
+    expect(JSON.stringify(edit.body.reply_markup)).not.toMatch(/Undo/);
     expect(await call('undo', del.undo)).toMatchObject({ ok: false });
+  });
+
+  it('deletes a chore once when two deletes race, with one log', async () => {
+    const r = reminder(8);
+    const { deleteReminder } = await import('../src/chores.js');
+    expect(await deleteReminder(env, r)).toBeTruthy();
+    expect(await deleteReminder(env, r)).toBeNull();
+    expect(await call('chore/8/delete', {})).toMatchObject({ ok: false });
+    for (let i = 0; i < tasks.length; i++) await tasks[i];
+    expect(sent(/deleted|Deleted/)).toHaveLength(1);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM trash').get().n).toBe(1);
+  });
+
+  it('takes back only a chore added moments ago', async () => {
+    const added = await call('chores', { text: 'trash 7pm daily' });
+    Date.now.mockReturnValue(NOW + 6 * 60000);
+    expect(await call('undo', added.undo)).toMatchObject({ ok: false, message: 'Too late to take that back.' });
+    expect(reminder(added.chore.id)).toBeDefined();
   });
 
   it('will not restore a Done\'s stash as if it were a delete', async () => {

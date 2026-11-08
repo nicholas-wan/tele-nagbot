@@ -2,7 +2,7 @@
 // create, find, delete, pause/resume, complete-early, and vacation wake-up.
 
 import { sendMessage, sendPrivate, deleteMessage, esc, mentionHtml, okButton, messageIsGone,
-         retimeSentMessage, RECEIPT_TTL_MS, SENT_TTL_MS } from './tg.js';
+         retimeSentMessage, RECEIPT_TTL_MS, SENT_TTL_MS, msgRef, editMessage } from './tg.js';
 import { nextOccurrence, advanceOccurrence, deferQuietHours } from './time.js';
 import { ParseError } from './parse.js';
 import { isScored, CREDIT_SEP } from './household.js';
@@ -223,7 +223,8 @@ export async function chatPaused(env, chatId) {
 // a confirmation for up to a day and the chore may have fired since.
 export async function removeReminder(env, r, { onClaim } = {}) {
   const removal = removalStatements(env, r);
-  const { trashId, firings } = removal.read(await env.DB.batch(removal.statements));
+  const { won, trashId, firings } = removal.read(await env.DB.batch(removal.statements));
+  if (!won) return null;
   // Said as soon as it is true; the cards come down after.
   if (onClaim) await onClaim();
   await later(env, () => takeDownCards(env, firings));
@@ -235,14 +236,22 @@ export async function removeReminder(env, r, { onClaim } = {}) {
 // the chore deleted and stashed, in one transaction. `read` takes their
 // answers and gives the trash id and the rows whose cards come down.
 export function removalStatements(env, r) {
+  // Conditional all the way down, as deleteTapped is: a second delete of the
+  // same chore (the chat's 🗑 and the Mini App at once) finds it gone, stashes
+  // nothing and says so — it used to post a second log line whose Undo then
+  // clashed with the first one's restore.
   return {
     statements: [
       env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
-      env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
-      env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id),
-      stashStatement(env, r),
+      env.DB.prepare(
+        'INSERT INTO trash (chat_id, payload, created_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM reminders WHERE id = ?)'
+      ).bind(r.chat_id, JSON.stringify(r), Date.now(), r.id),
+      env.DB.prepare('DELETE FROM reminders WHERE id = ? AND changes() = 1').bind(r.id),
+      env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging' AND changes() = 1").bind(r.id),
     ],
-    read: ([firings, , , stash]) => ({ trashId: stash.meta.last_row_id, firings: firings.results || [] }),
+    read: ([firings, stash, gone]) => (gone.meta.changes
+      ? { won: true, trashId: stash.meta.last_row_id, firings: firings.results || [] }
+      : { won: false, trashId: null, firings: [] }),
   };
 }
 
@@ -440,6 +449,8 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim, r
     const removal = removalStatements(env, r);
     gone = removal.read(await env.DB.batch(removal.statements));
   }
+  // Someone else's delete got there first: theirs posts the log.
+  if (gone.won === false) return null;
   if (onClaim) await onClaim();
   // OK dismisses the log once everyone has seen it; Undo restores the chore.
   const undo = { inline_keyboard: [[
@@ -449,13 +460,30 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim, r
   const html = by
     ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
-  // The cards and the log touch different messages, so they go together.
+  // The cards and the log touch different messages, so they go together. The
+  // stash learns the log's id, so an Undo from the Mini App can turn the line
+  // into "Restored" as the log's own Undo does (restoredLog).
   await later(env, () => Promise.all([
     takeDownCards(env, gone.firings),
-    ctx ? sendPrivate(env, ctx, html, undo) : sendMessage(env, chatId, html, undo, { silent: true }),
+    (async () => {
+      const ref = msgRef(ctx ? await sendPrivate(env, ctx, html, undo)
+        : await sendMessage(env, chatId, html, undo, { silent: true }));
+      if (!ref || ref.ephemeral || !gone.trashId) return;
+      await env.DB.prepare("UPDATE trash SET payload = json_set(payload, '$._log', ?) WHERE id = ?")
+        .bind(ref.id, gone.trashId).run()
+        .catch((e) => console.log(`noting the delete log for ${gone.trashId} failed: ${e}`));
+    })(),
   ]));
   await updateDashboard(env, chatId);
   return gone.trashId;
+}
+
+// The delete log, once its chore is back by another way than its own Undo:
+// the line says so, and its Undo goes (it would only answer "too late").
+export async function restoredLog(env, chatId, stash) {
+  if (!stash._log) return;
+  await editMessage(env, chatId, stash._log, `↩️ Restored <b>${esc(stash.text)}</b>`,
+    { inline_keyboard: [[okButton()]] });
 }
 
 // Where a resumed chore's schedule lands. A pause must not cost the chore its
@@ -634,7 +662,8 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
     const firing = await env.DB.prepare(
       "SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging' ORDER BY id DESC LIMIT 1"
     ).bind(r.id).first();
-    return Boolean(firing && await completeFiring(env, firing, r, credit, tz, { onClaim })) && firing.id;
+    return Boolean(firing && await completeFiring(env, firing, r, credit, tz,
+      { onClaim: onClaim && (() => onClaim('done')) })) && firing.id;
   }
   const firingId = ins.meta.last_row_id;
   if (onClaim) await onClaim();

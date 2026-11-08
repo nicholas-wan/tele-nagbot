@@ -319,9 +319,14 @@ export async function completeNow(env, r, credit, tz, { expect, live, onClaim, o
   if (!firing) {
     if (expect === 'now') return 'raced';
     if (r.paused || r.next_fire_at == null) return 'idle';
-    const id = await completeEarly(env, r, credit, tz, { onClaim: onClaim && (() => onClaim('early')) });
+    // A Done early that finds the chore has just fired finishes that nag
+    // instead (completeEarly says which), and the toast says what happened.
+    let outcome = 'early';
+    const id = await completeEarly(env, r, credit, tz, {
+      onClaim: (kind) => { outcome = kind || 'early'; return onClaim && onClaim(outcome); },
+    });
     if (id && onFiring) onFiring(id);
-    return id ? 'early' : 'raced';
+    return id ? outcome : 'raced';
   }
   const won = await completeFiring(env, firing, r, credit, tz, { onClaim: onClaim && (() => onClaim('done')) });
   if (won && onFiring) onFiring(firing.id);
@@ -509,9 +514,10 @@ export async function handleManageCallback(env, cb) {
   }
   if (action === 'confirm') {
     // The toast once the chore is gone; the cards, the log and the board follow.
-    await deleteReminder(env, r, null, null, {
+    const trashId = await deleteReminder(env, r, null, null, {
       onClaim: () => answerCallback(env, cb.id, 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.'),
     });
+    if (trashId == null) return answerCallback(env, cb.id, 'Already gone.');
     return;
   }
 

@@ -642,7 +642,7 @@ async function cmdEdit(env, ctx, args, tz) {
 // Manage logged to the group.
 async function cmdDelete(env, ctx, args, by) {
   const r = await findReminder(env, ctx.chatId, args);
-  await deleteReminder(env, r, null, by);
+  if (await deleteReminder(env, r, null, by) == null) throw new ParseError('That chore is already gone.');
 }
 
 // Vacation mode: "/pause all 14" mutes everything for N days (auto-resumes),
@@ -845,6 +845,7 @@ async function handleCallback(env, cb) {
     if (!r) return answerCallback(env, cb.id, 'Already gone.');
     // Said as soon as it is true; the cards, the line and the board follow.
     const trashId = await removeReminder(env, r, { onClaim: () => answerCallback(env, cb.id, 'Undone') });
+    if (trashId == null) return answerCallback(env, cb.id, 'Already gone.');
     await editRef(env, ctx, r.chat_id, ref, `↩️ Undone — <s>${esc(r.text)}</s>`, { inline_keyboard: [[
       { text: '↩️ Restore', callback_data: `t:${trashId}` },
       okButton(keptSourceId(cb)),

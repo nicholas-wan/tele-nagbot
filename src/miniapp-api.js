@@ -24,7 +24,7 @@ import {
 import { completeNow, editorPlan, flagPlan, skipPlan, JUST_FIRED, NAG_PACES } from './manage.js';
 import {
   reminderInsert, deleteReminder, removalStatements, removeReminder, restoreReminder, fireIfDue,
-  setReminderPaused, undoReads, undoCompletion, undoEarly,
+  setReminderPaused, undoReads, undoCompletion, undoEarly, restoredLog,
 } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
@@ -272,6 +272,8 @@ async function choreReply(env, chatId, id, tz, user, extra, pending = [], snap =
 
 const GONE = { ok: false, message: 'That chore is already gone.' };
 const TOO_LATE = { ok: false, message: 'Too late to take that back.' };
+// The add toast's Undo shows for six seconds; a slow phone gets some slack.
+const UNDO_ADD_MS = 5 * 60000;
 const EDIT_FIELDS = new Set(['time', 'schedule', 'nag', 'assign', 'rotate', 'score', 'parent']);
 
 // Who a Done credits: the person tapping, everyone on the roster with them,
@@ -348,6 +350,7 @@ const routes = [
     const snap = await snapshot(env, chatId, tz, [...removal.statements, ...pending.splice(0)]);
     const trashId = await deleteReminder(env, r, null, senderName(user),
       { removed: removal.read(snap.before.slice(0, removal.statements.length)) });
+    if (trashId == null) return json(GONE);
     return choreReply(env, chatId, r.id, tz, user,
       { message: `🗑️ Deleted ${r.text}`, undo: { kind: 'delete', id: trashId } }, [], snap);
   }, { chore: true }],
@@ -446,13 +449,17 @@ const routes = [
       if (!row || !claim.meta.changes) return json(row ? { ok: false, message: 'Already restored.' } : TOO_LATE);
       const r = JSON.parse(row.payload);
       await restoreReminder(env, r);
+      await later(env, () => restoredLog(env, chatId, r));
       await updateDashboard(env, chatId);
       return choreReply(env, chatId, r.id, tz, user, { message: `↩️ Restored ${r.text}` }, pending);
     }
     if (body.kind === 'add') {
       const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(id, chatId).first();
       if (!r) return json({ ok: false, message: 'Already gone.' });
-      await removeReminder(env, r);
+      // The toast's Undo, not a back door to deleting without the group's log:
+      // only a chore added moments ago.
+      if (Date.now() - r.created_at > UNDO_ADD_MS) return json(TOO_LATE);
+      if (await removeReminder(env, r) == null) return json({ ok: false, message: 'Already gone.' });
       await updateDashboard(env, chatId);
       return choreReply(env, chatId, r.id, tz, user, { message: `↩️ Undone — ${r.text}` }, pending);
     }
