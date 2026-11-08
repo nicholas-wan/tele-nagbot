@@ -312,7 +312,7 @@ export async function skipPastPostponement(env, r, until, tz) {
 }
 
 // `onClaim` runs once the chore is gone, before the log and the board — where
-// a tap's toast goes.
+// a tap's toast goes. Returns the trash id, which the log's Undo carries.
 export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } = {}) {
   const chatId = r.chat_id;
   const trashId = await removeReminder(env, r);
@@ -327,7 +327,7 @@ export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } 
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
   await later(env, () => (ctx ? sendPrivate(env, ctx, html, undo)
     : sendMessage(env, chatId, html, undo, { silent: true })));
-  await updateDashboard(env, chatId);
+  await updateDashboard(env, chatId);  return trashId;
 }
 
 // Where a resumed chore's schedule lands. A pause must not cost the chore its

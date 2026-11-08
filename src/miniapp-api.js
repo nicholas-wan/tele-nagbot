@@ -22,7 +22,10 @@ import {
   deferBoards, flushBoards, later,
 } from './dashboard.js';
 import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
-import { reminderInsert, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
+import {
+  reminderInsert, deleteReminder, removeReminder, restoreReminder, fireIfDue, setReminderPaused,
+  undoReads, undoCompletion, undoEarly,
+} from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
 import { parentChoicesIn, setParent } from './nesting.js';
@@ -248,6 +251,7 @@ async function choreReply(env, chatId, id, tz, user, extra, pending = [], snap =
 }
 
 const GONE = { ok: false, message: 'That chore is already gone.' };
+const TOO_LATE = { ok: false, message: 'Too late to take that back.' };
 const EDIT_FIELDS = new Set(['time', 'schedule', 'nag', 'assign', 'rotate', 'score', 'parent']);
 
 // Who a Done credits: the person tapping, everyone on the roster with them,
@@ -283,10 +287,15 @@ const routes = [
   ['POST', /^chore\/(\d+)\/done$/, async ({ env, chatId, tz, user, r, body, gate, pending }) => {
     const credit = creditFor(gate.rows, user, body);
     if (!credit) return json({ ok: false, message: 'That household member is no longer here.' });
-    const outcome = await completeNow(env, r, credit, tz,
-      { expect: body.expect === 'now' ? 'now' : undefined, live: gate.live });
+    let firingId = null;
+    const outcome = await completeNow(env, r, credit, tz, {
+      expect: body.expect === 'now' ? 'now' : undefined, live: gate.live, onFiring: (id) => { firingId = id; },
+    });
     if (outcome === 'idle') return json({ ok: false, message: DONE_MESSAGES.idle });
-    return choreReply(env, chatId, r.id, tz, user, { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome] }, pending);
+    // ↩️ Not done, as on the receipt: the page offers it with the toast.
+    const undo = firingId ? { kind: 'done', id: firingId } : null;
+    return choreReply(env, chatId, r.id, tz, user,
+      { ok: outcome !== 'raced', message: DONE_MESSAGES[outcome], undo }, pending);
   }, { chore: true }],
 
   ['POST', /^chore\/(\d+)\/skip$/, async ({ env, chatId, tz, user, r, pending }) => {
@@ -311,8 +320,9 @@ const routes = [
   // A deletion changes the household's board, so its log goes to the group,
   // with the Undo that brings the chore back for a day.
   ['POST', /^chore\/(\d+)\/delete$/, async ({ env, chatId, tz, user, r, pending }) => {
-    await deleteReminder(env, r, null, senderName(user));
-    return choreReply(env, chatId, r.id, tz, user, { message: '🗑️ Deleted — Undo is in the chat for a day.' }, pending);
+    const trashId = await deleteReminder(env, r, null, senderName(user));
+    return choreReply(env, chatId, r.id, tz, user,
+      { message: `🗑️ Deleted ${r.text}`, undo: { kind: 'delete', id: trashId } }, pending);
   }, { chore: true }],
 
   // An edit's write goes in the batch the reply reads, so the answer is one
@@ -373,8 +383,53 @@ const routes = [
     await updateDashboard(env, chatId);
     await later(env, () => fireIfDue(env, id, tz, { dueAt: p.firstFireAt }));
     return choreReply(env, chatId, id, tz, user, {
-      message: `📝 Added — first reminder ${fmtLocal(p.firstFireAt, tz)}`,
+      message: `📝 Added — first reminder ${fmtLocal(p.firstFireAt, tz)}`, undo: { kind: 'add', id },
     }, [], snap);
+  }],
+
+  // The toast's Undo, which is what the chat offers after each of these: a
+  // Done's ↩️ Not done (the receipt's nd: or, for a Done early, ne:), a
+  // delete's ↩️ Undo (t:) and a new chore's ↩️ Undo (u:). Each is the chat's
+  // own step, scoped to this household, with the chat's refusals.
+  ['POST', /^undo$/, async ({ env, chatId, tz, user, body, pending }) => {
+    const id = Number(body.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return json(TOO_LATE);
+    if (body.kind === 'done') {
+      const { firing, read } = await undoReads(env, id, chatId);
+      if (!firing) return json(TOO_LATE);
+      // A Done early is the one completion stamped done the moment it fired
+      // (completeEarly); a nag was out before it was done.
+      const early = firing.fired_at === firing.done_at;
+      const res = await (early ? undoEarly : undoCompletion)(env, firing, senderName(user), tz, { read });
+      if (!res.ok) return json(res.why === 'gone' ? { ok: false, message: 'That chore is gone for good.' } : TOO_LATE);
+      return choreReply(env, chatId, firing.reminder_id, tz, user,
+        { message: `↩️ ${firing.reminder_text} — not done after all` }, pending);
+    }
+    if (body.kind === 'delete') {
+      // Read and claimed in one round trip, as the log's Undo is, so the chat's
+      // button and this one cannot both restore it.
+      const [read, claim] = await env.DB.batch([
+        env.DB.prepare('SELECT * FROM trash WHERE id = ? AND chat_id = ?').bind(id, chatId),
+        env.DB.prepare(
+          `DELETE FROM trash WHERE id = ? AND chat_id = ? AND json_extract(payload, '$._cover') IS NULL
+             AND json_extract(payload, '$._firing') IS NULL AND json_extract(payload, '$.id') IS NOT NULL`
+        ).bind(id, chatId),
+      ]);
+      const row = (read.results || [])[0];
+      if (!row || !claim.meta.changes) return json(row ? { ok: false, message: 'Already restored.' } : TOO_LATE);
+      const r = JSON.parse(row.payload);
+      await restoreReminder(env, r);
+      await updateDashboard(env, chatId);
+      return choreReply(env, chatId, r.id, tz, user, { message: `↩️ Restored ${r.text}` }, pending);
+    }
+    if (body.kind === 'add') {
+      const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?').bind(id, chatId).first();
+      if (!r) return json({ ok: false, message: 'Already gone.' });
+      await removeReminder(env, r);
+      await updateDashboard(env, chatId);
+      return choreReply(env, chatId, r.id, tz, user, { message: `↩️ Undone — ${r.text}` }, pending);
+    }
+    return json({ ok: false, message: 'Nothing to undo.' });
   }],
 
   // The leaderboard's two weekly tabs, counted as /stats counts them, read in
