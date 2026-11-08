@@ -22,7 +22,7 @@ import {
   deferBoards, flushBoards, later,
 } from './dashboard.js';
 import { completeNow, editorPlan, flagPlan, skipNext, JUST_FIRED, NAG_PACES } from './manage.js';
-import { reminderInsert, deleteReminder, fireIfDue, setReminderPaused } from './chores.js';
+import { reminderInsert, deleteReminder, removalStatements, fireIfDue, setReminderPaused } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
 import { parentChoicesIn, setParent } from './nesting.js';
@@ -309,10 +309,14 @@ const routes = [
   }, { chore: true }],
 
   // A deletion changes the household's board, so its log goes to the group,
-  // with the Undo that brings the chore back for a day.
+  // with the Undo that brings the chore back for a day. The removal rides in
+  // the batch the reply reads, as an edit does; the cards and the log follow.
   ['POST', /^chore\/(\d+)\/delete$/, async ({ env, chatId, tz, user, r, pending }) => {
-    await deleteReminder(env, r, null, senderName(user));
-    return choreReply(env, chatId, r.id, tz, user, { message: '🗑️ Deleted — Undo is in the chat for a day.' }, pending);
+    const removal = removalStatements(env, r);
+    const snap = await snapshot(env, chatId, tz, [...removal.statements, ...pending.splice(0)]);
+    await deleteReminder(env, r, null, senderName(user),
+      { removed: removal.read(snap.before.slice(0, removal.statements.length)) });
+    return choreReply(env, chatId, r.id, tz, user, { message: '🗑️ Deleted — Undo is in the chat for a day.' }, [], snap);
   }, { chore: true }],
 
   // An edit's write goes in the batch the reply reads, so the answer is one

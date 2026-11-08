@@ -489,8 +489,11 @@ export async function handleManageCallback(env, cb) {
     return answerCallback(env, cb.id, 'This removes the chore for everyone.');
   }
   if (action === 'confirm') {
-    await deleteReminder(env, r);
-    return answerCallback(env, cb.id, 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.');
+    // The toast once the chore is gone; the cards, the log and the board follow.
+    await deleteReminder(env, r, null, null, {
+      onClaim: () => answerCallback(env, cb.id, 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.'),
+    });
+    return;
   }
 
   if (action === 'pause' || action === 'resume') {

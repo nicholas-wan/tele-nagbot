@@ -18,6 +18,8 @@ const NAGGING = {
 // A DB fake whose `members` rows are the household — the same table
 // rememberMember writes on every update.
 function db({ members = [], runs = [], firing = NAGGING, known = true, reminder = REMINDER }) {
+  // What the last write changed, for a statement gated on changes().
+  let last = 1;
   return withBatch({
     runs,
     prepare(sql) {
@@ -46,13 +48,17 @@ function db({ members = [], runs = [], firing = NAGGING, known = true, reminder 
               // A claim that names its conditions in SQL — the chat the tap
               // came from, a chore that must still exist — changes nothing
               // when they fail, as SQLite would, and so is not a write.
-              if (/^\s*UPDATE firings/i.test(sql)) {
+              // So does a write gated on the one before it (changes() = 1).
+              const none = () => { last = 0; return { meta: { changes: 0 } }; };
+              if (/changes\(\) = 1/.test(sql) && !last) return none();
+              if (/^\s*UPDATE firings/i.test(sql) || /^\s*INSERT INTO trash[\s\S]*JOIN firings/i.test(sql)) {
                 const at = sql.indexOf('chat_id = ?');
                 const chatArg = at < 0 ? undefined : args[(sql.slice(0, at).match(/\?/g) || []).length];
-                if (at >= 0 && chatArg !== firing.chat_id) return { meta: { changes: 0 } };
-                if (/EXISTS \(SELECT 1 FROM reminders/.test(sql) && !reminder) return { meta: { changes: 0 } };
+                if (at >= 0 && chatArg !== firing.chat_id) return none();
+                if (/EXISTS \(SELECT 1 FROM reminders/.test(sql) && !reminder) return none();
               }
               runs.push({ sql, args });
+              last = 1;
               return { meta: { changes: 1, last_row_id: 1 } };
             },
           };

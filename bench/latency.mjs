@@ -32,6 +32,13 @@ const realNow = Date.now.bind(Date);
 Date.now = () => BASE + (realNow() - started);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// TRACE=1 prints each call as it starts, ms from the start of the flow.
+let traceStart = null;
+const trace = (what) => {
+  if (process.env.TRACE && traceStart != null) process.stderr.write(`${String(realNow() - traceStart).padStart(5)}  ${what}
+`);
+};
+const short = (q) => String(q).replace(/\s+/g, ' ').trim().slice(0, 90);
 
 function freshDb() {
   const sql = new DatabaseSync(':memory:');
@@ -83,16 +90,18 @@ function slowD1(sql, counts) {
   return {
     prepare(query) {
       const bound = (args = []) => ({
+        query,
         bind: (...values) => bound(values),
         runSync: () => runStatement(query, args),
-        first: async () => { counts.d1++; await sleep(D1_MS); return sql.prepare(query).get(...args) || null; },
-        all: async () => { counts.d1++; await sleep(D1_MS); return { results: sql.prepare(query).all(...args) }; },
-        run: async () => { counts.d1++; await sleep(D1_MS); return runStatement(query, args); },
+        first: async () => { counts.d1++; trace(`D1 first  ${short(query)}`); await sleep(D1_MS); return sql.prepare(query).get(...args) || null; },
+        all: async () => { counts.d1++; trace(`D1 all    ${short(query)}`); await sleep(D1_MS); return { results: sql.prepare(query).all(...args) }; },
+        run: async () => { counts.d1++; trace(`D1 run    ${short(query)}`); await sleep(D1_MS); return runStatement(query, args); },
       });
       return bound();
     },
     async batch(statements) {
       counts.d1++;
+      trace(`D1 batch  ${statements.length}: ${statements.map((st) => short(st.query).slice(0, 40)).join(' | ')}`);
       await sleep(D1_MS);
       sql.exec('BEGIN');
       try {
@@ -113,6 +122,7 @@ function stubTelegram(counts) {
     const method = String(url).split('/').pop();
     counts.tg++;
     counts.methods.push(method);
+    trace(`TG ${method}`);
     if (counts.firstMsg == null && /^(send|edit)/.test(method)) counts.firstMsg = realNow();
     await sleep(TG_MS);
     const result = method === 'getMe' ? { id: 1000, username: 'TwoShotsNagBot' }
@@ -171,6 +181,7 @@ const SCENARIOS = {
   'app-list': { label: 'Mini App: open list', run: () => app('chores') },
   'app-chore': { label: 'Mini App: open a chore', run: () => app('chore/4') },
   'app-done': { label: 'Mini App: Done', run: () => app('chore/4/done', {}) },
+  'app-delete': { label: 'Mini App: delete', run: () => app('chore/4/delete', {}) },
   'app-edit': { label: 'Mini App: change time', run: () => app('chore/5/edit', { field: 'time', value: '20:00' }) },
   'app-add': { label: 'Mini App: add a chore', run: () => app('chores', { text: 'dishes 9pm daily' }) },
   'wizard': { label: '/chore with no time (wizard)', run: () => typed('/chore water the cat') },
@@ -195,6 +206,7 @@ async function measure(name) {
   const tasks = [];
   const ctx = { waitUntil: (p) => tasks.push(p) };
   const t0 = realNow();
+  traceStart = t0;
   let reply;
   if (scenario.cron) {
     await worker.scheduled({}, env, ctx);
@@ -203,6 +215,7 @@ async function measure(name) {
     const request = await scenario.run();
     const response = await worker.fetch(request, env, ctx);
     reply = realNow() - t0;
+    trace('-- reply');
     await response.text();
   }
   for (let i = 0; i < tasks.length; i++) await tasks[i];

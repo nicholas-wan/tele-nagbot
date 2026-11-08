@@ -17,7 +17,7 @@ import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firing
          MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
 import { updateDashboard, choreListHtml, fmtWhen, clip } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
-         deleteReminder, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
+         deleteReminder, deleteTapped, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
          setReminderPaused, completeEarly, wakeChat, skipPastPostponement, undoReads } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
@@ -751,9 +751,8 @@ async function handleCallback(env, cb) {
     const r = await env.DB.prepare('SELECT * FROM reminders WHERE id = ? AND chat_id = ?')
       .bind(+um[1], cb.message.chat.id).first();
     if (!r) return answerCallback(env, cb.id, 'Already gone.');
-    const trashId = await removeReminder(env, r);
-    // Said as soon as it is true; the line and the board follow.
-    await answerCallback(env, cb.id, 'Undone');
+    // Said as soon as it is true; the cards, the line and the board follow.
+    const trashId = await removeReminder(env, r, { onClaim: () => answerCallback(env, cb.id, 'Undone') });
     await editRef(env, ctx, r.chat_id, ref, `↩️ Undone — <s>${esc(r.text)}</s>`, { inline_keyboard: [[
       { text: '↩️ Restore', callback_data: `t:${trashId}` },
       okButton(keptSourceId(cb)),
@@ -995,12 +994,17 @@ async function handleCallback(env, cb) {
   // leaves carries Undo — a mis-tap is recoverable for a day.
   const xm = data.match(/^x:(\d+)$/);
   if (xm) {
-    const { firing, reminder: r } = await tappedFiring(env, +xm[1], cb.message.chat.id);
-    if (!firing) return answerCallback(env, cb.id, 'Already gone.');
-    if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
-    if (!r) return answerCallback(env, cb.id, 'That chore is already gone.');
+    // The delete is sent with the reads that used to come before it, as a
+    // Done is: one round trip after the intake (deleteTapped).
+    const { won, firing, reminder: r, removed } = await deleteTapped(env, +xm[1], cb.message.chat.id, cb.from.id);
+    if (!won) {
+      if (!firing) return answerCallback(env, cb.id, 'Already gone.');
+      if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
+      return answerCallback(env, cb.id, 'That chore is already gone.');
+    }
     // No ctx: the log is public on purpose, whoever the nag belonged to.
     await deleteReminder(env, r, null, senderName(cb.from), {
+      removed,
       onClaim: () => answerCallback(env, cb.id, 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.'),
     });
     return;

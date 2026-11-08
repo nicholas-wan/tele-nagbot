@@ -164,20 +164,81 @@ export async function chatPaused(env, chatId) {
 // not expired, so an intentional removal never counts as "expired unclaimed"
 // in stats — and both removals are reversible, since the Undo button sits on
 // a confirmation for up to a day and the chore may have fired since.
-export async function removeReminder(env, r) {
-  // The live nags are read and removed, the chore deleted and stashed, in one
-  // transaction; their cards come down from the rows it handed back.
-  const [firings, , , stash] = await env.DB.batch([
-    env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
-    env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
-    env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id),
-    stashStatement(env, r),
-  ]);
-  await later(env, () => Promise.all(firings.results.flatMap((f) => [
+export async function removeReminder(env, r, { onClaim } = {}) {
+  const removal = removalStatements(env, r);
+  const { trashId, firings } = removal.read(await env.DB.batch(removal.statements));
+  // Said as soon as it is true; the cards come down after.
+  if (onClaim) await onClaim();
+  await later(env, () => takeDownCards(env, firings));
+  return trashId;
+}
+
+// The removal as statements, for a batch of the caller's own (the Mini App's
+// reply reads the board in the same one): the live nags are read and removed,
+// the chore deleted and stashed, in one transaction. `read` takes their
+// answers and gives the trash id and the rows whose cards come down.
+export function removalStatements(env, r) {
+  return {
+    statements: [
+      env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+      env.DB.prepare("DELETE FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+      env.DB.prepare('DELETE FROM reminders WHERE id = ?').bind(r.id),
+      stashStatement(env, r),
+    ],
+    read: ([firings, , , stash]) => ({ trashId: stash.meta.last_row_id, firings: firings.results || [] }),
+  };
+}
+
+function takeDownCards(env, firings) {
+  return Promise.all(firings.flatMap((f) => [
     f.last_message_id ? deleteNag(env, f) : null,
     f.last_sticker_id ? deleteMessage(env, nagChat(f), f.last_sticker_id) : null,
-  ])));
-  return stash.meta.last_row_id;
+  ]));
+}
+
+// Every column restoreReminder puts back, which is every column a reminder
+// has (test/speed.test.js holds the two lists together): the stash a 🗑 tap
+// builds in SQL, from the row as the delete found it.
+export const REMINDER_COLUMNS = ['id', 'chat_id', 'text', 'assignee_name', 'assignee_user_id', 'display_num',
+  'schedule_kind', 'schedule_detail', 'next_fire_at', 'nag_intervals', 'paused', 'created_by', 'created_at',
+  'scored', 'parent_id'];
+
+// 🗑 on a nag, in one round trip: the chore is stashed, deleted and its live
+// nags removed only if the tapped firing is in this chat, belongs to the
+// tapper when it is a private nag, and still has its chore — the conditions
+// the old reads checked first, now the first write's own. Each later write
+// goes only if the one before it did (changes()). The rows read first say why
+// a lost claim lost, and are the chore and the cards a won one takes down.
+// Returns { won, firing, reminder, removed: { trashId, firings } }.
+export async function deleteTapped(env, firingId, chatId, userId) {
+  const reminderOf = '(SELECT reminder_id FROM firings WHERE id = ? AND chat_id = ?)';
+  const [f, r, live, stash, gone] = await env.DB.batch([
+    env.DB.prepare('SELECT * FROM firings WHERE id = ? AND chat_id = ?').bind(firingId, chatId),
+    env.DB.prepare(
+      `SELECT r.* FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+       WHERE f.id = ? AND f.chat_id = ?`
+    ).bind(firingId, chatId),
+    env.DB.prepare(`SELECT * FROM firings WHERE reminder_id = ${reminderOf} AND state = 'nagging'`)
+      .bind(firingId, chatId),
+    env.DB.prepare(
+      `INSERT INTO trash (chat_id, payload, created_at)
+       SELECT r.chat_id, json_object(${REMINDER_COLUMNS.map((c) => `'${c}', r.${c}`).join(', ')}), ?
+       FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
+       WHERE f.id = ? AND f.chat_id = ?
+         AND (f.last_message_ephemeral = 0 OR f.nag_user_id IS NULL OR f.nag_user_id = ?)`
+    ).bind(Date.now(), firingId, chatId, userId),
+    env.DB.prepare(`DELETE FROM reminders WHERE id = ${reminderOf} AND changes() = 1`).bind(firingId, chatId),
+    env.DB.prepare(
+      `DELETE FROM firings WHERE reminder_id = ${reminderOf} AND state = 'nagging' AND changes() = 1`
+    ).bind(firingId, chatId),
+  ]);
+  const won = Boolean(stash.meta.changes && gone.meta.changes);
+  return {
+    won,
+    firing: (f.results || [])[0] || null,
+    reminder: (r.results || [])[0] || null,
+    removed: won ? { trashId: stash.meta.last_row_id, firings: live.results || [] } : null,
+  };
 }
 
 // Puts a trashed reminder row back, under its old id: AUTOINCREMENT never
@@ -312,21 +373,29 @@ export async function skipPastPostponement(env, r, until, tz) {
 }
 
 // `onClaim` runs once the chore is gone, before the log and the board — where
-// a tap's toast goes.
-export async function deleteReminder(env, r, ctx = null, by = null, { onClaim } = {}) {
+// a tap's toast goes. `removed`: the removal, when the caller made it in a
+// batch of its own (deleteTapped, the Mini App's reply).
+export async function deleteReminder(env, r, ctx = null, by = null, { onClaim, removed = null } = {}) {
   const chatId = r.chat_id;
-  const trashId = await removeReminder(env, r);
+  let gone = removed;
+  if (!gone) {
+    const removal = removalStatements(env, r);
+    gone = removal.read(await env.DB.batch(removal.statements));
+  }
   if (onClaim) await onClaim();
   // OK dismisses the log once everyone has seen it; Undo restores the chore.
   const undo = { inline_keyboard: [[
-    { text: '↩️ Undo', callback_data: `t:${trashId}` },
+    { text: '↩️ Undo', callback_data: `t:${gone.trashId}` },
     { text: '✅ OK', callback_data: 'ok' },
   ]] };
   const html = by
     ? `🗑️ ${esc(by)} deleted <s>${esc(r.text)}</s>`
     : `🗑️ Deleted <s>${esc(r.text)}</s>`;
-  await later(env, () => (ctx ? sendPrivate(env, ctx, html, undo)
-    : sendMessage(env, chatId, html, undo, { silent: true })));
+  // The cards and the log touch different messages, so they go together.
+  await later(env, () => Promise.all([
+    takeDownCards(env, gone.firings),
+    ctx ? sendPrivate(env, ctx, html, undo) : sendMessage(env, chatId, html, undo, { silent: true }),
+  ]));
   await updateDashboard(env, chatId);
 }
 

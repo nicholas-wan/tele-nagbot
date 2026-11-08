@@ -426,6 +426,41 @@ describe('round trips before the toast', () => {
     expect(firing()).toMatchObject({ state: 'nagging', snoozes_used: 0 });
   });
 
+  it('🗑 Delete on a nag: one, the removal sent with its reads, and its Undo puts the row back as it was', async () => {
+    const before = sql.prepare('SELECT * FROM reminders WHERE id = 8').get();
+    expect(await wavesBeforeToast('x:5')).toEqual({
+      waves: 1, text: 'Deleted 🗑 — tap ↩️ Undo in the chat if that was a slip.',
+    });
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM reminders WHERE id = 8').get().n).toBe(0);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM firings WHERE id = 5').get().n).toBe(0);
+    expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 700)).toBe(true);
+    // The stash is built in SQL from the row the delete found.
+    const stash = sql.prepare('SELECT * FROM trash ORDER BY id DESC').get();
+    expect(JSON.parse(stash.payload)).toEqual(before);
+    await wavesBeforeToast(`t:${stash.id}`);
+    // A chore that was nagging with nothing scheduled comes back due now.
+    expect(sql.prepare('SELECT * FROM reminders WHERE id = 8').get()).toEqual({ ...before, next_fire_at: NOW });
+  });
+
+  it('🗑 still refuses another household, and another member\'s private nag, deleting nothing', async () => {
+    env.ALLOWED_CHATS = '1,2';
+    expect((await wavesBeforeToast('x:5', { chatId: 2 })).text).toBe('Already gone.');
+    sql.exec('UPDATE firings SET last_message_ephemeral = 1, nag_user_id = 3 WHERE id = 5');
+    expect((await wavesBeforeToast('x:5')).text).toBe('That nag is someone else\'s 🙈');
+    sql.exec('UPDATE firings SET last_message_ephemeral = 0, nag_user_id = NULL WHERE id = 5');
+    sql.exec('DELETE FROM reminders WHERE id = 8');
+    expect((await wavesBeforeToast('x:5')).text).toBe('That chore is already gone.');
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM trash').get().n).toBe(0);
+    expect(firing().state).toBe('nagging');
+    expect(calls.some((c) => c.method === 'sendMessage')).toBe(false);
+  });
+
+  it('the stash a 🗑 builds in SQL names every column a reminder has', async () => {
+    const { REMINDER_COLUMNS } = await import('../src/chores.js');
+    const columns = sql.prepare("SELECT name FROM pragma_table_info('reminders')").all().map((c) => c.name);
+    expect([...REMINDER_COLUMNS].sort()).toEqual(columns.sort());
+  });
+
   it('↩️ Not done, Together too, Not done early and Restore: two', async () => {
     await warmTz();
     await wavesBeforeToast('d:5');
@@ -635,6 +670,20 @@ describe('the Mini App, round trips before its answer', () => {
     expect(add.reply.ok).toBe(true);
     expect(add.reply.chore.text).toBe('feed fish');
     expect(add.waves).toBe(2);
+  });
+
+  it('a delete: two, the removal inside the answer\'s batch, the cards and the log after', async () => {
+    const { reply, waves: n } = await appWaves('chore/8/delete', {});
+    expect(reply).toMatchObject({ ok: true, chore: null });
+    expect(reply.chores.map((c) => c.id)).toEqual([9]);
+    expect(n).toBe(2);
+    expect(calls.some((c) => (c.method === 'sendMessage' || c.method === 'deleteMessage') && c.done)).toBe(false);
+    await settle();
+    expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 700)).toBe(true);
+    const log = calls.find((c) => c.method === 'sendMessage' && /deleted/.test(c.body.text));
+    const stash = sql.prepare('SELECT id FROM trash ORDER BY id DESC').get().id;
+    expect(log.body.reply_markup.inline_keyboard[0][0].callback_data).toBe(`t:${stash}`);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM firings WHERE reminder_id = 8').get().n).toBe(0);
   });
 
   it('turns away someone Telegram says has left, even with a members row, writing nothing', async () => {
