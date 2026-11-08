@@ -661,6 +661,34 @@ describe('the Mini App, round trips before its answer', () => {
     const { chatMemberRole } = await import('../src/household.js');
     expect(await chatMemberRole(env, 1, 2)).toBe('unknown');
   });
+
+  it('asks again before putting someone a remembered answer lets in back on the roster', async () => {
+    let status = 'member';
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => (String(url).endsWith('/getChatMember')
+      ? (calls.push({ method: 'getChatMember' }), new Response(JSON.stringify({ ok: true, result: { status } })))
+      : inner(url, init))));
+    expect((await appWaves('chores')).reply.ok).toBe(true);
+    // They leave; the update that removes the row lands on another isolate,
+    // so this one still remembers them as in.
+    status = 'left';
+    sql.exec('DELETE FROM members WHERE user_id = 2');
+    const { reply } = await appWaves('chore/8/done', {});
+    await settle();
+    expect(reply.status).toBe(403);
+    expect(asked()).toBe(2);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM members WHERE user_id = 2').get().n).toBe(0);
+    expect(firing().state).toBe('nagging');
+  });
+
+  it('forgets a remembered answer when the person leaves', async () => {
+    const { chatMemberRole, cachedRole, forgetMember } = await import('../src/household.js');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { status: 'member' } }))));
+    expect(await chatMemberRole(env, 1, 2)).toBe('member');
+    expect(cachedRole(env, 1, 2)).toBe(true);
+    await forgetMember(env, 1, 2);
+    expect(cachedRole(env, 1, 2)).toBe(false);
+  });
 });
 
 describe('the cron, round trips per job', () => {
@@ -751,5 +779,55 @@ describe('the cron, round trips per job', () => {
     expect(most).toBe(6);
     expect(sql.prepare('SELECT COUNT(*) AS n FROM sent_messages').get().n).toBe(0);
     expect(ops.filter((o) => /DELETE FROM sent_messages/.test(String(o.sql)))).toHaveLength(1);
+  });
+
+  it('the 8am digest leaves out a chore that fired in the same tick', async () => {
+    const { sendDigests } = await import('../src/cron.js');
+    const EIGHT = Date.UTC(2026, 9, 11, 0, 0); // Sun 11 Oct 08:00 Asia/Singapore
+    Date.now.mockReturnValue(EIGHT);
+    sql.exec("UPDATE firings SET state = 'done' WHERE id = 5");
+    sql.exec(`INSERT INTO firings (id, reminder_id, chat_id, reminder_text, fired_at, state, nag_count, next_nag_at, scored)
+      VALUES (6, 9, 1, 'water plants', ${EIGHT}, 'nagging', 0, ${EIGHT + 15 * 60000}, 1)`);
+    await sendDigests(env, EIGHT);
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0);
+    // One left from before the tick still gets its digest.
+    sql.exec(`UPDATE firings SET fired_at = ${EIGHT - HOUR} WHERE id = 6`);
+    sql.exec('UPDATE settings SET last_digest = NULL');
+    await sendDigests(env, EIGHT);
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(1);
+  });
+
+  it('a fire whose last batch fails puts the other sweep records in the scope back', async () => {
+    const { fireReminder } = await import('../src/firing.js');
+    const { deferBoards, flushBoards } = await import('../src/dashboard.js');
+    const { recordForSweep } = await import('../src/tg.js');
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000} WHERE id = 9`);
+    const r = sql.prepare('SELECT * FROM reminders WHERE id = 9').get();
+    const batch = env.DB.batch;
+    env.DB.batch = (statements) => (statements.some((st) => /SET last_message_id/.test(st.query))
+      ? Promise.reject(new Error('D1_ERROR: network lost'))
+      : batch(statements));
+    const tick = deferBoards(env);
+    await recordForSweep(tick, 1, 4242);
+    await expect(fireReminder(tick, r, NOW, 'Asia/Singapore')).rejects.toThrow(/network lost/);
+    env.DB.batch = batch;
+    await flushBoards(tick);
+    expect(sql.prepare('SELECT COUNT(*) AS n FROM sent_messages WHERE message_id = 4242').get().n).toBe(1);
+  });
+
+  it('a claim batch that fails is not swapped back, so a racing fire keeps its claim', async () => {
+    const { fireReminder } = await import('../src/firing.js');
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000} WHERE id = 9`);
+    const r = sql.prepare('SELECT * FROM reminders WHERE id = 9').get();
+    const batch = env.DB.batch;
+    // The other fire's claim commits; this one's batch errors.
+    env.DB.batch = async (statements) => {
+      if (!statements.some((st) => /UPDATE reminders SET next_fire_at = \? WHERE id = \? AND next_fire_at = \?/.test(st.query))) return batch(statements);
+      await batch(statements);
+      throw new Error('D1_ERROR: network lost');
+    };
+    await expect(fireReminder(env, r, NOW, 'Asia/Singapore')).rejects.toThrow(/network lost/);
+    env.DB.batch = batch;
+    expect(sql.prepare('SELECT next_fire_at FROM reminders WHERE id = 9').get().next_fire_at).toBeGreaterThan(NOW);
   });
 });

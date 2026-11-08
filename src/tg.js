@@ -13,7 +13,7 @@ const TELEGRAM_TIMEOUT_MS = 15 * 1000;
 // message meant for one person, twice.
 const isTimeout = (e) => Boolean(e && (e.name === 'TimeoutError' || e.name === 'AbortError'));
 
-export async function tg(env, method, body) {
+export async function tg(env, method, body, { timeoutMs = TELEGRAM_TIMEOUT_MS } = {}) {
   for (let attempt = 0; ; attempt++) {
     let data;
     try {
@@ -21,7 +21,7 @@ export async function tg(env, method, body) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       // Telegram 5xx pages are HTML; degrade to {ok:false} instead of throwing.
       data = await res.json();
@@ -148,11 +148,19 @@ export async function flushSweepRecords(env) {
 }
 
 // The queued records as statements, taken off the queue, for a caller that
-// is about to send a batch anyway (a fire's last write).
+// is about to send a batch anyway (a fire's last write). The queue holds the
+// whole scope's records — in the cron, other chores' and other chats' — so a
+// batch that fails puts them back (`restore`) for flushBoards to write; a
+// batch that committed before its answer was lost then records some twice,
+// and the sweep's second delete is refused harmlessly.
 export function drainSweepStatements(env) {
   const queue = env[SWEEP_QUEUE];
-  if (!queue || !queue.length) return [];
-  return queue.splice(0).map((row) => sweepStatement(env, row));
+  if (!queue || !queue.length) return { statements: [], restore() {} };
+  const rows = queue.splice(0);
+  return {
+    statements: rows.map((row) => sweepStatement(env, row)),
+    restore: () => { queue.unshift(...rows); },
+  };
 }
 
 export async function recordSentMessage(env, chatId, res, { receiverUserId = null, ttlMs = SENT_TTL_MS } = {}) {

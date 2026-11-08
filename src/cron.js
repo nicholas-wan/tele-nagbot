@@ -357,7 +357,7 @@ export async function sendDigests(env, now, paused = null, chats = null) {
         `SELECT f.id FROM firings f JOIN reminders r ON r.id = f.reminder_id
          WHERE f.chat_id = ? AND f.state = 'nagging' AND r.paused = 0
            AND (r.schedule_kind = 'once' OR f.fired_at > ?)
-           AND f.fired_at <= ?
+           AND f.fired_at < ?
            AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at IS NOT NULL
                     AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)`
       ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now).all();

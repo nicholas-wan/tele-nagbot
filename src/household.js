@@ -173,6 +173,10 @@ export function rememberMemberStatement(env, chatId, from, now = Date.now(), { g
 // remove them, so a departed housemate kept drawing rotations and riding along
 // on every "done together" forever.
 export async function forgetMember(env, chatId, userId) {
+  // A "member" answer remembered from before they left would let them back
+  // in through the Mini App, which writes the roster row again.
+  const byKey = roleCache.get(env.DB);
+  if (byKey) byKey.delete(`${chatId}:${userId}`);
   await env.DB.prepare('DELETE FROM members WHERE chat_id = ? AND user_id = ?')
     .bind(chatId, userId).run();
 }
@@ -184,18 +188,30 @@ export async function forgetMember(env, chatId, userId) {
 // someone who had walked out with the household's chores. Remembered per
 // isolate for a few minutes; only Telegram's own answers are, since a rate
 // limit, a 5xx or a timeout says nothing about the person. Never rejects.
+//
+// The leave that forgetMember clears may land on another isolate, so a cached
+// "member" for someone with no roster row is asked again (`fresh`) before the
+// Mini App writes one: cachedRole says whether an answer would come from here.
+// Telegram gets four seconds, not tg()'s fifteen — the person is waiting, and
+// a 503 with retry is the better answer to a slow one.
 const ROLE_TTL_MS = 3 * 60000;
+const ROLE_TIMEOUT_MS = 4000;
 const MAX_ROLES = 200;
 const roleCache = new WeakMap(); // DB -> "chat:user" -> { role, at }
 
-export async function chatMemberRole(env, chatId, userId) {
+export function cachedRole(env, chatId, userId) {
+  const hit = (roleCache.get(env.DB) || new Map()).get(`${chatId}:${userId}`);
+  return Boolean(hit && Date.now() - hit.at < ROLE_TTL_MS);
+}
+
+export async function chatMemberRole(env, chatId, userId, { fresh = false } = {}) {
   let byKey = roleCache.get(env.DB);
   if (!byKey) roleCache.set(env.DB, byKey = new Map());
   const key = `${chatId}:${userId}`;
   const now = Date.now();
   const hit = byKey.get(key);
-  if (hit && now - hit.at < ROLE_TTL_MS) return hit.role;
-  const res = await tg(env, 'getChatMember', { chat_id: chatId, user_id: userId });
+  if (!fresh && hit && now - hit.at < ROLE_TTL_MS) return hit.role;
+  const res = await tg(env, 'getChatMember', { chat_id: chatId, user_id: userId }, { timeoutMs: ROLE_TIMEOUT_MS });
   let role = 'unknown';
   if (res && res.ok && res.result) {
     const { status, is_member: present } = res.result;

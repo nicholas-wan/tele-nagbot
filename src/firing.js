@@ -30,24 +30,18 @@ export async function fireReminder(env, r, now, tz) {
   // tally), then the writes that make the new nag, then — after Telegram —
   // the card's ids, a one-off's release and the sweep records, together. It
   // used to be eight or nine one after another.
-  let claim;
-  let stale;
-  let members;
-  let tally;
-  try {
-    [claim, stale, members, tally] = await env.DB.batch([
-      env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(claimTo, r.id, r.next_fire_at),
-      env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
-      env.DB.prepare('SELECT user_id, username, first_name, last_seen FROM members WHERE chat_id = ?').bind(r.chat_id),
-      ...(detail.rotate ? [rotationStatement(env, r.chat_id, tz)] : []),
-    ]);
-  } catch (e) {
-    // The batch may have committed before its answer was lost. The swap back
-    // is bound to the claimed value, so it is a no-op when nothing committed.
-    try { await release(); } catch { /* the next tick decides */ }
-    throw e;
-  }
+  // A claim batch that fails is not released: a racing fire of the same
+  // occurrence claims the same value, so a swap back could undo *its* claim
+  // and fire the occurrence twice. If this one committed before its answer was
+  // lost, a one-off's lease runs out and it fires again; a recurring chore
+  // drops that one nag, as a crash mid-fire always did.
+  const [claim, stale, members, tally] = await env.DB.batch([
+    env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
+      .bind(claimTo, r.id, r.next_fire_at),
+    env.DB.prepare("SELECT * FROM firings WHERE reminder_id = ? AND state = 'nagging'").bind(r.id),
+    env.DB.prepare('SELECT user_id, username, first_name, last_seen FROM members WHERE chat_id = ?').bind(r.chat_id),
+    ...(detail.rotate ? [rotationStatement(env, r.chat_id, tz)] : []),
+  ]);
   if (!claim.meta.changes) return;
   const roster = members.results || [];
 
@@ -148,18 +142,26 @@ export async function fireReminder(env, r, now, tz) {
   // Fire completed: a one-off releases its lease and goes dormant, in the same
   // batch. If the lease expired mid-fire and a retry re-fired, the stale sweep
   // above has already replaced the earlier nag.
-  const [upd] = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
-         cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL
-         AND nag_user_id IS NULL`
-    ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
-      ref && ref.ephemeral ? who : null, firingId),
-    ...(next == null ? [env.DB.prepare(
-      'UPDATE reminders SET next_fire_at = NULL WHERE id = ? AND next_fire_at = ?'
-    ).bind(r.id, claimTo)] : []),
-    ...drainSweepStatements(env),
-  ]);
+  const records = drainSweepStatements(env);
+  let upd;
+  try {
+    [upd] = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE firings SET last_message_id = ?, last_message_ephemeral = ?, last_sticker_id = ?,
+           cat = ?, nag_user_id = ? WHERE id = ? AND state = 'nagging' AND last_message_id IS NULL
+           AND nag_user_id IS NULL`
+      ).bind(ref ? ref.id : null, ref && ref.ephemeral ? 1 : 0, s.messageId, s.cat,
+        ref && ref.ephemeral ? who : null, firingId),
+      ...(next == null ? [env.DB.prepare(
+        'UPDATE reminders SET next_fire_at = NULL WHERE id = ? AND next_fire_at = ?'
+      ).bind(r.id, claimTo)] : []),
+      ...records.statements,
+    ]);
+  } catch (e) {
+    // The scope's other records go back on the queue for flushBoards.
+    records.restore();
+    throw e;
+  }
   if (!upd.meta.changes) {
     const orphan = { chat_id: r.chat_id, nag_chat_id: null, nag_user_id: ref && ref.ephemeral ? who : null };
     await Promise.all([

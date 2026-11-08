@@ -15,7 +15,7 @@ import { chatAllowed } from './handlers.js';
 import { fmtLocal, fmtShort, weekStart } from './time.js';
 import {
   getTz, senderName, creditTogether, nicknames, isScored, membersFrom, householdNamesFrom,
-  chatMemberRole, rememberMemberStatement, CREDIT_SEP,
+  chatMemberRole, cachedRole, rememberMemberStatement, CREDIT_SEP,
 } from './household.js';
 import {
   choreBoard, choreEmoji, describeSchedule, updateDashboard, loadBoard, boardStatements, boardFrom,
@@ -424,19 +424,24 @@ export async function handleMiniAppApi(request, env, path, now = Date.now(), ctx
         : kind === 'stats' ? statsGate(env, chatId, statsTz, match[1])
         : choreGate(env, chatId, chore ? Number(match[1]) : null);
       // The membership question, the route's reads and the body all at once.
-      const [role, results, body] = await Promise.all([
+      const fromCache = !user.is_bot && cachedRole(env, chatId, user.id);
+      let [role, results, body] = await Promise.all([
         user.is_bot ? 'none' : chatMemberRole(env, chatId, user.id),
         env.DB.batch(reads.statements),
         method === 'POST' ? readBody(request) : {},
       ]);
       const gate = reads.read(results);
+      const known = (gate.rows || []).some((m) => m.user_id === user.id);
+      // Remembered as in, but off the roster: a leave since then (seen on any
+      // isolate) removed the row, so Telegram is asked again before the row
+      // is written back.
+      if (role === 'member' && fromCache && !known) role = await chatMemberRole(env, chatId, user.id, { fresh: true });
       const refused = admit(role, user, gate.rows);
       if (refused) return refused;
       // Let in: the name the household sees for this person is refreshed, since
       // credits are written in it — what a tap in the chat does first. A POST
       // sends it with its reply's batch; a GET writes it after, and only for a
       // housemate the roster has not met yet.
-      const known = (gate.rows || []).some((m) => m.user_id === user.id);
       if (method === 'POST' || !known) pending.push(rememberMemberStatement(scoped, chatId, user, now));
       const tz = statsTz || (gate.settings && gate.settings.tz) || 'Asia/Singapore';
       if (chore && !gate.chore) return json(GONE);
