@@ -880,3 +880,76 @@ describe('the cron, round trips per job', () => {
     expect(sql.prepare('SELECT next_fire_at FROM reminders WHERE id = 9').get().next_fire_at).toBeGreaterThan(NOW);
   });
 });
+
+// The third speed pass (8 Nov 2026): what a sticker pick and a typed command
+// used to read on their own — the chat's pack, the cats' tags, the timezone —
+// rides in the first batch each entry point sends, when the isolate's copy is
+// stale.
+describe('the chat\'s timezone and stickers', () => {
+  const cached = (o) => /sticker_tags|sticker_set FROM settings|SELECT tz FROM settings/.test(String(o.sql));
+  beforeEach(() => {
+    // A pack of the chat's own, so the bot's username never comes into it.
+    sql.exec("UPDATE settings SET sticker_set = 'testpack'");
+    sql.exec("INSERT INTO sticker_tags (file_uid, cat) VALUES ('u1', 'latte'), ('u2', 'latte')");
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => (String(url).endsWith('/getStickerSet')
+      ? new Response(JSON.stringify({ ok: true, result: { stickers: [
+        { file_id: 's1', file_unique_id: 'u1' }, { file_id: 's2', file_unique_id: 'u2' }] } }))
+      : inner(url, init))));
+  });
+
+  it('ride in the intake, so a Done\'s card and sticker wait on no read of their own', async () => {
+    await tap('d:5');
+    await settle();
+    expect(cached(ops[0])).toBe(true);
+    expect(ops.slice(1).some(cached)).toBe(false);
+    expect(calls.some((c) => c.method === 'sendSticker')).toBe(true);
+    const card = calls.find((c) => c.method === 'editMessageText' && c.body.message_id === 700);
+    expect(card.body.text).toMatch(/Latte purrs approvingly/);
+    // Fresh now: the next intake carries none of them.
+    ops.length = 0;
+    await tap('ok', 900);
+    await settle();
+    expect(ops.some(cached)).toBe(false);
+  });
+
+  it('make a typed /chore one round trip after the intake', async () => {
+    await worker.fetch(new Request('https://nag.test/webhook', {
+      method: 'POST',
+      headers: { 'X-Telegram-Bot-Api-Secret-Token': 'hook' },
+      body: JSON.stringify({ update_id: updateId++, message: {
+        message_id: 801, from: nick, chat: { id: 1, type: 'supergroup' }, date: 0, text: '/chore feed fish 9pm daily',
+        entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+      } }),
+    }), env, ctx());
+    await settle();
+    expect(ops[1].sql).toMatch(/INSERT INTO reminders/);
+    expect(ops[1].wave).toBe(1);
+    expect(ops.slice(1).some(cached)).toBe(false);
+  });
+
+  it('ride in the Mini App\'s gate for a change, and in the cron\'s due check', async () => {
+    const fields = { auth_date: String(Math.floor(NOW / 1000)), start_param: 'g1', user: JSON.stringify(nick) };
+    fields.hash = await signInitData(TOKEN, fields);
+    await worker.fetch(new Request('https://nag.test/api/app/chore/8/done', {
+      method: 'POST',
+      headers: { Authorization: `tma ${new URLSearchParams(fields)}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expect: 'now' }),
+    }), env, ctx());
+    await settle();
+    expect(cached(ops[0])).toBe(true);
+    expect(ops.slice(1).some(cached)).toBe(false);
+    expect(calls.some((c) => c.method === 'sendSticker')).toBe(true);
+  });
+
+  it('ride in the cron\'s due check, so a fire picks its sticker and its cat without a read', async () => {
+    sql.exec(`UPDATE reminders SET next_fire_at = ${NOW - 1000} WHERE id = 9`);
+    await worker.scheduled({}, env, ctx());
+    await settle();
+    expect(String(ops[0].sql)).toMatch(/sticker_tags/);
+    expect(ops.slice(1).some(cached)).toBe(false);
+    expect(calls.findIndex((c) => c.method === 'sendSticker'))
+      .toBeLessThan(calls.findIndex((c) => c.method === 'sendMessage'));
+    expect(calls.find((c) => c.method === 'sendMessage').body.text).toMatch(/water plants[\s\S]*Latte/);
+  });
+});

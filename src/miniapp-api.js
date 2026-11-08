@@ -26,6 +26,7 @@ import { reminderInsert, deleteReminder, removalStatements, fireIfDue, setRemind
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
 import { parentChoicesIn, setParent } from './nesting.js';
+import { chatReads } from './context.js';
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -428,13 +429,17 @@ export async function handleMiniAppApi(request, env, path, now = Date.now(), ctx
         : kind === 'stats' ? statsGate(env, chatId, statsTz, match[1])
         : choreGate(env, chatId, chore ? Number(match[1]) : null);
       // The membership question, the route's reads and the body all at once.
+      // A change's stickers (a Done's celebration) are read with them when
+      // this isolate's copy is stale (chatReads).
+      const context = method === 'POST' ? chatReads(env, chatId) : null;
       const fromCache = !user.is_bot && cachedRole(env, chatId, user.id);
       let [role, results, body] = await Promise.all([
         user.is_bot ? 'none' : chatMemberRole(env, chatId, user.id),
-        env.DB.batch(reads.statements),
+        env.DB.batch(context ? [...reads.statements, ...context.statements] : reads.statements),
         method === 'POST' ? readBody(request) : {},
       ]);
-      const gate = reads.read(results);
+      if (context) context.prime(results.slice(reads.statements.length));
+      const gate = reads.read(results.slice(0, reads.statements.length));
       const known = (gate.rows || []).some((m) => m.user_id === user.id);
       // Remembered as in, but off the roster: a leave since then (seen on any
       // isolate) removed the row, so Telegram is asked again before the row

@@ -86,8 +86,10 @@ describe('webhook answers', () => {
         first: async () => { throw new Error('D1 is down'); },
         all: async () => { throw new Error('D1 is down'); },
       }; } }; },
+      // The intake's batch (which may carry the chat's cached reads) works.
       batch: async (statements) => {
-        if (statements.some((s) => /^\s*SELECT/i.test(s.query))) throw new Error('D1 is down');
+        const intake = statements.some((s) => /INSERT INTO webhook_updates/.test(s.query));
+        if (!intake && statements.some((s) => /^\s*SELECT/i.test(s.query))) throw new Error('D1 is down');
         return statements.map(() => ({ results: [], meta: { changes: 1 } }));
       },
     } }),

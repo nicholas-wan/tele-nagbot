@@ -2,6 +2,7 @@ import { handleUpdate, chatAllowed } from './handlers.js';
 import { isMember, rememberMemberStatement } from './household.js';
 import { replyCtx, sendPrivate } from './tg.js';
 import { deferBoards, flushBoards } from './dashboard.js';
+import { chatReads } from './context.js';
 
 const updateChat = (update) => update.message?.chat || update.callback_query?.message?.chat
   || update.message_reaction?.chat || update.chat_member?.chat;
@@ -64,9 +65,16 @@ export async function acceptUpdate(env, update) {
   ];
   const learn = learnsSender(env, update);
   if (learn) statements.push(rememberMemberStatement(env, updateChat(update).id, updateFrom(update), now, { gated: true }));
+  // The household's timezone and stickers, when this isolate's copy is stale
+  // (chatReads): read here, they are never a round trip of their own later.
+  const chat = updateChat(update);
+  const context = chatAllowed(env, chat?.id) ? chatReads(env, chat.id) : null;
+  const at = statements.length;
+  if (context) statements.push(...context.statements);
   try {
-    const [claim] = await env.DB.batch(statements);
-    return claim.meta.changes ? 'claimed' : 'duplicate';
+    const results = await env.DB.batch(statements);
+    if (context) context.prime(results.slice(at));
+    return results[0].meta.changes ? 'claimed' : 'duplicate';
   } catch (e) {
     // A batch can commit and still answer with an error (the answer was lost
     // on the way back). Telegram's retry would then find the update stored,

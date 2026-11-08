@@ -22,6 +22,17 @@ export async function getTz(env, chatId) {
   return tz;
 }
 
+// The timezone read for a batch of the caller's own, when this isolate's copy
+// is stale; nothing when it is fresh. `prime` takes the statements' answers.
+export function tzReads(env, chatId) {
+  const hit = (tzCache.get(env.DB) || new Map()).get(chatId);
+  if (hit && Date.now() - hit.at < TZ_TTL_MS) return { statements: [], prime: () => {} };
+  return {
+    statements: [env.DB.prepare('SELECT tz FROM settings WHERE chat_id = ?').bind(chatId)],
+    prime: ([res]) => primeTz(env, chatId, res && res.results && res.results[0] ? res.results[0].tz : null),
+  };
+}
+
 // A timezone read in a batch of the caller's own (the cron's due check reads
 // every chat's settings row anyway), remembered as getTz would remember it.
 export function primeTz(env, chatId, tz) {

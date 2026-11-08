@@ -9,6 +9,7 @@ import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
 import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
+import { primePack, tagReads } from './stickers.js';
 import { localParts, weekStart, deferQuietHours } from './time.js';
 import { recoverUpdates, recoveryStatements, pruneOldUpdatesStatement } from './updates.js';
 
@@ -21,7 +22,10 @@ import { recoverUpdates, recoveryStatements, pruneOldUpdatesStatement } from './
 // than a DISTINCT over every firing ever kept: an idle tick is one round trip.
 async function dueThisTick(env, now) {
   const exists = (sql, ...args) => env.DB.prepare(`SELECT EXISTS(${sql}) AS due`).bind(...args);
-  const [wake, fire, renag, drafts, sweep, paused, chats, pending, interrupted] = await env.DB.batch([
+  // The sticker tags too, when this isolate's copy is stale: a fire's sticker
+  // and the cat its nag line names are then picked without a read.
+  const tags = tagReads(env);
+  const [wake, fire, renag, drafts, sweep, paused, chats, pending, interrupted, ...tagged] = await env.DB.batch([
     exists('SELECT 1 FROM settings WHERE paused_until IS NOT NULL AND paused_until <= ?', now),
     exists('SELECT 1 FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?', now),
     exists(`SELECT 1 FROM firings WHERE state = 'nagging'
@@ -33,13 +37,16 @@ async function dueThisTick(env, now) {
         AND f.chat_id = s.chat_id AND f.last_message_id = s.message_id
         AND f.last_message_ephemeral = s.is_ephemeral)`, now),
     env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
-    env.DB.prepare('SELECT chat_id, tz FROM settings'),
+    env.DB.prepare('SELECT chat_id, tz, sticker_set FROM settings'),
     ...recoveryStatements(env, now),
+    ...tags.statements,
   ]);
+  tags.prime(tagged);
   const yes = (r) => Boolean(r.results && r.results[0] && r.results[0].due);
   const known = new Set();
   for (const row of chats.results || []) {
     primeTz(env, row.chat_id, row.tz);
+    primePack(env, row.chat_id, row.sticker_set);
     known.add(row.chat_id);
   }
   for (const id of String(env.ALLOWED_CHATS || '').split(',').map((x) => x.trim()).filter(Boolean)) {

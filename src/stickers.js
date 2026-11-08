@@ -142,10 +142,14 @@ export async function deleteSticker(env, chatId, index) {
 // commands, yet every nag and every Done read them — so each isolate keeps
 // them for a while, keyed by the database binding like the tz. A command in
 // this isolate forgets what it changes at once; another isolate's copy is at
-// most ten minutes stale, and all it can get wrong is which cat purrs.
+// most ten minutes stale, and all it can get wrong is which cat purrs. The
+// tags are kept as the whole table (a few dozen rows), so a pick of a sticker
+// not seen before costs nothing either. Both ride in reads an entry point
+// already makes when its copy is stale (stickerReads, and the cron's chat
+// list), so a pick almost never waits on a read of its own.
 const STICKER_TTL_MS = 10 * 60000;
-const packCache = new WeakMap(); // DB -> chat id -> { name, at }
-const catCache = new WeakMap(); // DB -> file uid -> { cat, at }
+const packCache = new WeakMap(); // DB -> chat id -> { raw: settings.sticker_set, at }
+const tagCache = new WeakMap(); // DB -> { cats: file uid -> cat, at }
 
 function cacheFor(store, env) {
   let map = store.get(env.DB);
@@ -158,36 +162,84 @@ function fresh(map, key) {
   return hit && Date.now() - hit.at < STICKER_TTL_MS ? hit : null;
 }
 
+function freshTags(env) {
+  const hit = env.DB && tagCache.get(env.DB);
+  return hit && Date.now() - hit.at < STICKER_TTL_MS ? hit.cats : null;
+}
+
 // For /usepack, which changes a chat's pack, and for the tagging commands.
 export function forgetPack(env, chatId) {
   if (env.DB) cacheFor(packCache, env).delete(chatId);
 }
-function forgetCat(env, uid) {
-  if (env.DB) cacheFor(catCache, env).delete(uid);
+function forgetTags(env) {
+  if (env.DB) tagCache.delete(env.DB);
+}
+
+// The chat's sticker_set as read in a batch of the caller's own (null when it
+// has no row, or uses the bot's own pack), remembered as activeSetName would.
+export function primePack(env, chatId, raw) {
+  cacheFor(packCache, env).set(chatId, { raw: raw || null, at: Date.now() });
+}
+
+// The sticker_tags table's rows, read in a batch of the caller's own.
+export function primeTags(env, rows) {
+  tagCache.set(env.DB, { cats: new Map((rows || []).map((t) => [t.file_uid, t.cat])), at: Date.now() });
+}
+
+export const TAGS_SQL = 'SELECT file_uid, cat FROM sticker_tags';
+
+// The tags' read for a batch of the caller's own, when this isolate's copy is
+// stale: the cron's chat list, which primes every chat's pack itself.
+export function tagReads(env) {
+  if (freshTags(env)) return { statements: [], prime: () => {} };
+  return {
+    statements: [env.DB.prepare(TAGS_SQL)],
+    prime: ([res]) => primeTags(env, (res && res.results) || []),
+  };
+}
+
+// What a sticker pick in this chat would have to read, for a batch the
+// caller is sending anyway: nothing when this isolate's copies are fresh.
+// `prime` takes the statements' answers.
+export function stickerReads(env, chatId) {
+  const statements = [];
+  const primes = [];
+  if (!fresh(cacheFor(packCache, env), chatId)) {
+    statements.push(env.DB.prepare('SELECT sticker_set FROM settings WHERE chat_id = ?').bind(chatId));
+    primes.push((rows) => primePack(env, chatId, rows[0] ? rows[0].sticker_set : null));
+  }
+  if (!freshTags(env)) {
+    statements.push(env.DB.prepare(TAGS_SQL));
+    primes.push((rows) => primeTags(env, rows));
+  }
+  return {
+    statements,
+    prime: (results) => primes.forEach((prime, i) => prime((results[i] && results[i].results) || [])),
+  };
 }
 
 // Which cat is on a sticker, by its stable id; 'both' when untagged.
 async function stickerCat(env, uid) {
-  const cache = cacheFor(catCache, env);
-  const hit = fresh(cache, uid);
-  if (hit) return hit.cat;
-  const tag = await env.DB.prepare('SELECT cat FROM sticker_tags WHERE file_uid = ?').bind(uid).first();
-  const cat = (tag && tag.cat) || 'both';
-  cache.set(uid, { cat, at: Date.now() });
-  return cat;
+  let cats = freshTags(env);
+  if (!cats) {
+    const { results } = await env.DB.prepare(TAGS_SQL).all();
+    primeTags(env, results);
+    cats = freshTags(env);
+  }
+  return cats.get(uid) || 'both';
 }
 
-// Sends a random Latte & Mocha sticker; silently does nothing if the set
-// hasn't been created yet. Never throws.
+// The chat's active pack: its own, or the bot's Latte & Mocha set.
 async function activeSetName(env, chatId) {
   const cache = cacheFor(packCache, env);
-  const hit = fresh(cache, chatId);
-  if (hit) return hit.name;
-  const row = await env.DB.prepare('SELECT sticker_set FROM settings WHERE chat_id = ?')
-    .bind(chatId).first();
-  const name = (row && row.sticker_set) || await stickerSetName(env);
-  if (name) cache.set(chatId, { name, at: Date.now() });
-  return name;
+  let hit = fresh(cache, chatId);
+  if (!hit) {
+    const row = await env.DB.prepare('SELECT sticker_set FROM settings WHERE chat_id = ?')
+      .bind(chatId).first();
+    primePack(env, chatId, row && row.sticker_set);
+    hit = cache.get(chatId);
+  }
+  return hit.raw || await stickerSetName(env);
 }
 
 async function setStickers(env, name) {
@@ -213,7 +265,7 @@ export async function autoTagPack(env, chatId, { redo } = {}) {
   if (redo && stickers.length) {
     await env.DB.batch(stickers.map((s) =>
       env.DB.prepare('DELETE FROM sticker_tags WHERE file_uid = ?').bind(s.file_unique_id)));
-    for (const s of stickers) forgetCat(env, s.file_unique_id);
+    forgetTags(env);
   }
 
   // Every tag the pack already has, in one read; then the untagged ones are
@@ -242,7 +294,7 @@ export async function autoTagPack(env, chatId, { redo } = {}) {
   if (found.length) {
     await env.DB.batch(found.map(([uid, cat]) =>
       env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)').bind(uid, cat)));
-    for (const [uid] of found) forgetCat(env, uid);
+    forgetTags(env);
   }
   return { ok: true, counts, processed: todo.length, remaining };
 }
@@ -347,7 +399,7 @@ export async function tagSticker(env, chatId, index, cat) {
   }
   await env.DB.prepare('INSERT OR REPLACE INTO sticker_tags (file_uid, cat) VALUES (?, ?)')
     .bind(stickers[index - 1].uid, cat).run();
-  forgetCat(env, stickers[index - 1].uid);
+  forgetTags(env);
   return { ok: true };
 }
 
