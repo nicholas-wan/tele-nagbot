@@ -2,7 +2,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
 import { renagPending } from '../src/cron.js';
-import { expireFiring } from '../src/nag.js';
 import { choreListHtml } from '../src/dashboard.js';
 import { handleUpdate } from '../src/handlers.js';
 import { d1 } from './d1.js';
@@ -74,19 +73,31 @@ it('keeps Done and Delete available in the pinned manager', async () => {
   expect(firing()).toBeUndefined();
 });
 
-it('does not override a completion or a refreshed expiry window', async () => {
-  const stale = firing();
-  sql.exec(`UPDATE firings SET fired_at = ${NOW}, next_nag_at = ${NOW + 60000}`);
-  expect(await expireFiring(env, stale, reminder())).toBe(false);
-  expect(firing().next_nag_at).toBe(NOW + 60000);
-  sql.exec("UPDATE firings SET state = 'done'");
-  expect(await expireFiring(env, firing(), reminder())).toBe(false);
-  expect(firing().state).toBe('done');
+// 9 Nov 2026: a recurring occurrence used to be expired here instead, with a
+// 🪦 tombstone — a chore nobody had marked done simply vanished from the
+// board. It now gets exactly the one-off's treatment: ⏰ overdue, hourly,
+// until someone marks it done; the schedule carries on underneath.
+it('keeps nagging an overdue recurring occurrence hourly too, never expiring it', async () => {
+  sql.exec(`UPDATE reminders SET schedule_kind='daily', schedule_detail='{"h":14,"mi":0}', next_fire_at=${NOW + 86400000}`);
+  const sends = () => calls.filter((c) => c.url.endsWith('/sendMessage'));
+  await renagPending(env, NOW);
+  expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: NOW + 3600000 });
+  expect(reminder()).toBeTruthy();
+  expect(sends()).toHaveLength(1);
+  expect(sends()[0].body.text).toMatch(/^⏰/);
+  expect(sends().some((c) => /🪦|24 hours and nobody/.test(c.body.text))).toBe(false);
+  expect(await choreListHtml(env, 1, 'Asia/Singapore')).toContain('⏰ overdue · nagging since yesterday 1:00 PM');
+  calls.length = 0;
+  await renagPending(env, NOW + 3600000);
+  expect(sends()).toHaveLength(1);
+  expect(sends()[0].body.text).toMatch(/^⏰/);
+  expect(firing().state).toBe('nagging');
 });
 
-it('still expires recurring occurrences while keeping their reminder', async () => {
+it('lets a snooze on an overdue recurring occurrence run as chosen, with no 24h cap', async () => {
   sql.exec(`UPDATE reminders SET schedule_kind='daily', schedule_detail='{"h":14,"mi":0}', next_fire_at=${NOW + 86400000}`);
-  await renagPending(env, NOW);
-  expect(firing().state).toBe('expired');
-  expect(reminder()).toBeTruthy();
+  await tap('z:5:360');
+  expect(firing()).toMatchObject({ state: 'nagging', snoozes_used: 1, next_nag_at: NOW + 6 * 3600000, snoozed_until: NOW + 6 * 3600000 });
+  const toast = calls.find((c) => c.url.endsWith('/answerCallbackQuery')).body.text;
+  expect(toast).toMatch(/^Snoozed until .* · 2 snoozes left$/);
 });

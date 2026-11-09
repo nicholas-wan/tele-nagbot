@@ -1,10 +1,10 @@
-// Runs every minute: fire due reminders, re-send unacknowledged nags,
-// expire firings older than 24h.
+// Runs every minute: fire due reminders, re-send unacknowledged nags (hourly
+// on the ⏰ card once they are a day old — nothing expires).
 
 import { sendMessage, deleteMessage, editMessage, esc, mentionHtml, deleteEphemeral, okButton } from './tg.js';
 import { getTz, isScored, primeTz } from './household.js';
-import { nagButtons, nagHtml, overdueHtml, expireFiring, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
-         EXPIRE_AFTER_MS, OVERDUE_NAG_MIN } from './nag.js';
+import { nagButtons, nagHtml, overdueHtml, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
+         OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
 import { choreStats, winnerStreak } from './stats.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
@@ -28,8 +28,7 @@ async function dueThisTick(env, now) {
   const [wake, fire, renag, drafts, sweep, paused, chats, pending, interrupted, ...tagged] = await env.DB.batch([
     exists('SELECT 1 FROM settings WHERE paused_until IS NOT NULL AND paused_until <= ?', now),
     exists('SELECT 1 FROM reminders WHERE paused = 0 AND next_fire_at IS NOT NULL AND next_fire_at <= ?', now),
-    exists(`SELECT 1 FROM firings WHERE state = 'nagging'
-      AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)`, now, now - EXPIRE_AFTER_MS),
+    exists(`SELECT 1 FROM firings WHERE state = 'nagging' AND (next_nag_at IS NULL OR next_nag_at <= ?)`, now),
     exists('SELECT 1 FROM drafts WHERE created_at < ? UNION ALL SELECT 1 FROM trash WHERE created_at < ?',
       now - 86400000, now - 86400000),
     exists(`SELECT 1 FROM sent_messages s WHERE s.delete_after <= ?
@@ -271,6 +270,8 @@ async function sendWeeklyRecap(env, now, paused = null, chats = null) {
             (streak >= 1 ? ` 🔥 ${streak + 1} weeks running!` : ''));
         for (const [who, items] of s.people.slice(top.length)) lines.push(`• ${esc(who)}: ${items.length} ✅`);
       }
+      // Only rows from before 9 Nov 2026, or a chore deleted under its nag,
+      // can be expired now, so this line has all but retired.
       if (s.expired) lines.push(`🪦 ${s.expired} expired unclaimed. The cats saw everything.`);
       lines.push('Scores reset Monday. /stats anytime.');
       await sendMessage(env, chat_id, lines.join('\n'), null, { silent: true });
@@ -346,16 +347,12 @@ export async function sendDigests(env, now, paused = null, chats = null) {
 
       // The pinned board is refreshed this same minute and already carries
       // today's agenda, so a routine bulletin would only repeat it. The digest
-      // speaks only when something was left hanging overnight.
+      // speaks only when something was left hanging overnight — an overdue
+      // one included, whatever its kind: nothing expires, so Done here always
+      // still counts. (Recurring firings past their 24h were left out while
+      // the same tick tombstoned them.)
       //
-      // A recurring firing past its 24h is not "still hanging": quiet hours
-      // held its expiry back to 08:00, and the renag step tombstones it at
-      // 08:00 too — so the digest used to hand out a ✅ for a chore that was
-      // already gone by the time anyone read it. The tombstone says what
-      // happened to it. An overdue one-off
-      // stays: it is never expired, and Done here still counts.
-      //
-      // Nor is a chore the household parked "hanging": one postponed with
+      // A chore the household parked is not "hanging": one postponed with
       // 📅 Tomorrow (fired_at ahead of now) or snoozed to a time still to
       // come (isHouseholdDeferred, in SQL) is due when they said, not this
       // morning — listing it with a ✅ under the thumb is how a chore that
@@ -368,7 +365,6 @@ export async function sendDigests(env, now, paused = null, chats = null) {
       const nagging = await env.DB.prepare(
         `SELECT f.id FROM firings f JOIN reminders r ON r.id = f.reminder_id
          WHERE f.chat_id = ? AND f.state = 'nagging' AND r.paused = 0
-           AND (r.schedule_kind = 'once' OR f.fired_at > ?)
            AND f.fired_at < ?
            AND NOT (f.snoozed_until IS NOT NULL AND f.next_nag_at IS NOT NULL
                     AND f.next_nag_at = f.snoozed_until AND f.next_nag_at > ?)
@@ -379,7 +375,7 @@ export async function sendDigests(env, now, paused = null, chats = null) {
                AND s.is_ephemeral = f.last_message_ephemeral
                AND (s.is_ephemeral = 0 OR s.receiver_user_id = f.nag_user_id)
                AND s.created_at >= ?))`
-      ).bind(chat_id, now - EXPIRE_AFTER_MS, now, now, morning).all();
+      ).bind(chat_id, now, now, morning).all();
       if (!nagging.results.length) continue;
       const view = await digestView(env, chat_id, nagging.results.map((f) => f.id));
       await sendMessage(env, chat_id, view.html, view.markup, { silent: true });
@@ -409,22 +405,24 @@ async function fireDueReminders(env, now, paused = null) {
   }
 }
 
-// Exported so the expiry claims below can be pinned directly, without driving
-// eight unrelated cron steps to reach them.
+// Exported so the claims below can be pinned directly, without driving eight
+// unrelated cron steps to reach them.
 //
 // The due firings, their chores and the paused chats are one round trip; the
 // chore used to be read again for every firing. Each re-nag is then its claim,
 // the old card coming down while the new one goes up, and the new card's ids.
 export async function renagPending(env, now, paused = null) {
-  // Due re-nags, plus anything past the 24h deadline regardless of snoozes —
-  // expiry must not wait for the next nag slot to come due.
-  const due = "state = 'nagging' AND ((next_nag_at IS NOT NULL AND next_nag_at <= ?) OR fired_at <= ?)";
+  // Due re-nags. A NULL next_nag_at is due too: until 20 Oct 2026 an overdue
+  // one-off was parked that way, and such a row simply picks the hourly nag
+  // back up. (The clause used to take anything a day old as well, for the
+  // expiry that no longer happens.)
+  const due = "state = 'nagging' AND (next_nag_at IS NULL OR next_nag_at <= ?)";
   const [firings, chores, pausedRows] = await env.DB.batch([
-    env.DB.prepare(`SELECT * FROM firings WHERE ${due}`).bind(now, now - EXPIRE_AFTER_MS),
+    env.DB.prepare(`SELECT * FROM firings WHERE ${due}`).bind(now),
     env.DB.prepare(
       `SELECT r.* FROM reminders r WHERE r.id IN (SELECT f.reminder_id FROM firings f WHERE f.state = 'nagging'
-         AND ((f.next_nag_at IS NOT NULL AND f.next_nag_at <= ?) OR f.fired_at <= ?))`
-    ).bind(now, now - EXPIRE_AFTER_MS),
+         AND (f.next_nag_at IS NULL OR f.next_nag_at <= ?))`
+    ).bind(now),
     env.DB.prepare('SELECT chat_id FROM settings WHERE paused_until > ?').bind(now),
   ]);
   const results = firings.results || [];
@@ -434,13 +432,15 @@ export async function renagPending(env, now, paused = null) {
   paused ??= new Set((pausedRows.results || []).map((r) => r.chat_id));
   for (const f of results) {
     try {
-      if (paused.has(f.chat_id)) continue; // vacation freezes nags and expiry
+      if (paused.has(f.chat_id)) continue; // vacation freezes nags
       const r = byId.get(f.reminder_id) || null;
       if (!r) {
-        // Same conditional claim as expireFiring, for the same reason: this
-        // tick's fired_at is a snapshot, and a resume may have moved it. The
-        // winner also takes the card down — it kept live buttons for a chore
-        // that no longer existed until the sweep reached it a day later.
+        // A firing whose chore has gone is not a task anyone can do: it is
+        // closed as expired, the one place that state is still written. The
+        // claim binds this tick's fired_at as well as the state — a snapshot
+        // a resume may have moved since. The winner also takes the card down
+        // — it kept live buttons for a chore that no longer existed until the
+        // sweep reached it a day later.
         const claim = await env.DB.prepare(
           "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
         ).bind(f.id, f.fired_at).run();
@@ -452,11 +452,11 @@ export async function renagPending(env, now, paused = null) {
         }
         continue;
       }
-      // /pause freezes in-flight nags too (no re-nags, no expiry ticking).
+      // /pause freezes in-flight nags too.
       if (r.paused) continue;
       const tz = await getTz(env, f.chat_id);
-      // Quiet hours: nothing nags (or announces expiry) overnight — anything
-      // due now waits for 8am instead.
+      // Quiet hours: nothing nags overnight — anything due now waits for 8am
+      // instead.
       const wake = deferQuietHours(now, tz);
       if (wake > now) {
         if (f.next_nag_at != null && f.next_nag_at <= now) {
@@ -467,18 +467,14 @@ export async function renagPending(env, now, paused = null) {
         continue;
       }
 
-      // A one-off is never expired: past its 24h it keeps nagging hourly on
-      // the ⏰ card until someone finishes or deletes it. (Until 20 Oct 2026 it
-      // went quiet instead, parked with next_nag_at NULL — such a row is
-      // simply due, and picks the hourly nag back up.)
-      const once = r.schedule_kind === 'once';
+      // Nothing expires (9 Nov 2026): past its 24h a firing of any kind keeps
+      // nagging hourly on the ⏰ card until someone finishes or deletes the
+      // chore, or its next occurrence supersedes it (fireReminder). A
+      // recurring occurrence used to be tombstoned here instead, "expired
+      // unclaimed" — a chore nobody had marked done just vanished.
       const overdue = isOverdue(f, now);
-      if (overdue && !once) {
-        await expireFiring(env, f, r);
-        continue;
-      }
-      // Row was selected by the expiry clause only; its next nag isn't due yet.
-      if (f.next_nag_at == null ? !once : f.next_nag_at > now) continue;
+      // Not due yet (a NULL next_nag_at is due: see the clause above).
+      if (f.next_nag_at != null && f.next_nag_at > now) continue;
 
       const intervals = JSON.parse(r.nag_intervals);
       const nagCount = f.nag_count + 1;

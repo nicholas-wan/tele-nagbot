@@ -168,26 +168,21 @@ describe('firing lifecycle fixes', () => {
       expect(sentTo('sendMessage').some((c) => /clear poop/.test(c.body.text || ''))).toBe(true);
     });
 
-    it('still silently expires a genuinely stale firing', async () => {
+    // 9 Nov 2026: a genuinely stale firing — the previous occurrence, never
+    // marked done — used to be expired here, silently, as "expired unclaimed".
+    // Nothing expires now: it is superseded like a postponed one, and the
+    // chore carries on nagging on the new card.
+    it('drops a stale previous occurrence the same way, never expiring it', async () => {
       const stale = { ...postponed, fired_at: NOW - 2 * HOUR, next_nag_at: NOW - HOUR };
       const { env, runs } = makeDb({ firings: [stale] });
       await fireReminder(env, { ...CHORE, next_fire_at: NOW }, NOW, TZ);
-      expect(runs.some((r) => /UPDATE firings SET state = 'expired'/.test(r.sql))).toBe(true);
-      expect(runs.some((r) => /DELETE FROM firings/.test(r.sql))).toBe(false);
-    });
-
-    // Expiry is decided from a fired_at read minutes earlier — the cron's
-    // 24h test, or the sweep above. A resume restamps that column, so the
-    // claim carries it: a stale decision must lose rather than kill a nag the
-    // household has just brought back to life.
-    it('claims the expiry on the very fired_at it judged', async () => {
-      const stale = { ...postponed, fired_at: NOW - 2 * HOUR, next_nag_at: NOW - HOUR };
-      const { env, runs } = makeDb({ firings: [stale] });
-      await fireReminder(env, { ...CHORE, next_fire_at: NOW }, NOW, TZ);
-      const exp = runs.find((r) => /UPDATE firings SET state = 'expired'/.test(r.sql));
-      expect(exp.sql).toContain("state = 'nagging'");
-      expect(exp.sql).toContain('fired_at = ?');
-      expect(exp.args).toEqual([5, NOW - 2 * HOUR]);
+      expect(runs.some((r) => /UPDATE firings SET state = 'expired'/.test(r.sql))).toBe(false);
+      const del = runs.find((r) => /DELETE FROM firings/.test(r.sql));
+      expect(del.sql).toContain("state = 'nagging'");
+      expect(del.args[0]).toBe(5);
+      expect(deleted(77)).toBe(true);
+      expect(sentTo('sendMessage').some((c) => /24 hours/.test(c.body.text || ''))).toBe(false);
+      expect(sentTo('sendMessage').some((c) => /clear poop/.test(c.body.text || ''))).toBe(true);
     });
   });
 
@@ -521,12 +516,13 @@ describe('firing lifecycle fixes', () => {
     });
   });
 
-  // 5b. The cron is the other half of the expiry story, and the half that had
-  // no test at all: it is where the 24h deadline is actually noticed, and both
-  // of its claims bind the fired_at this tick read. A resume moves that column,
-  // so a tick that made up its mind minutes ago must lose rather than kill a nag
-  // the household has just brought back.
-  describe('the cron expiring an overdue firing', () => {
+  // 5b. The cron is where the 24h mark is noticed. Until 9 Nov 2026 it
+  // expired a recurring firing there, with a public tombstone; now the firing
+  // stays nagging — hourly, on the ⏰ card — until someone marks it done. The
+  // one claim that still writes 'expired' is for a firing whose chore has
+  // gone, and it binds the fired_at this tick read: a resume moves that
+  // column, so a tick that made up its mind minutes ago must lose.
+  describe('the cron keeping an overdue firing nagging', () => {
     // Noon in Singapore: quiet hours would defer the whole decision to 8am and
     // nothing below would run.
     const NOON = zonedEpoch(2026, 3, 10, 12, 0, TZ);
@@ -538,35 +534,40 @@ describe('firing lifecycle fixes', () => {
     };
     const expiry = (runs) => runs.find((x) => /UPDATE firings SET state = 'expired'/.test(x.sql));
 
-    it('claims the expiry on the fired_at it judged', async () => {
+    const renag = (runs) => runs.find((x) => /UPDATE firings SET nag_count = \?, next_nag_at = \?/.test(x.sql));
+
+    it('re-nags a 25h-old recurring firing hourly on the ⏰ card, with no tombstone', async () => {
       const { env, runs } = makeCronDb({ firings: [overdue], reminder: { ...CHORE, paused: 0 } });
       await renagPending(env, NOON);
-      const exp = expiry(runs);
-      expect(exp, 'a 25h-old firing expires').toBeTruthy();
-      expect(exp.sql).toContain("state = 'nagging'");
-      expect(exp.sql).toContain('fired_at = ?');
-      expect(exp.args).toEqual([5, NOON - 25 * HOUR]);
-      // The tombstone is public: accountability is household-wide.
-      expect(sentTo('sendMessage').some((c) => /24 hours/.test(c.body.text || ''))).toBe(true);
+      expect(expiry(runs), 'nothing expires').toBeUndefined();
+      const claim = renag(runs);
+      expect(claim, 'the overdue firing is re-nagged').toBeTruthy();
+      // Hourly from here, the claim bound to the nag slot this tick read.
+      expect(claim.args).toEqual([4, NOON + HOUR, 5, NOON - HOUR]);
+      const card = sentTo('sendMessage').find((c) => /clear poop/.test(c.body.text || ''));
+      expect(card.body.text).toMatch(/^⏰/);
+      expect(card.body.text).toMatch(/Nagging since/);
+      expect(sentTo('sendMessage').some((c) => /24 hours and nobody/.test(c.body.text || ''))).toBe(false);
     });
 
-    // Expiry must not wait for the next nag slot to come due — this row is in
-    // the result set on the fired_at clause alone.
-    it('expires even when the next nag is still ahead', async () => {
+    // The 24h mark on its own is not an event any more: a firing whose next
+    // nag is still ahead is not even in the tick's result set.
+    it('does nothing to an overdue firing whose next nag is still ahead', async () => {
       const parked = { ...overdue, next_nag_at: NOON + 2 * HOUR };
       const { env, runs } = makeCronDb({ firings: [parked], reminder: { ...CHORE, paused: 0 } });
       await renagPending(env, NOON);
-      expect(expiry(runs).args).toEqual([5, NOON - 25 * HOUR]);
-      // No re-nag was sent: the firing is gone, not escalated.
-      expect(sentTo('sendMessage').some((c) => /humble request|staring at you/.test(c.body.text || '')))
-        .toBe(false);
+      expect(expiry(runs)).toBeUndefined();
+      expect(renag(runs)).toBeUndefined();
+      expect(sentTo('sendMessage')).toHaveLength(0);
     });
 
-    it('leaves a firing inside its 24 hours alone', async () => {
-      const fresh = { ...overdue, fired_at: NOON - 2 * HOUR, next_nag_at: NOON + 2 * HOUR };
+    it('nags a firing inside its 24 hours as an ordinary nag', async () => {
+      const fresh = { ...overdue, fired_at: NOON - 2 * HOUR, next_nag_at: NOON - 60000 };
       const { env, runs } = makeCronDb({ firings: [fresh], reminder: { ...CHORE, paused: 0 } });
       await renagPending(env, NOON);
       expect(expiry(runs)).toBeUndefined();
+      const card = sentTo('sendMessage').find((c) => /clear poop/.test(c.body.text || ''));
+      expect(card.body.text).toMatch(/^🐱/);
     });
 
     // A firing whose reminder row has vanished has no card, no tombstone and no
@@ -591,18 +592,22 @@ describe('firing lifecycle fixes', () => {
       expect(expiry(runs).args).toEqual([5, NOON - 2 * HOUR]);
     });
 
-    it('freezes expiry while the household is on vacation', async () => {
+    it('freezes the overdue nag while the household is on vacation', async () => {
       const { env, runs } = makeCronDb({
         firings: [overdue], reminder: { ...CHORE, paused: 0 }, pausedChats: [1],
       });
       await renagPending(env, NOON);
       expect(expiry(runs)).toBeUndefined();
+      expect(renag(runs)).toBeUndefined();
+      expect(sentTo('sendMessage')).toHaveLength(0);
     });
 
-    it('freezes expiry while the chore itself is paused', async () => {
+    it('freezes the overdue nag while the chore itself is paused', async () => {
       const { env, runs } = makeCronDb({ firings: [overdue], reminder: { ...CHORE, paused: 1 } });
       await renagPending(env, NOON);
       expect(expiry(runs)).toBeUndefined();
+      expect(renag(runs)).toBeUndefined();
+      expect(sentTo('sendMessage')).toHaveLength(0);
     });
   });
 

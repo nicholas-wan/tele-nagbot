@@ -363,7 +363,7 @@ export const UNDO_WINDOW_MS = 86400000;
 // a finished one-off comes back from the trash (with nothing scheduled — the
 // firing it already has is the occurrence), and the card is redrawn as what
 // it should be showing. A postponed firing (fired_at ahead) simply waits for
-// the time the household chose; an overdue one-off nags again within the hour.
+// the time the household chose; an overdue one nags again within the hour.
 // Every step is bound to the done row that was read, so a second tap loses.
 // Returns { ok } or { ok: false, why: 'late' | 'gone' }.
 // `read`: the chore and the completion's stash, when the caller read them in
@@ -388,7 +388,7 @@ export async function undoCompletion(env, firing, by, tz, { onClaim, announce = 
   }
   const intervals = JSON.parse(r.nag_intervals);
   const nextNag = firing.fired_at > now ? firing.fired_at
-    : r.schedule_kind === 'once' && isOverdue(firing, now) ? deferQuietHours(now + OVERDUE_NAG_MIN * 60000, tz)
+    : isOverdue(firing, now) ? deferQuietHours(now + OVERDUE_NAG_MIN * 60000, tz)
     : firing.snoozed_until > now ? firing.snoozed_until
     : deferQuietHours(now + intervals[0] * 60000, tz);
   const claim = await env.DB.prepare(
@@ -505,9 +505,11 @@ function resumeNextFire(r, now, tz) {
 // A pause freezes an in-flight nag, but fired_at kept ticking underneath it:
 // pause a nagging chore for a day and the first tick after resume expired it
 // with a public tombstone and a scored failure, for time nobody was asked to
-// act in. Resuming hands each live nag a fresh 24h window, and a next_nag_at in
-// the future — otherwise the cron would delete and re-send the card the very
-// next minute, right after resume restored its buttons.
+// act in. Nothing expires any more, but the clock still says how long the
+// chore has been nagging and when it turns ⏰ overdue, so resuming hands each
+// live nag a fresh 24h, and a next_nag_at in the future — otherwise the cron
+// would delete and re-send the card the very next minute, right after resume
+// restored its buttons.
 //
 // What resume must not do is overwrite a time somebody chose. A firing snoozed
 // into the future, or postponed with 📅 Tomorrow (which carries fired_at
@@ -520,7 +522,7 @@ function resumeNextFire(r, now, tz) {
 // to 08:00 whenever a re-nag comes due in quiet hours, and an ordinary pending
 // re-nag is always ahead of now — both are the bot's own scheduling. Nor is
 // snoozes_used: it is a cap, and stayed set after a snooze had elapsed and the
-// cron had pushed the next nag past the expiry, so a chore the household had
+// cron had pushed the next nag past the 24h, so a chore the household had
 // just resumed was tombstoned hours later on that stale clock. What tells them
 // apart is isHouseholdDeferred: the snooze's own time, still in force.
 //

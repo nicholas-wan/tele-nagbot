@@ -14,7 +14,7 @@ import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firing
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          isHouseholdDeferred, nagBelongsTo,
          completeFiring, doneClaim, runDoneClaim, showPausedCard,
-         MAX_SNOOZES, EXPIRE_AFTER_MS, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
+         MAX_SNOOZES, SNOOZE_CODES, POSTPONE_DAYS } from './nag.js';
 import { updateDashboard, choreListHtml, fmtWhen, clip } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, deleteTapped, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
@@ -482,15 +482,6 @@ async function handleReaction(env, rx) {
   await completeFiring(env, firing, reminder, senderName(rx.user), tz);
 }
 
-// Whether a snooze to `until` would outlive the firing: true only for a
-// recurring chore, whose occurrence expires 24h after it fired. A one-off
-// never expires, so any snooze it is given is honoured as chosen.
-// `r` is the firing's chore, already in hand; a missing one counts as recurring.
-function expiresBefore(firing, until, r) {
-  if (until < firing.fired_at + EXPIRE_AFTER_MS) return false;
-  return !r || r.schedule_kind !== 'once';
-}
-
 // A typed snooze, as people say one: "snooze" (an hour), "snooze 20",
 // "snooze 2h", "snooze for 1 hour", "snooze an hour", "snooze half an hour",
 // "snooze till 9pm", "snooze tomorrow". "snooze 1 hour" used to be refused —
@@ -588,13 +579,12 @@ async function handleNagReply(env, msg, firing, ctx, known = undefined) {
     if (firing.snoozes_used >= MAX_SNOOZES) {
       return sendPrivate(env, ctx, `😾 No snoozes left (${MAX_SNOOZES} used) — time to do it.`);
     }
-    let until = sn.until;
+    const until = sn.until;
     const reminder = await chore();
-    // Never promise a nag past a recurring chore's 24h expiry — cap at one
-    // last call before it. A one-off never expires, so it has nothing to cap.
-    // "snooze tomorrow" is a postponement, as 📅 Tomorrow is: fired_at moves
-    // with the nag, so the expiry window moves too.
-    if (!sn.postpone && expiresBefore(firing, until, reminder)) until = firing.fired_at + EXPIRE_AFTER_MS - 60000;
+    // Honoured as chosen: nothing expires, so there is no deadline to clamp
+    // to (a recurring chore's snooze used to be capped at its 24h). "snooze
+    // tomorrow" is a postponement, as 📅 Tomorrow is: fired_at moves with the
+    // nag, so the overdue clock restarts when it comes back.
     // snoozed_until is the household's choice on record; resume and the
     // editor honour it only while next_nag_at still equals it. snoozed_by
     // is who chose it, for any later redraw of the 😴 card.
@@ -1193,7 +1183,7 @@ async function handleCallback(env, cb) {
     // re-rendered too — and it has to stay the card it already is. Rendering
     // a parked chore's 😴 notice as a nag turned "🕐 Change snooze → ↩️ Back"
     // into a live nag, since Back reads the card's own text to pick a keyboard.
-    // firingCard picks the text, so an overdue one-off keeps its ⏰ line.
+    // firingCard picks the text, so an overdue chore keeps its ⏰ line.
     const [html] = firingCard(reminder, firing, tz);
     await editNag(env, firing, html, snoozeButtons(firing.id, tz));
   } else {
@@ -1291,17 +1281,14 @@ async function snoozeTapped(env, cb, firingId, code) {
   const want = postpone ? deferQuietHours(now + days * 86400000, await zone)
     : code === 't' ? nextOccurrence('daily', { h: 21, mi: 0 }, now, await zone)
     : now + (+code) * 60000;
-  // Never promise a nag past a recurring chore's 24h expiry — capped at one
-  // last call before it (expiresBefore, in SQL). A one-off never expires.
-  const until = `CASE WHEN ? >= fired_at + ${EXPIRE_AFTER_MS}
-      AND COALESCE((SELECT schedule_kind FROM reminders WHERE id = firings.reminder_id), '') <> 'once'
-    THEN fired_at + ${EXPIRE_AFTER_MS - 60000} ELSE ? END`;
+  // Honoured as chosen: nothing expires, so there is no deadline to clamp
+  // to (a recurring chore's snooze used to be capped at its 24h, in SQL).
   const by = senderName(cb.from);
   // snoozed_until records the household's choice; it holds only while
   // next_nag_at still equals it (see isHouseholdDeferred).
   const set = postpone
     ? { sql: 'next_nag_at = ?, fired_at = ?, snoozed_until = ?', args: [want, want, want] }
-    : { sql: `next_nag_at = ${until}, snoozed_until = ${until}`, args: [want, want, want, want] };
+    : { sql: 'next_nag_at = ?, snoozed_until = ?', args: [want, want] };
   const [[res, f, r], local] = await Promise.all([env.DB.batch([
     env.DB.prepare(
       `UPDATE firings SET snoozes_used = snoozes_used + 1, ${set.sql}, snoozed_by = ?
@@ -1324,10 +1311,7 @@ async function snoozeTapped(env, cb, firingId, code) {
     }
     return answerCallback(env, cb.id, 'Already handled 👍');
   }
-  // What the write chose, worked out again from the row it wrote (the cap
-  // reads only fired_at, which a snooze leaves alone, and the chore's kind).
-  const capped = !postpone && expiresBefore(firing, want, reminder);
-  const at = capped ? firing.fired_at + EXPIRE_AFTER_MS - 60000 : want;
+  const at = want;
   // Tomorrow keeps its old rule (the next occurrence, if it comes first,
   // supersedes it); a week or two out moves the schedule past it.
   const skipped = reminder && days >= 7 ? await skipPastPostponement(env, reminder, at, local) : 0;
@@ -1337,7 +1321,7 @@ async function snoozeTapped(env, cb, firingId, code) {
   await answerCallback(env, cb.id, (postpone
     ? `Postponed — back ${fmtWhen(at, local)} 📅` +
       (skipped ? ` — skipping ${skipped} scheduled ${skipped === 1 ? 'time' : 'times'}` : '')
-    : `Snoozed until ${fmtWhen(at, local)} 😴${capped ? ' — as late as it goes before it expires' : ''}`) + remaining);
+    : `Snoozed until ${fmtWhen(at, local)} 😴`) + remaining);
   if (reminder && firing.last_message_id) {
     await editNag(env, firing, snoozedHtml(reminder, at, by, local, postpone), snoozedButtons(firing.id, isScored(firing)));
   }

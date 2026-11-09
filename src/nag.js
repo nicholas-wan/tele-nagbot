@@ -1,5 +1,5 @@
 // The nag message lifecycle: rendering, buttons, the public/ephemeral ref
-// distinction, and the completion/expiry state transitions that end a firing.
+// distinction, and the completion that ends a firing.
 
 import { sendMessage, deleteMessage, esc, mentionHtml, replyCtx, sendPrivate,
          editRef, deleteRef, msgRef, retimeSentMessage, RECEIPT_TTL_MS } from './tg.js';
@@ -10,9 +10,13 @@ import { coverChildren, coverLine, nestedReads } from './nesting.js';
 import { updateDashboard, later, fmtWhen, fmtSince } from './dashboard.js';
 
 export const MAX_SNOOZES = 3;
+// How long a nag has before it counts as overdue. Nothing expires at this
+// point any more (9 Nov 2026): a firing stays 'nagging' until someone finishes
+// or deletes its chore, or the chore's next occurrence supersedes it. Past the
+// 24h the card becomes the ⏰ card and the re-nags go hourly (OVERDUE_NAG_MIN,
+// quiet hours aside). Until then a recurring occurrence was tombstoned here as
+// "expired unclaimed" — a chore nobody had marked done simply vanished.
 export const EXPIRE_AFTER_MS = 24 * 3600000;
-// A one-off never expires: past its 24h it keeps nagging at this pace (quiet
-// hours aside) until someone finishes or deletes it.
 export const OVERDUE_NAG_MIN = 60;
 
 export const emptyKeyboard = () => ({ inline_keyboard: [] });
@@ -60,8 +64,7 @@ export function receiptButtons(firingId) {
 }
 
 // The card a live firing should be showing right now: the 😴 notice while a
-// snooze or postponement is in force, the ⏰ card of a one-off past its 24h,
-// else the nag.
+// snooze or postponement is in force, the ⏰ card past its 24h, else the nag.
 // One place for the choice, so /poke, resume, the points toggle, ↩️ Back and
 // an undone Done all draw the same thing. Rows snoozed before snoozed_by
 // existed name the household.
@@ -183,8 +186,8 @@ export function overdueHtml(reminder, firedAt, tz) {
   return `${titleHtml('⏰', reminder)}\n${since} — the cats are still waiting.${assignedLine(reminder)}`;
 }
 
-// Past the 24h window. A recurring firing is expired here; a one-off stays
-// 'nagging' and is re-nagged hourly on the ⏰ card (OVERDUE_NAG_MIN).
+// Past the 24h window: the firing stays 'nagging' and is re-nagged hourly on
+// the ⏰ card (OVERDUE_NAG_MIN), whatever its chore's kind.
 export const isOverdue = (firing, now = Date.now()) => now >= firing.fired_at + EXPIRE_AFTER_MS;
 
 // A firing the household itself parked — snoozed or postponed to a time still
@@ -415,37 +418,6 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
     ]);
   };
   await Promise.all([stash(), later(env, show)]);
-  await updateDashboard(env, firing.chat_id);
-  return true;
-}
-
-// The claim binds fired_at as well as state, because fired_at is the clock the
-// caller read to decide this firing was 24h old. A resume restamps it, so
-// without that column in the WHERE a cron tick that had already made up its
-// mind expired a nag the household had just brought back to life.
-// Recurring firings only: a one-off is never expired (see renagPending).
-export async function expireFiring(env, firing, reminder, { silent } = {}) {
-  const [claim, after] = await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
-    ).bind(firing.id, firing.fired_at),
-    env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id),
-  ]);
-  if (!claim.meta.changes) return false;
-  firing = (after.results || [])[0] || firing;
-  // The card goes rather than staying struck through beside the tombstone:
-  // one message says what happened, and a superseded nag (silent) is simply
-  // replaced by the new one.
-  await Promise.all([
-    firing.last_message_id ? deleteNag(env, firing) : null,
-    firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
-  ]);
-  if (!silent) {
-    // The tombstone always lands in the group — accountability is household-wide.
-    await sendMessage(env, firing.chat_id,
-      `🪦 <s>${esc(reminder.text)}</s> — 24 hours and nobody did it. Latte &amp; Mocha are deeply disappointed.`,
-      null, { silent: true });
-  }
   await updateDashboard(env, firing.chat_id);
   return true;
 }

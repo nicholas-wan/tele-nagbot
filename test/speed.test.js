@@ -348,16 +348,18 @@ describe('chat polish', () => {
     expect(ask.body.reply_markup.inline_keyboard.map((row) => row[0].callback_data)).toEqual(['d:5', 'd:6', 'ok']);
   });
 
-  it('lets an expired nag go quietly: the card comes down, the tombstone is silent', async () => {
+  // 9 Nov 2026: this used to be the silent tombstone. Nothing expires now —
+  // the day-old nag comes down and the ⏰ card goes up in its place, hourly.
+  it('turns a day-old nag into the ⏰ card instead of a tombstone', async () => {
     sql.exec(`UPDATE firings SET fired_at = ${NOW - 25 * HOUR}, next_nag_at = ${NOW - 60000} WHERE id = 5`);
     sql.exec(`UPDATE reminders SET next_fire_at = ${NOW + DAY} WHERE id = 8`);
     await worker.scheduled({}, env, ctx());
     await settle();
-    expect(firing().state).toBe('expired');
+    expect(firing()).toMatchObject({ state: 'nagging', next_nag_at: NOW + HOUR });
     expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 700)).toBe(true);
-    const tomb = calls.find((c) => c.method === 'sendMessage' && /24 hours and nobody did it/.test(c.body.text));
-    expect(tomb.body.text.startsWith('🪦')).toBe(true);
-    expect(tomb.body.disable_notification).toBe(true);
+    expect(calls.some((c) => c.method === 'sendMessage' && /🪦|24 hours and nobody did it/.test(c.body.text))).toBe(false);
+    const card = calls.find((c) => c.method === 'sendMessage' && /take out trash/.test(c.body.text));
+    expect(card.body.text.startsWith('⏰')).toBe(true);
   });
 });
 
@@ -408,12 +410,15 @@ describe('round trips before the toast', () => {
     expect(firing()).toMatchObject({ snoozes_used: 1, next_nag_at: NOW + HOUR, snoozed_until: NOW + HOUR });
   });
 
-  it('caps a snooze at the expiry in the same write, and says so', async () => {
+  // Until 9 Nov 2026 this snooze was capped a minute before the 24h expiry,
+  // "as late as it goes". Nothing expires, so it runs as chosen.
+  it('honours a snooze that crosses the 24h mark in full, in the same single write', async () => {
     await warmTz();
     sql.exec(`UPDATE firings SET fired_at = ${NOW - 23 * HOUR} WHERE id = 5`);
-    const { text } = await wavesBeforeToast('z:5:180');
-    expect(text).toMatch(/as late as it goes before it expires/);
-    expect(firing().next_nag_at).toBe(NOW - 23 * HOUR + DAY - 60000);
+    const { waves: n, text } = await wavesBeforeToast('z:5:180');
+    expect(n).toBe(1);
+    expect(text).toMatch(/^Snoozed until .* · 2 snoozes left$/);
+    expect(firing().next_nag_at).toBe(NOW + 3 * HOUR);
   });
 
   it('still refuses another household, and another member\'s private nag, in the claim itself', async () => {

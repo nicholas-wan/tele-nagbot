@@ -1,5 +1,5 @@
-// Fires one reminder: expires any stale nag, sends sticker + nag message,
-// schedules the next occurrence. Used by the cron loop and by /remind ... now.
+// Fires one reminder: drops any stale nag as superseded, sends sticker + nag
+// message, schedules the next occurrence. Used by the cron loop and by /remind ... now.
 
 import { sendMessage, sendPrivate, replyCtx, msgRef, deleteMessage, drainSweepStatements } from './tg.js';
 import { advanceOccurrence, deferQuietHours, weekStart } from './time.js';
@@ -67,23 +67,20 @@ export async function fireReminder(env, r, now, tz) {
       }
     }
 
-    // A previous occurrence still nagging when the next one fires gets
-    // quietly expired so only one live nag exists per reminder — unless it was
-    // deliberately postponed. "📅 Tomorrow" carries fired_at forward, so a
-    // still-nagging firing dated in the future is one the household moved past
-    // this very occurrence; the nag it asked for is arriving right now. That is
-    // superseded, not failed, so the row is removed outright instead of being
-    // expired into /stats as "expired unclaimed". Each is claimed the usual
-    // way (a Done landing mid-sweep wins and keeps its receipt), and read back
-    // after, so the card that comes down is the one it holds now.
+    // A previous occurrence still nagging when the next one fires is
+    // superseded: one live nag per chore, and this one is the chore's nag
+    // now. The old row is removed outright, never expired — nothing is
+    // expired any more (9 Nov 2026), and this was never a failure: the chore
+    // is still nagging, on the new card. The same went for a postponed one
+    // before that ("📅 Tomorrow" carries fired_at forward, so a still-nagging
+    // firing dated in the future is one the household moved past this very
+    // occurrence). Each is claimed the usual way (a Done landing mid-sweep
+    // wins and keeps its receipt), and read back after, so the card that
+    // comes down is the one it holds now.
     const staleRows = stale.results || [];
     const staleAt = writes.length;
     for (const f of staleRows) {
-      writes.push(f.fired_at <= now
-        ? env.DB.prepare(
-          "UPDATE firings SET state = 'expired', next_nag_at = NULL WHERE id = ? AND state = 'nagging' AND fired_at = ?"
-        ).bind(f.id, f.fired_at)
-        : env.DB.prepare("DELETE FROM firings WHERE id = ? AND state = 'nagging'").bind(f.id));
+      writes.push(env.DB.prepare("DELETE FROM firings WHERE id = ? AND state = 'nagging'").bind(f.id));
     }
     const intervals = JSON.parse(r.nag_intervals);
     const insertAt = writes.length;

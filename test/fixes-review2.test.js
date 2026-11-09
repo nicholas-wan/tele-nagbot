@@ -141,7 +141,10 @@ describe('pause and vacation wake', () => {
 });
 
 describe('the 8am digest', () => {
-  it('leaves out a recurring firing the same tick is about to tombstone', async () => {
+  // Until 9 Nov 2026 the recurring firing past its 24h was left out, because
+  // the same tick tombstoned it. Nothing expires now, so it is still hanging
+  // and its ✅ still counts.
+  it('lists an overdue recurring firing beside the one-off and the fresh one', async () => {
     Date.now.mockReturnValue(EIGHT_AM);
     seedReminder({ id: 10, text: 'singlife', schedule_kind: 'once', schedule_detail: '{}', next_fire_at: null });
     seedReminder({ id: 11, text: 'clear poop' });
@@ -153,8 +156,8 @@ describe('the 8am digest', () => {
     const digest = sent(/Still waiting on/)[0];
     expect(digest.body.text).toContain('singlife');
     expect(digest.body.text).toContain('dishes');
-    expect(digest.body.text).not.toContain('clear poop');
-    expect(buttons(digest.body.reply_markup)).toEqual(['dg:5', 'dg:7', 'ok']);
+    expect(digest.body.text).toContain('clear poop');
+    expect(buttons(digest.body.reply_markup)).toEqual(['dg:5', 'dg:6', 'dg:7', 'ok']);
   });
 });
 

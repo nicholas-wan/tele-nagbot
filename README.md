@@ -65,9 +65,10 @@ flowchart TB
 - **Webhook** (`POST /webhook`): messages, button taps, reactions and
   membership changes. Each update is stored and claimed once, so a redelivery
   is never handled twice.
-- **Cron**: fires due chores, sends re-nags, expires old ones, posts the
-  digest and weekly wrap, and sweeps old messages. An idle tick is one
-  database round trip.
+- **Cron**: fires due chores, sends re-nags (hourly once a chore is a day
+  overdue; nothing expires until someone marks it done), posts the digest and
+  weekly wrap, and sweeps old messages. An idle tick is one database round
+  trip.
 - **Mini App**: a static page served from `public/app/`. Its requests are
   checked against Telegram's signed launch data and the user's membership of
   the group.
@@ -211,10 +212,10 @@ src/
   handlers.js     Commands, replies, reactions and button taps
   parse.js        Reads free-text chores and schedules
   wizard.js       The time picker for chores typed without a time
-  nag.js          Nag cards and the completion/expiry state machine
+  nag.js          Nag cards and the completion state machine
   chores.js       Create, find, delete, pause, done early, vacation
   nesting.js      Nested chores
-  cron.js         Fire, re-nag, expire, digest, weekly wrap, sweep
+  cron.js         Fire, re-nag, digest, weekly wrap, sweep
   dashboard.js    The pinned board
   manage.js       Manage and editor flows on the board
   stats.js        Leaderboard, history and streaks

@@ -205,7 +205,7 @@ export async function choreBoard(env, chatId, tz, loaded = null) {
   const rows = results.map((r) => {
     const [state, lead] = r.paused ? ['paused', '⏸️ paused']
       : parked.has(r.id) ? ['parked', `😴 ${fmtWhen(parked.get(r.id), tz)}`]
-      : r.schedule_kind === 'once' && overdue.has(r.id) ? ['overdue', `⏰ overdue · nagging${sinceText(r)}`]
+      : overdue.has(r.id) ? ['overdue', `⏰ overdue · nagging${sinceText(r)}`]
       : nagging.has(r.id) ? ['nagging', `🔔 nagging${sinceText(r)}`]
       : !r.next_fire_at ? ['nagging', '🔔 nagging now']
       : ['upcoming', fmtWhen(r.next_fire_at, tz)];
