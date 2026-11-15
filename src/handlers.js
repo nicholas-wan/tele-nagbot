@@ -22,6 +22,7 @@ import { findReminder, createReminder, confirmNewChore, fireIfDue,
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats, handleStatsCallback } from './stats.js';
+import { cmdQuick, handleQuickCallback } from './quick.js';
 import { cmdMakeStickers, cmdDelSticker, cmdUsePack, cmdTagSticker, cmdAutoTag, cmdTags } from './sticker-commands.js';
 import { digestView } from './cron.js';
 import { coveredStatement, coveredNamesFrom } from './nesting.js';
@@ -205,6 +206,7 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
     } else if (cmd === 'done') result = await cmdDone(env, ctx, args, by, tz);
     else if (cmd === 'poke' || cmd === 'nagall') result = await cmdPoke(env, ctx);
     else if (cmd === 'stats') result = await cmdStats(env, ctx, tz, args);
+    else if (cmd === 'quick') result = await cmdQuick(env, ctx, args);
     // chrono-node is the biggest dependency and only /invite uses it, so the
     // module comes in when the command does, not with every isolate.
     else if (cmd === 'invite') result = await (await import('./invite.js')).cmdInvite(env, ctx, args, tz);
@@ -251,6 +253,7 @@ function helpText(section = 'home', nicks = [], board = '🐾 Chores') {
     '/poke — re-send everything outstanding\n' +
     '/pause all 14 · /resume all — vacation mode\n' +
     '/stats — leaderboard with This week / Last week / 6 months tabs\n' +
+    '/quick — pin the quick log pad · <code>/quick add vacuum</code> · <code>/quick remove vacuum</code>\n' +
     '/invite dentist tomorrow 3pm at Mount E — get a calendar file to add\n\n' +
     'Reply to a nag with <code>done</code>, <code>done together</code>, ' +
     `<code>done with ${nicks.length ? esc(nicks[0]) : 'jane'}</code>, <code>snooze 2h</code> or <code>snooze till 9pm</code> — or react 👍.`;
@@ -813,6 +816,7 @@ async function handleCallback(env, cb) {
   if (data.startsWith('m:')) return handleManageCallback(env, cb);
   if (data.startsWith('w:')) return handleWizardCallback(env, cb, ctx, ref);
   if (data.startsWith('st:')) return handleStatsCallback(env, cb, ctx, ref);
+  if (/^qu?:/.test(data)) return handleQuickCallback(env, cb, ctx, ref);
 
   const help = data.match(/^h:(home|schedule|more|stickers)$/);
   if (help) {

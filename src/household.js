@@ -65,6 +65,10 @@ export function nicknames(env) {
 // points ride on it — dropping it once cost a reminder its shared credit.
 export const isScored = (row) => (row && row.scored != null ? Boolean(row.scored) : true);
 
+// A quick tap from the pinned quick-log pad is a done firing with no chore
+// behind it: reminder_id 0, which no AUTOINCREMENT id ever takes.
+export const QUICK_TAP_ID = 0;
+
 // Combined credits join names with this separator, in firings.done_by.
 export const CREDIT_SEP = ' & ';
 

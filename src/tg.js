@@ -89,7 +89,7 @@ export function okButton(sourceMsgId = null) {
 }
 
 // Everything the bot sends is tidied away after a day; only the pinned
-// dashboard is kept (opts.keep). Telegram cannot list a bot's own messages,
+// dashboard and the quick log pad are kept (opts.keep). Telegram cannot list a bot's own messages,
 // so each one is recorded at send time and a cron sweep deletes what is due.
 // OK just gets there sooner; the sweep is the backstop nobody has to tap.
 export const SENT_TTL_MS = 86400000;

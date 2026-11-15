@@ -387,7 +387,7 @@ async function drawDashboard(env, chatId) {
       }
       // Message was deleted by hand — fall through and recreate it.
     }
-    // keep: the pinned dashboard is the one message the daily sweep spares.
+    // keep: the daily sweep spares the pinned dashboard (and the quick log pad).
     const sent = await sendMessage(env, chatId, html, dashboardButtons(env, chatId), { silent: true, keep: true });
     if (sent.ok) {
       // A board that exists but isn't pinned is worse than a missing one: it

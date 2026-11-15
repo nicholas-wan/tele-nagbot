@@ -43,6 +43,9 @@ Done. Our two cats, Latte and Mocha, do the nagging.
 - **Undo everywhere.** Every Done, delete and add can be taken back for a day.
 - **Private by default.** Replies, wizards and assigned nags are ephemeral
   messages only the recipient sees; the group sees only what it shares.
+- **Quick log pad.** A second pin of one-tap buttons for jobs that aren't
+  scheduled (🧹 Vacuum, 🧺 Laundry): a tap gives whoever tapped 1 ✅.
+  `/quick add` and `/quick remove` change it.
 - **Mini App.** A Telegram Mini App for the chore list, each chore's settings
   and the stats, opened from the board.
 - **Extras.** An 8am digest of anything left overnight, a Sunday wrap,
@@ -134,7 +137,7 @@ All except the health check are `POST` and need
 | `/setup` | Registers the webhook and command menu |
 | `/admin?info` | Reads back the webhook and registered commands from Telegram |
 | `/admin?diag[=<chat>]` | Membership, admin rights and whether the chat id changed |
-| `/admin?board` | Rebuilds and re-pins the board |
+| `/admin?board` | Rebuilds and re-pins the board, and the quick log pad under it |
 | `/admin?stickers&chat=<id>` | Lists sticker tags |
 | `/` | Health check |
 
@@ -185,6 +188,7 @@ Schedules read the way people type them: `every mon,thu 8am`, `tue/fri`,
 | `/pause all 14`, `/resume all` | Vacation mode for up to 90 days |
 | `/poke` | Re-send every outstanding nag |
 | `/stats` | This week, last week and six months |
+| `/quick` | Pin the quick log pad; `/quick add vacuum`, `/quick remove vacuum` change its buttons |
 | `/invite` | A calendar file for an event, with the address detected |
 | `/makestickers`, `/usepack`, `/tagsticker`, `/tags`, `/autotag` | Set up and tag the cat sticker pack |
 | `/help` | Examples and the shortcuts in force |
@@ -219,6 +223,8 @@ src/
   dashboard.js    The pinned board
   manage.js       Manage and editor flows on the board
   stats.js        Leaderboard, history and streaks
+  quick.js        The quick log pad
+  bonus.js        The temporary Poppy bonus
   miniapp-*.js    Mini App API, sign-in check and link
   ...
 public/app/       The Mini App page

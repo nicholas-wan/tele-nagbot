@@ -1,7 +1,10 @@
 // The Poppy bonus: a temporary score multiplier for one person. Chores they
-// finish inside the window count double on the weekly boards, the streak and
-// the Sunday recap; the 6-month log and the rotation's fairness count stay
+// finish alone inside the window count double on the weekly boards, the
+// streak and the Sunday recap. Chores done together and quick taps from the
+// pinned pad never do. The 6-month log and the rotation's fairness count stay
 // plain. It lapses on its own; delete this file's uses any time after.
+
+import { CREDIT_SEP, QUICK_TAP_ID } from './household.js';
 
 export const POPPY_BONUS = {
   name: 'Poppy bonus',
@@ -15,16 +18,21 @@ export const POPPY_BONUS = {
 
 const isBonusPerson = (who) => String(who || '').toLowerCase() === POPPY_BONUS.who.toLowerCase();
 
-// Points one person earns for one done chore: after the start, up to and
-// including the end, as the boards' own windows run.
-export function pointsFor(who, doneAt) {
-  return isBonusPerson(who) && doneAt > POPPY_BONUS.from && doneAt <= POPPY_BONUS.until
+// Points `who` earns for one done firing row ({ done_by, done_at,
+// reminder_id }): doubled only for a chore she did alone, after the start, up
+// to and including the end, as the boards' own windows run. A row read
+// without its reminder_id scores 1: a query that forgot the column must not
+// double every quick tap.
+export function pointsFor(row, who) {
+  const alone = !String(row.done_by || '').includes(CREDIT_SEP);
+  const chore = row.reminder_id != null && row.reminder_id !== QUICK_TAP_ID;
+  return alone && chore && isBonusPerson(who) && row.done_at > POPPY_BONUS.from && row.done_at <= POPPY_BONUS.until
     ? POPPY_BONUS.multiplier : 1;
 }
 
 // The boards' one line about it, or null for a week (since, until] it does
-// not touch: "🐾 Poppy bonus: @Dodgerblueee's chores count ×2 through Wed, Jun
-// 30, 2027", in the past tense once it has ended (a Last week tab still shows
+// not touch: "🐾 Poppy bonus: chores @Dodgerblueee does alone count ×2 through
+// Wed, Jun 30, 2027", in the past tense once it has ended (a Last week tab still shows
 // it). Bold in Telegram's HTML, plain for the Mini App.
 export function bonusLine(since, until, tz, { html = true, now = Date.now() } = {}) {
   if (!(POPPY_BONUS.from < until && POPPY_BONUS.until > since)) return null;
@@ -32,5 +40,5 @@ export function bonusLine(since, until, tz, { html = true, now = Date.now() } = 
     .toLocaleDateString('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
   const name = html ? `<b>${POPPY_BONUS.name}</b>` : POPPY_BONUS.name;
   const verb = now >= POPPY_BONUS.until ? 'counted' : 'count';
-  return `🐾 ${name}: ${POPPY_BONUS.who}'s chores ${verb} ×${POPPY_BONUS.multiplier} through ${last}`;
+  return `🐾 ${name}: chores ${POPPY_BONUS.who} does alone ${verb} ×${POPPY_BONUS.multiplier} through ${last}`;
 }

@@ -77,8 +77,19 @@ CREATE TABLE IF NOT EXISTS settings (
   last_digest TEXT,                     -- local Y-M-D of the last morning digest sent
   last_weekly TEXT,                     -- local Y-M-D of the last Sunday recap sent
   dashboard_msg_id INTEGER,             -- pinned "outstanding chores" message
-  paused_until INTEGER                  -- vacation mode: everything muted until this UTC ms
+  paused_until INTEGER,                 -- vacation mode: everything muted until this UTC ms
+  quick_msg_id INTEGER                  -- pinned quick-log pad (0004_quick_taps.sql)
 );
+
+-- The quick-log pad's buttons: jobs that are not scheduled chores. A tap logs
+-- a done firing with reminder_id 0 (QUICK_TAP_ID), credited to the tapper.
+CREATE TABLE IF NOT EXISTS quick_taps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quick_taps_chat_text ON quick_taps (chat_id, text COLLATE NOCASE);
 
 -- Group members seen by the bot; dm_ok means they opened a DM line (/start),
 -- letting chores assigned to them nag their private chat instead of the group.
@@ -100,8 +111,8 @@ CREATE TABLE IF NOT EXISTS trash (
   created_at INTEGER NOT NULL
 );
 
--- Everything the bot sends is tidied away after a day (the pinned dashboard is
--- the one exception). Telegram cannot list a bot's own messages, so each one
+-- Everything the bot sends is tidied away after a day (the pinned dashboard and
+-- the quick log pad are the exceptions). Telegram cannot list a bot's own messages, so each one
 -- is recorded at send time; the cron sweep deletes what is due and drops the
 -- row whether Telegram still had the message or not.
 CREATE TABLE IF NOT EXISTS sent_messages (

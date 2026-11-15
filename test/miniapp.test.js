@@ -420,7 +420,7 @@ describe('stats', () => {
       { name: '@Dodgerblueee', count: 2, solo: 2, points: 4 },
     ]);
     expect(res.streak).toBe(0);
-    expect(res.bonus).toBe("🐾 Poppy bonus: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027");
+    expect(res.bonus).toBe("🐾 Poppy bonus: chores @Dodgerblueee does alone count ×2 through Wed, Jun 30, 2027");
   });
 });
 

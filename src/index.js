@@ -4,6 +4,7 @@
 
 import { acceptUpdate, runClaimedUpdate } from './updates.js';
 import { updateDashboard } from './dashboard.js';
+import { drawPad } from './quick.js';
 import { runCron } from './cron.js';
 import { listTags } from './stickers.js';
 import { answerCallback, armWebhookAnswer, tg } from './tg.js';
@@ -163,6 +164,7 @@ export default {
             { command: 'remind', description: 'Plain reminder — no points' },
             { command: 'list', description: 'Active chores and reminders' },
             { command: 'stats', description: 'Leaderboard — this week, last week, history' },
+            { command: 'quick', description: 'Quick log pad — one tap for Vacuum, Laundry…' },
             { command: 'invite', description: 'Calendar file for a meeting — tap to add' },
             { command: 'help', description: 'Quick guide and more options' },
           ],
@@ -232,9 +234,14 @@ export default {
         for (const id of String(env.ALLOWED_CHATS || '').split(',').map((s) => s.trim()).filter(Boolean)) {
           const chatId = +id;
           await updateDashboard(env, chatId);
-          const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
+          // A pad deleted by hand comes back here too, before the walk.
+          await drawPad(env, chatId);
+          const row = await env.DB.prepare('SELECT dashboard_msg_id, quick_msg_id FROM settings WHERE chat_id = ?')
             .bind(chatId).first();
           const current = row && row.dashboard_msg_id;
+          // The quick log pad is the bot's other pin: unpinned on the walk
+          // like the rest, never deleted, and re-pinned under the board.
+          const pad = row && row.quick_msg_id;
           // Retire boards the bot pinned earlier and lost track of — a group
           // upgrade orphans them and they look identical to the live one.
           // getChat only ever reports the TOP of the pin stack, so walk down by
@@ -249,17 +256,18 @@ export default {
             if (!meId || !pin.from || pin.from.id !== meId) break; // a human pinned this — leave it
             seen.add(pin.message_id);
             await tg(env, 'unpinChatMessage', { chat_id: chatId, message_id: pin.message_id });
-            if (pin.message_id !== current) {
+            if (pin.message_id !== current && pin.message_id !== pad) {
               await tg(env, 'deleteMessage', { chat_id: chatId, message_id: pin.message_id });
               removed++;
             }
           }
+          if (pad) await tg(env, 'pinChatMessage', { chat_id: chatId, message_id: pad, disable_notification: true });
           if (current) {
             await tg(env, 'pinChatMessage', {
               chat_id: chatId, message_id: current, disable_notification: true,
             });
           }
-          out.push(`${chatId}: dashboard_msg_id=${current || 'none'}, stale boards removed=${removed}`);
+          out.push(`${chatId}: dashboard_msg_id=${current || 'none'}, quick_msg_id=${pad || 'none'}, stale boards removed=${removed}`);
         }
         return new Response(out.join('\n') || 'no allowed chats', { status: 200 });
       }

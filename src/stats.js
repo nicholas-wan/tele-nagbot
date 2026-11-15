@@ -26,7 +26,7 @@ export function choreStatsStatements(env, chatId, since, until = Date.now()) {
       "SELECT COUNT(*) AS n FROM firings WHERE chat_id = ? AND state = 'expired' AND scored = 1 AND fired_at > ? AND fired_at <= ?"
     ).bind(chatId, since, until),
     env.DB.prepare(
-      `SELECT f.done_by, f.done_at, COALESCE(f.reminder_text, r.text, '?') AS text
+      `SELECT f.done_by, f.done_at, f.reminder_id, COALESCE(f.reminder_text, r.text, '?') AS text
        FROM firings f LEFT JOIN reminders r ON r.id = f.reminder_id
        WHERE f.chat_id = ? AND f.state = 'done' AND f.scored = 1 AND f.done_at > ? AND f.done_at <= ?
        ORDER BY f.done_at DESC`
@@ -53,7 +53,7 @@ export function choreStatsFrom(expiredRes, historyRes) {
     for (const who of names) {
       if (!byPerson.has(who)) byPerson.set(who, []);
       byPerson.get(who).push(h);
-      score.set(who, (score.get(who) || 0) + pointsFor(who, h.done_at));
+      score.set(who, (score.get(who) || 0) + pointsFor(h, who));
     }
   }
   // Ranked by points, which equal the ✅ count unless a bonus is running;
@@ -89,7 +89,7 @@ export function streakStatement(env, chatId, tz) {
   const end = weekStart(Date.now(), tz);
   const start = end - 26 * 7 * 86400000; // fixed-offset tz; exact for Asia/Singapore
   return env.DB.prepare(
-    "SELECT done_by, done_at FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
+    "SELECT done_by, done_at, reminder_id FROM firings WHERE chat_id = ? AND state = 'done' AND scored = 1 AND done_at > ? AND done_at <= ?"
   ).bind(chatId, start, end);
 }
 
@@ -103,7 +103,7 @@ export function streakFrom(results, tz, leader) {
     for (const r of results) {
       if (r.done_at <= lo || r.done_at > hi) continue;
       for (const p of String(r.done_by || '').split(CREDIT_SEP)) {
-        if (p) counts.set(p, (counts.get(p) || 0) + pointsFor(p, r.done_at));
+        if (p) counts.set(p, (counts.get(p) || 0) + pointsFor(r, p));
       }
     }
     if (!counts.size) break;

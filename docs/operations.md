@@ -70,15 +70,15 @@ All `POST`, with `Authorization: Bearer <ADMIN_SECRET>`.
 | `/setup` | Registers the webhook and command menu |
 | `/admin?info` | Webhook and registered commands, read back from Telegram |
 | `/admin?diag[=<chat>][&user=<id>]` | Membership, admin rights, whether the chat id changed |
-| `/admin?board` | Rebuilds and re-pins the board |
+| `/admin?board` | Rebuilds and re-pins the board, and the quick log pad under it |
 | `/admin?stickers&chat=<id>` | Lists sticker tags |
 | `/admin?stickerimg=N&chat=<id>` | Fetches one sticker image |
 
-- `?board` walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pinned message a human *authored* (`pinned_message.from` is the author, not whoever pinned it — a bot message a human pinned is treated as the bot's). Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
+- `?board` redraws the quick log pad too (sending it again if it was deleted), spares it on the walk and re-pins it under the board. It walks the pin stack because `getChat` only reports the topmost pin, and stops at the first pinned message a human *authored* (`pinned_message.from` is the author, not whoever pinned it — a bot message a human pinned is treated as the bot's). Telegram can serve a cached `getChat` right after an unpin, so a duplicate may survive a run — re-run it, or unpin by hand. `unpinAllChatMessages` is the guaranteed fix but destroys every pin in the group.
 
 ## Migrations
 
-- Migrations live in `migrations/`, with the resulting schema mirrored in `schema.sql`. **Run `npm run db:migrate` before any deploy that adds one** — the Worker expects the schema it ships with, and a missing `webhook_updates` table turns every webhook into a 503. `0002_nested_chores.sql` adds `reminders.parent_id`; every Done reads it, so it must be applied before the Worker that uses it. `0001_adversarial_review.sql` repairs duplicate per-chat chore numbers (preserving the first owner), enforces uniqueness, and creates the webhook inbox. `0003_hot_path_indexes.sql` adds indexes only (a chore's live firing, the cron's expiry clause, a sent message by id), so the Worker runs with or without it. The live `nagbot-eu` has all three applied (0001 on 27 Sep, 0002 on 6 Nov, 0003 on 8 Nov 2026, tracked in `d1_migrations`); nothing is pending.
+- Migrations live in `migrations/`, with the resulting schema mirrored in `schema.sql`. **Run `npm run db:migrate` before any deploy that adds one** — the Worker expects the schema it ships with, and a missing `webhook_updates` table turns every webhook into a 503. `0002_nested_chores.sql` adds `reminders.parent_id`; every Done reads it, so it must be applied before the Worker that uses it. `0001_adversarial_review.sql` repairs duplicate per-chat chore numbers (preserving the first owner), enforces uniqueness, and creates the webhook inbox. `0003_hot_path_indexes.sql` adds indexes only (a chore's live firing, the cron's expiry clause, a sent message by id), so the Worker runs with or without it. `0004_quick_taps.sql` adds the quick log pad's `quick_taps` table and `settings.quick_msg_id`; `/quick` and every pad tap read them, so apply it before the Worker that uses it. The live `nagbot-eu` has all four applied (0001 on 27 Sep, 0002 on 6 Nov, 0003 on 8 Nov, 0004 on 15 Nov 2026, tracked in `d1_migrations`); nothing is pending.
 
 ## Webhook intake and recovery
 

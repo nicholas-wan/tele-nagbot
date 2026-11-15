@@ -17,7 +17,7 @@ const BEFORE = POPPY_BONUS.from - HOUR;
 const AFTER = POPPY_BONUS.until + HOUR;
 const WED = Date.parse('2026-11-25T12:00:00+08:00'); // mid-window
 const SUN_8PM = Date.parse('2026-11-29T20:00:00+08:00'); // that week's recap
-const rows = (list) => ({ results: list.map(([done_by, done_at]) => ({ done_by, done_at, text: 'dishes' })) });
+const rows = (list) => ({ results: list.map(([done_by, done_at]) => ({ done_by, done_at, reminder_id: 8, text: 'dishes' })) });
 const stats = (list) => choreStatsFrom({ results: [{ n: 0 }] }, rows(list));
 
 let sql, env, calls;
@@ -42,43 +42,54 @@ const done = (by, at, n = 1) => {
 };
 
 describe('the window', () => {
+  it('never doubles a chore done together, or a quick tap', () => {
+    const shared = { done_by: '@nicholaswan & @Dodgerblueee', done_at: IN, reminder_id: 8 };
+    expect(pointsFor(shared, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN, reminder_id: 0 }, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN, reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
+  });
+
+  it('scores 1 for a row read without its reminder_id', () => {
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN }, '@Dodgerblueee')).toBe(1);
+  });
+
   it('doubles only her chores, whatever the case', () => {
-    expect(pointsFor('@Dodgerblueee', IN)).toBe(2);
-    expect(pointsFor('@dodgerblueee', IN)).toBe(2);
-    expect(pointsFor('@nicholaswan', IN)).toBe(1);
-    expect(pointsFor('@Dodgerblueee', BEFORE)).toBe(1);
-    expect(pointsFor('@Dodgerblueee', AFTER)).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN, reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
+    expect(pointsFor({ done_by: '@dodgerblueee', done_at: IN, reminder_id: 8 }, '@dodgerblueee')).toBe(2);
+    expect(pointsFor({ done_by: '@nicholaswan', done_at: IN, reminder_id: 8 }, '@nicholaswan')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: BEFORE, reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: AFTER, reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
   });
 
   it('runs from tonight, not back-dated, to the end of 30 Jun 2027, Singapore time', () => {
-    expect(pointsFor('@Dodgerblueee', Date.parse('2026-10-01T09:00:00+08:00'))).toBe(1);
-    expect(pointsFor('@Dodgerblueee', Date.parse('2026-11-15T19:00:00+08:00'))).toBe(1);
-    expect(pointsFor('@Dodgerblueee', Date.parse('2026-11-15T21:00:00+08:00'))).toBe(2);
-    expect(pointsFor('@Dodgerblueee', Date.parse('2027-06-30T23:59:00+08:00'))).toBe(2);
-    expect(pointsFor('@Dodgerblueee', Date.parse('2027-07-01T00:01:00+08:00'))).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: Date.parse('2026-10-01T09:00:00+08:00'), reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: Date.parse('2026-11-15T19:00:00+08:00'), reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: Date.parse('2026-11-15T21:00:00+08:00'), reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: Date.parse('2027-06-30T23:59:00+08:00'), reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: Date.parse('2027-07-01T00:01:00+08:00'), reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
     // After the start, up to and including the end, as the boards' windows run.
-    expect(pointsFor('@Dodgerblueee', POPPY_BONUS.from)).toBe(1);
-    expect(pointsFor('@Dodgerblueee', POPPY_BONUS.until)).toBe(2);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: POPPY_BONUS.from, reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
+    expect(pointsFor({ done_by: '@Dodgerblueee', done_at: POPPY_BONUS.until, reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
   });
 
   it('says so on the weeks it touches, through its last day, in the past tense once over', () => {
     expect(bonusLine(BEFORE - 7 * DAY, BEFORE, TZ)).toBe(null);
     expect(bonusLine(POPPY_BONUS.until, AFTER, TZ)).toBe(null);
     expect(bonusLine(BEFORE, IN, TZ, { now: IN }))
-      .toBe("🐾 <b>Poppy bonus</b>: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027");
+      .toBe("🐾 <b>Poppy bonus</b>: chores @Dodgerblueee does alone count ×2 through Wed, Jun 30, 2027");
     expect(bonusLine(BEFORE, IN, TZ, { now: AFTER, html: false }))
-      .toBe("🐾 Poppy bonus: @Dodgerblueee's chores counted ×2 through Wed, Jun 30, 2027");
+      .toBe("🐾 Poppy bonus: chores @Dodgerblueee does alone counted ×2 through Wed, Jun 30, 2027");
   });
 });
 
 describe('the tally', () => {
-  it('ranks by points, counting her share of a chore done together', () => {
-    const s = stats([['@nicholaswan', IN], ['@nicholaswan', IN], ['@Dodgerblueee', IN], ['@nicholaswan & @Dodgerblueee', IN]]);
+  it('ranks by points, her share of a chore done together scoring 1', () => {
+    const s = stats([['@nicholaswan', IN], ['@Dodgerblueee', IN], ['@nicholaswan & @Dodgerblueee', IN]]);
     expect(s.people.map(([who, items]) => [who, items.length, s.score.get(who)])).toEqual([
-      ['@Dodgerblueee', 2, 4], ['@nicholaswan', 3, 3],
+      ['@Dodgerblueee', 2, 3], ['@nicholaswan', 2, 2],
     ]);
     expect(s.boosted).toBe(true);
-    expect(tallyText(s, '@nicholaswan', s.people[1][1])).toBe('3 pts · 3 ✅');
+    expect(tallyText(s, '@nicholaswan', s.people[1][1])).toBe('2 pts · 2 ✅');
   });
 
   it('stays a plain ✅ count in a week nothing was doubled', () => {
@@ -98,7 +109,7 @@ describe('the tally', () => {
     vi.spyOn(Date, 'now').mockReturnValue(WED);
     const lastWeek = WED - 6 * DAY; // the Thursday before
     const past = [['@nicholaswan', lastWeek], ['@nicholaswan', lastWeek], ['@Dodgerblueee', lastWeek], ['@Dodgerblueee', lastWeek]]
-      .map(([done_by, done_at]) => ({ done_by, done_at }));
+      .map(([done_by, done_at]) => ({ done_by, done_at, reminder_id: 8 }));
     expect(streakFrom(past, TZ, '@Dodgerblueee')).toBe(1);
   });
 });
@@ -109,7 +120,7 @@ describe('/stats', () => {
     done('@Dodgerblueee', WED - HOUR, 3);
     done('@nicholaswan', WED - 2 * HOUR, 5);
     const html = await statsHtml(env, 1, TZ, 'week');
-    expect(html).toContain("🐾 <b>Poppy bonus</b>: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027");
+    expect(html).toContain("🐾 <b>Poppy bonus</b>: chores @Dodgerblueee does alone count ×2 through Wed, Jun 30, 2027");
     expect(html).toContain('🥇 <b>@Dodgerblueee</b> — 6 pts · 3 ✅');
     expect(html).toContain('🥈 <b>@nicholaswan</b> — 5 pts · 5 ✅');
   });
@@ -137,7 +148,7 @@ describe('the Sunday recap', () => {
     done('@Dodgerblueee', SUN_8PM - DAY, 3);
     done('@nicholaswan', SUN_8PM - DAY, 5);
     const text = await recap();
-    expect(text).toContain("🐾 <b>Poppy bonus</b>: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027");
+    expect(text).toContain("🐾 <b>Poppy bonus</b>: chores @Dodgerblueee does alone count ×2 through Wed, Jun 30, 2027");
     expect(text).toContain('🥇 @Dodgerblueee takes the week with 6 pts · 3 ✅!');
     expect(text).toContain('• @nicholaswan: 5 pts · 5 ✅');
   });
