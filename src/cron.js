@@ -6,8 +6,8 @@ import { getTz, isScored, primeTz } from './household.js';
 import { nagButtons, nagHtml, overdueHtml, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
          OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
-import { choreStats, winnerStreak } from './stats.js';
-import { bonusLive, bonusBanner } from './bonus.js';
+import { choreStats, winnerStreak, tallyText } from './stats.js';
+import { bonusLine } from './bonus.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
 import { fireReminder } from './firing.js';
 import { primePack, tagReads } from './stickers.js';
@@ -237,7 +237,7 @@ async function pruneOldFirings(env, now) {
 }
 
 // Sunday 8pm local: the cats crown the week's winner before Monday's reset.
-async function sendWeeklyRecap(env, now, paused = null, chats = null) {
+export async function sendWeeklyRecap(env, now, paused = null, chats = null) {
   paused ??= await pausedChats(env, now);
   chats ??= await cronChats(env);
   for (const chat_id of chats) {
@@ -261,22 +261,18 @@ async function sendWeeklyRecap(env, now, paused = null, chats = null) {
 
       const lines = ['🏁 <b>Weekly wrap from Latte &amp; Mocha</b>'];
       if (s.people.length) {
-        // Points equal the ✅ count unless a bonus is running; then both show.
-        const tally = (who, items) => {
-          const pts = s.score.get(who);
-          return pts === items.length ? `${items.length} ✅` : `${items.length} ✅ (🐾 ${pts} pts)`;
-        };
         const [winner, winnerItems] = s.people[0];
+        // Level on points is a tie; the ✅ counts behind it may differ.
         const top = s.people.filter(([who]) => s.score.get(who) === s.score.get(winner));
         const tie = top.length > 1;
         const streak = tie ? 0 : await winnerStreak(env, chat_id, tz, winner);
-        const bonus = bonusLive(weekStart(now, tz), now);
-        if (bonus) lines.push(bonusBanner(tz, now));
+        const bonus = bonusLine(weekStart(now, tz), now, tz, { now });
+        if (bonus) lines.push(bonus);
         lines.push(tie
-          ? `It's a tie between ${top.map(([who]) => esc(who)).join(' and ')} at ${bonus ? `${s.score.get(winner)} pts` : `${winnerItems.length} ✅`} each — the cats demand a tiebreaker chore.`
-          : `🥇 ${esc(winner)} takes the week with ${tally(winner, winnerItems)}!` +
+          ? `It's a tie between ${top.map(([who]) => esc(who)).join(' and ')} at ${s.boosted ? `${s.score.get(winner)} pts` : `${winnerItems.length} ✅`} each — the cats demand a tiebreaker chore.`
+          : `🥇 ${esc(winner)} takes the week with ${tallyText(s, winner, winnerItems)}!` +
             (streak >= 1 ? ` 🔥 ${streak + 1} weeks running!` : ''));
-        for (const [who, items] of s.people.slice(top.length)) lines.push(`• ${esc(who)}: ${tally(who, items)}`);
+        for (const [who, items] of s.people.slice(top.length)) lines.push(`• ${esc(who)}: ${tallyText(s, who, items)}`);
       }
       // Only rows from before 9 Nov 2026, or a chore deleted under its nag,
       // can be expired now, so this line has all but retired.

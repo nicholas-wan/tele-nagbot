@@ -403,6 +403,25 @@ describe('stats', () => {
     expect(res.together).toBe(1);
     expect(res.recent.map((r) => r.who)).toEqual(['@Dodgerblueee', '@nicholaswan & @Dodgerblueee']);
   });
+
+  it('scores the Poppy bonus and says so, with no reign on a tie in points', async () => {
+    const wed = Date.parse('2026-11-25T12:00:00+08:00');
+    Date.now.mockReturnValue(wed);
+    const done = (by, at) => seed('firings', {
+      reminder_id: 8, chat_id: 1, reminder_text: 'slutbed', fired_at: at, state: 'done', done_by: by, done_at: at, scored: 1,
+    });
+    // Last week he won outright, so a reign would show if this week's lead counted.
+    for (let i = 1; i <= 3; i++) done('@nicholaswan', wed - 7 * DAY - i * HOUR);
+    for (let i = 1; i <= 4; i++) done('@nicholaswan', wed - i * HOUR);
+    for (let i = 1; i <= 2; i++) done('@Dodgerblueee', wed - 10 * HOUR - i * HOUR);
+    const res = await call('stats/week');
+    expect(res.people).toEqual([
+      { name: '@nicholaswan', count: 4, solo: 4, points: 4 },
+      { name: '@Dodgerblueee', count: 2, solo: 2, points: 4 },
+    ]);
+    expect(res.streak).toBe(0);
+    expect(res.bonus).toBe("🐾 Poppy bonus: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027");
+  });
 });
 
 describe('the board button', () => {

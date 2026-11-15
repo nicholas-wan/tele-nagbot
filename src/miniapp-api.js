@@ -27,8 +27,8 @@ import {
   setReminderPaused, undoReads, undoCompletion, undoEarly, restoredLog,
 } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
-import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
-import { POPPY_BONUS, bonusLive, bonusText } from './bonus.js';
+import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom, outright } from './stats.js';
+import { bonusLine } from './bonus.js';
 import { parentChoicesIn, setParent } from './nesting.js';
 import { chatReads } from './context.js';
 
@@ -472,7 +472,7 @@ const routes = [
   ['GET', /^stats\/(week|last)$/, async ({ tz, match, gate }) => {
     const view = match[1];
     const { since, stats: s, past } = gate.week;
-    const streak = view === 'week' && s.people.length ? streakFrom(past || [], tz, s.people[0][0]) : 0;
+    const streak = view === 'week' && outright(s) ? streakFrom(past || [], tz, s.people[0][0]) : 0;
     const recent = [...s.together, ...[...s.solo.values()].flat()]
       .sort((a, b) => b.done_at - a.done_at).slice(0, 15)
       .map((h) => ({
@@ -484,8 +484,7 @@ const routes = [
       people: s.people.map(([name, items]) => ({
         name, count: items.length, solo: (s.solo.get(name) || []).length, points: s.score.get(name),
       })),
-      bonus: bonusLive(since, view === 'last' ? weekStart(Date.now(), tz) : Date.now())
-        ? `🐾 ${POPPY_BONUS.name}: ${bonusText(tz)}` : null,
+      bonus: bonusLine(since, view === 'last' ? weekStart(Date.now(), tz) : Date.now(), tz, { html: false }),
       together: s.together.length, expired: s.expired, total: s.total, recent,
     });
   }, { gate: 'stats' }],

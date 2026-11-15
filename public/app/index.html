@@ -961,18 +961,23 @@ function stats() {
     h('div', { class: 'seg small', role: 'group', 'aria-label': 'Week' }, view('week', 'This week'), view('last', 'Last week'))];
   if (!s) return [top, h('div', { class: 'label' }, ' '), bones(3, 'action')];
   // A person's count includes what they did together, so the meta line says
-  // how it splits and the numbers add up.
+  // how it splits and the numbers add up. In a week a bonus moved someone's
+  // points, everyone's number is points and the meta line leads with their
+  // done count (the together share is that less the solo, and the line has to
+  // fit a phone with a reign on it).
+  const boosted = s.people.some((person) => person.points != null && person.points !== person.count);
   const people = s.people.map((person, index) => h('div', { class: 'row' },
     h('span', { class: 'emo', 'aria-hidden': 'true' }, MEDALS[index] || ''),
     h('div', { class: 'main' },
       h('div', { class: 'title' }, person.name),
       h('div', { class: 'meta' }, [
-        `${person.solo} solo`,
-        person.count - person.solo ? `${person.count - person.solo} together` : null,
+        boosted ? `${person.count} done` : null,
+        boosted && person.solo === person.count ? null : `${person.solo} solo`,
+        !boosted && person.count - person.solo ? `${person.count - person.solo} together` : null,
         index === 0 && s.streak >= 1 ? `🔥 ${s.streak + 1}-week reign` : null,
-        person.points != null && person.points !== person.count ? `🐾 ${person.count} done, ${person.points} pts` : null,
       ].filter(Boolean).join(' · '))),
-    h('span', { class: 'count', 'aria-label': `${person.points ?? person.count} points` }, person.points ?? person.count)));
+    h('span', { class: 'count', 'aria-label': boosted ? `${person.points} points, ${person.count} done` : `${person.count} done` },
+      boosted ? person.points : person.count)));
   return [
     top,
     s.total || s.expired ? [
@@ -1397,7 +1402,8 @@ function previewApi(method, path, body) {
   if (statsMatch) {
     return reply(statsMatch[1] === 'week'
       ? { view: 'week', week: 'Oct 26', streak: 2, total: 7, expired: 1, together: 2,
-        people: [{ name: '@Dodgerblueee', count: 5, solo: 3 }, { name: '@nicholaswan', count: 4, solo: 2 }],
+        bonus: "🐾 Poppy bonus: @Dodgerblueee's chores count ×2 through Wed, Jun 30, 2027",
+        people: [{ name: '@Dodgerblueee', count: 5, solo: 3, points: 10 }, { name: '@nicholaswan', count: 4, solo: 2, points: 4 }],
         recent: [
           { emoji: '💩', text: 'clear poop', who: '@Dodgerblueee', when: 'Oct 27, 9:12 PM' },
           { emoji: '🍽️', text: 'dishes', who: '@nicholaswan & @Dodgerblueee', when: 'Oct 27, 8:40 PM' },

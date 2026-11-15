@@ -6,7 +6,7 @@ import { sendPrivate, editRef, answerCallback, esc } from './tg.js';
 import { weekStart, fmtShort } from './time.js';
 import { getTz, CREDIT_SEP } from './household.js';
 import { choreEmoji } from './dashboard.js';
-import { pointsFor, bonusLive, bonusBanner } from './bonus.js';
+import { pointsFor, bonusLine } from './bonus.js';
 
 const STATS_MAX_PER_PERSON = 15;
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -56,11 +56,24 @@ export function choreStatsFrom(expiredRes, historyRes) {
       score.set(who, (score.get(who) || 0) + pointsFor(who, h.done_at));
     }
   }
-  // Ranked by points, which equal the ✅ count unless a bonus is running.
+  // Ranked by points, which equal the ✅ count unless a bonus is running;
+  // `boosted` says one did, and the boards then show everyone's points.
   const people = [...byPerson.entries()]
     .sort((a, b) => score.get(b[0]) - score.get(a[0]) || b[1].length - a[1].length);
-  return { people, score, together, solo, expired: (expired && expired.n) || 0, total: history.results.length };
+  const boosted = people.some(([who, items]) => score.get(who) !== items.length);
+  return { people, score, boosted, together, solo, expired: (expired && expired.n) || 0, total: history.results.length };
 }
+
+// A person's tally on a weekly board or the recap: "5 ✅", or "6 pts · 3 ✅"
+// for everyone in a week a bonus moved someone's points off their count.
+export function tallyText(s, who, items) {
+  return s.boosted ? `${s.score.get(who)} pts · ${items.length} ✅` : `${items.length} ✅`;
+}
+
+// The week's leader won it outright: nobody level on points with them. A
+// tie gets no reign, as a tie ends a streak.
+export const outright = (s) => s.people.length > 0
+  && !(s.people[1] && s.score.get(s.people[1][0]) === s.score.get(s.people[0][0]));
 
 // Consecutive past full weeks the given person won outright (ties break it).
 // One query for the whole 26-week window, grouped into weeks here — the old
@@ -109,12 +122,6 @@ function soloNote(s, who, items) {
   return solo === items.length ? '' : ` (${solo} solo)`;
 }
 
-// " · 🐾 10 pts" when a bonus moved someone's points off their ✅ count.
-function pointsNote(s, who, items) {
-  const pts = s.score.get(who) || 0;
-  return pts === items.length ? '' : ` · 🐾 ${pts} pts`;
-}
-
 // One person's block of the board: header line plus their recent items.
 function personLines(who, items, tz, header) {
   const lines = ['', header];
@@ -133,7 +140,7 @@ function statsButtons(view) {
   return { inline_keyboard: [tabs, [{ text: '✅ OK', callback_data: 'ok' }]] };
 }
 
-async function statsHtml(env, chatId, tz, view) {
+export async function statsHtml(env, chatId, tz, view) {
   const now = Date.now();
   let html;
   if (view === 'all') {
@@ -171,19 +178,20 @@ async function statsHtml(env, chatId, tz, view) {
         ? `📅 <b>Last week</b> — ${ofWeek}\n\nNothing was completed. The cats pretend not to remember.`
         : '🏆 Fresh week, empty leaderboard — first chore takes the lead! (Resets every Monday.)';
     }
-    const streak = view === 'week' && s.people.length
+    const streak = view === 'week' && outright(s)
       ? streakFrom(past.results || [], tz, s.people[0][0]) : 0;
     const lines = [view === 'last'
       ? `📅 <b>Last week</b> — ${ofWeek}`
       : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
-    if (bonusLive(since, until)) lines.push(bonusBanner(tz, now));
+    const bonus = bonusLine(since, until, tz, { now });
+    if (bonus) lines.push(bonus);
     if (s.together.length) {
       lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
     }
     s.people.forEach(([who, items], i) => {
       const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
       lines.push(...personLines(who, s.solo.get(who) || [], tz,
-        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}${pointsNote(s, who, items)}${fire}`));
+        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${tallyText(s, who, items)}${soloNote(s, who, items)}${fire}`));
     });
     if (s.expired) {
       lines.push('');

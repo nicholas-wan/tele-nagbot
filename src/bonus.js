@@ -5,7 +5,9 @@
 
 export const POPPY_BONUS = {
   name: 'Poppy bonus',
-  who: '@Dodgerblueee', // roster spelling, compared case-insensitively
+  // The roster spelling, compared case-insensitively. firings.done_by keeps
+  // names, not user ids, so a change of Telegram username ends the bonus.
+  who: '@Dodgerblueee',
   multiplier: 2,
   from: Date.parse('2026-11-15T19:45:00+08:00'), // when it went live; not back-dated
   until: Date.parse('2027-07-01T00:00:00+08:00'), // nine months on from 1 Oct 2026: Wed 30 Jun 2027 is its last day
@@ -13,22 +15,22 @@ export const POPPY_BONUS = {
 
 const isBonusPerson = (who) => String(who || '').toLowerCase() === POPPY_BONUS.who.toLowerCase();
 
-// Points one person earns for one done chore.
+// Points one person earns for one done chore: after the start, up to and
+// including the end, as the boards' own windows run.
 export function pointsFor(who, doneAt) {
   return isBonusPerson(who) && doneAt > POPPY_BONUS.from && doneAt <= POPPY_BONUS.until
     ? POPPY_BONUS.multiplier : 1;
 }
 
-// Whether the bonus touches any of (since, until]: the boards show its line.
-export const bonusLive = (since, until) => POPPY_BONUS.from < until && POPPY_BONUS.until > since;
-
-// "@Dodgerblueee's chores count ×2 until Wed, Jun 30, 2027", in the
-// past tense once the window has closed (a Last week tab still shows it).
-export function bonusText(tz, now = Date.now()) {
+// The boards' one line about it, or null for a week (since, until] it does
+// not touch: "🐾 Poppy bonus: @Dodgerblueee's chores count ×2 through Wed, Jun
+// 30, 2027", in the past tense once it has ended (a Last week tab still shows
+// it). Bold in Telegram's HTML, plain for the Mini App.
+export function bonusLine(since, until, tz, { html = true, now = Date.now() } = {}) {
+  if (!(POPPY_BONUS.from < until && POPPY_BONUS.until > since)) return null;
   const last = new Date(POPPY_BONUS.until - 1)
     .toLocaleDateString('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-  const over = now >= POPPY_BONUS.until;
-  return `${POPPY_BONUS.who}'s chores ${over ? 'counted' : 'count'} ×${POPPY_BONUS.multiplier} ${over ? 'through' : 'until'} ${last}`;
+  const name = html ? `<b>${POPPY_BONUS.name}</b>` : POPPY_BONUS.name;
+  const verb = now >= POPPY_BONUS.until ? 'counted' : 'count';
+  return `🐾 ${name}: ${POPPY_BONUS.who}'s chores ${verb} ×${POPPY_BONUS.multiplier} through ${last}`;
 }
-
-export const bonusBanner = (tz, now = Date.now()) => `🐾 <b>${POPPY_BONUS.name}</b>: ${bonusText(tz, now)}`;
