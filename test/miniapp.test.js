@@ -395,8 +395,8 @@ describe('stats', () => {
     });
     const res = await call('stats/week');
     expect(res.people).toEqual([
-      { name: '@Dodgerblueee', count: 2, solo: 1 },
-      { name: '@nicholaswan', count: 1, solo: 0 },
+      { name: '@Dodgerblueee', count: 2, solo: 1, points: 2 },
+      { name: '@nicholaswan', count: 1, solo: 0, points: 1 },
     ]);
     expect(res.together).toBe(1);
     expect(res.recent.map((r) => r.who)).toEqual(['@Dodgerblueee', '@nicholaswan & @Dodgerblueee']);

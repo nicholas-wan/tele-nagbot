@@ -6,6 +6,7 @@ import { sendPrivate, editRef, answerCallback, esc } from './tg.js';
 import { weekStart, fmtShort } from './time.js';
 import { getTz, CREDIT_SEP } from './household.js';
 import { choreEmoji } from './dashboard.js';
+import { pointsFor, bonusLive, bonusBanner } from './bonus.js';
 
 const STATS_MAX_PER_PERSON = 15;
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -37,6 +38,7 @@ export function choreStatsFrom(expiredRes, historyRes) {
   const expired = (expiredRes.results || [])[0];
   const history = { results: historyRes.results || [] };
   const byPerson = new Map();
+  const score = new Map();
   const together = [];
   const solo = new Map();
   for (const h of history.results) {
@@ -51,10 +53,13 @@ export function choreStatsFrom(expiredRes, historyRes) {
     for (const who of names) {
       if (!byPerson.has(who)) byPerson.set(who, []);
       byPerson.get(who).push(h);
+      score.set(who, (score.get(who) || 0) + pointsFor(who, h.done_at));
     }
   }
-  const people = [...byPerson.entries()].sort((a, b) => b[1].length - a[1].length);
-  return { people, together, solo, expired: (expired && expired.n) || 0, total: history.results.length };
+  // Ranked by points, which equal the ✅ count unless a bonus is running.
+  const people = [...byPerson.entries()]
+    .sort((a, b) => score.get(b[0]) - score.get(a[0]) || b[1].length - a[1].length);
+  return { people, score, together, solo, expired: (expired && expired.n) || 0, total: history.results.length };
 }
 
 // Consecutive past full weeks the given person won outright (ties break it).
@@ -85,7 +90,7 @@ export function streakFrom(results, tz, leader) {
     for (const r of results) {
       if (r.done_at <= lo || r.done_at > hi) continue;
       for (const p of String(r.done_by || '').split(CREDIT_SEP)) {
-        if (p) counts.set(p, (counts.get(p) || 0) + 1);
+        if (p) counts.set(p, (counts.get(p) || 0) + pointsFor(p, r.done_at));
       }
     }
     if (!counts.size) break;
@@ -102,6 +107,12 @@ export function streakFrom(results, tz, leader) {
 function soloNote(s, who, items) {
   const solo = (s.solo.get(who) || []).length;
   return solo === items.length ? '' : ` (${solo} solo)`;
+}
+
+// "· 🐾 ×2 = 10 pts" when a bonus moved someone's points off their count.
+export function pointsNote(s, who, items) {
+  const pts = s.score.get(who) || 0;
+  return pts === items.length ? '' : ` · 🐾 ${pts} pts`;
 }
 
 // One person's block of the board: header line plus their recent items.
@@ -164,13 +175,14 @@ async function statsHtml(env, chatId, tz, view) {
     const lines = [view === 'last'
       ? `📅 <b>Last week</b> — ${ofWeek}`
       : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
+    if (bonusLive(since, until)) lines.push(bonusBanner(tz));
     if (s.together.length) {
       lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
     }
     s.people.forEach(([who, items], i) => {
       const fire = i === 0 && streak >= 1 ? ` · 🔥 ${streak + 1}-week reign` : '';
       lines.push(...personLines(who, s.solo.get(who) || [], tz,
-        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}${fire}`));
+        `${MEDALS[i] || '•'} <b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}${pointsNote(s, who, items)}${fire}`));
     });
     if (s.expired) {
       lines.push('');

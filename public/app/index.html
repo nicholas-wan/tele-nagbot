@@ -970,12 +970,15 @@ function stats() {
         `${person.solo} solo`,
         person.count - person.solo ? `${person.count - person.solo} together` : null,
         index === 0 && s.streak >= 1 ? `🔥 ${s.streak + 1}-week reign` : null,
+        person.points != null && person.points !== person.count ? `🐾 ${person.count} done, ${person.points} pts` : null,
       ].filter(Boolean).join(' · '))),
-    h('span', { class: 'count', 'aria-label': `${person.count} done` }, person.count)));
+    h('span', { class: 'count', 'aria-label': `${person.points ?? person.count} points` }, person.points ?? person.count)));
   return [
     top,
     s.total || s.expired ? [
       h('div', { class: 'label' }, `Week of ${s.week} · ${s.total} done`),
+      s.bonus ? h('div', { class: 'note', style: 'margin-bottom: 8px' },
+        `🐾 ${s.bonus.name}: ${s.bonus.who}'s chores count ×${s.bonus.multiplier} until ${s.bonus.until}`) : null,
       h('div', { class: 'section' }, people,
         s.together ? h('div', { class: 'row' }, h('span', { class: 'emo', 'aria-hidden': 'true' }, '🤝'),
           h('div', { class: 'main' }, h('div', { class: 'title' }, 'Done together')),
