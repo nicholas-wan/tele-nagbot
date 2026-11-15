@@ -271,7 +271,7 @@ async function sendWeeklyRecap(env, now, paused = null, chats = null) {
         const tie = top.length > 1;
         const streak = tie ? 0 : await winnerStreak(env, chat_id, tz, winner);
         const bonus = bonusLive(weekStart(now, tz), now);
-        if (bonus) lines.push(bonusBanner(tz));
+        if (bonus) lines.push(bonusBanner(tz, now));
         lines.push(tie
           ? `It's a tie between ${top.map(([who]) => esc(who)).join(' and ')} at ${bonus ? `${s.score.get(winner)} pts` : `${winnerItems.length} ✅`} each — the cats demand a tiebreaker chore.`
           : `🥇 ${esc(winner)} takes the week with ${tally(winner, winnerItems)}!` +

@@ -109,8 +109,8 @@ function soloNote(s, who, items) {
   return solo === items.length ? '' : ` (${solo} solo)`;
 }
 
-// "· 🐾 ×2 = 10 pts" when a bonus moved someone's points off their count.
-export function pointsNote(s, who, items) {
+// " · 🐾 10 pts" when a bonus moved someone's points off their ✅ count.
+function pointsNote(s, who, items) {
   const pts = s.score.get(who) || 0;
   return pts === items.length ? '' : ` · 🐾 ${pts} pts`;
 }
@@ -145,7 +145,8 @@ async function statsHtml(env, chatId, tz, view) {
     if (s.together.length) {
       lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
     }
-    for (const [who, items] of s.people) {
+    // The log counts chores, not points, so it is ordered by them too.
+    for (const [who, items] of [...s.people].sort((a, b) => b[1].length - a[1].length)) {
       lines.push(...personLines(who, s.solo.get(who) || [], tz,
         `<b>${esc(who)}</b> — ${items.length} ✅${soloNote(s, who, items)}`));
     }
@@ -175,7 +176,7 @@ async function statsHtml(env, chatId, tz, view) {
     const lines = [view === 'last'
       ? `📅 <b>Last week</b> — ${ofWeek}`
       : `🏆 <b>Weekly leaderboard</b> — ${ofWeek}`];
-    if (bonusLive(since, until)) lines.push(bonusBanner(tz));
+    if (bonusLive(since, until)) lines.push(bonusBanner(tz, now));
     if (s.together.length) {
       lines.push(...personLines('', s.together, tz, `🤝 <b>Done together</b> — ${s.together.length} ✅`));
     }

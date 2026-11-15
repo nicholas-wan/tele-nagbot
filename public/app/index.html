@@ -977,8 +977,7 @@ function stats() {
     top,
     s.total || s.expired ? [
       h('div', { class: 'label' }, `Week of ${s.week} · ${s.total} done`),
-      s.bonus ? h('div', { class: 'note', style: 'margin-bottom: 8px' },
-        `🐾 ${s.bonus.name}: ${s.bonus.who}'s chores count ×${s.bonus.multiplier} until ${s.bonus.until}`) : null,
+      s.bonus ? h('div', { class: 'note', style: 'margin-bottom: 8px' }, s.bonus) : null,
       h('div', { class: 'section' }, people,
         s.together ? h('div', { class: 'row' }, h('span', { class: 'emo', 'aria-hidden': 'true' }, '🤝'),
           h('div', { class: 'main' }, h('div', { class: 'title' }, 'Done together')),

@@ -1,6 +1,7 @@
-// The Poppy bonus (15 Nov 2026): @Dodgerblueee's chores score ×2 for a while.
+// The Poppy bonus: @Dodgerblueee's chores score ×2 from 15 Nov 2026, when it
+// went live, through Wed 30 Jun 2027 (nine months on from 1 Oct).
 import { it, expect, vi, afterEach } from 'vitest';
-import { POPPY_BONUS, pointsFor, bonusLive, bonusBanner } from '../src/bonus.js';
+import { POPPY_BONUS, pointsFor, bonusLive, bonusBanner, bonusText } from '../src/bonus.js';
 import { choreStatsFrom, streakFrom } from '../src/stats.js';
 
 const IN = POPPY_BONUS.from + 3600000;
@@ -37,15 +38,24 @@ it('ranks the board by points, counting her share of a chore done together', () 
 });
 
 it('counts the bonus in the winning streak', () => {
-  vi.spyOn(Date, 'now').mockReturnValue(POPPY_BONUS.until + 2 * 86400000); // Wed 25 Nov
-  const lastWeek = POPPY_BONUS.until - 2 * 86400000;
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-25T12:00:00+08:00')); // Wed
+  const lastWeek = Date.parse('2026-11-19T12:00:00+08:00'); // the Thursday before
   const past = [['@nicholaswan', lastWeek], ['@nicholaswan', lastWeek], ['@Dodgerblueee', lastWeek], ['@Dodgerblueee', lastWeek]]
     .map(([done_by, done_at]) => ({ done_by, done_at }));
   expect(streakFrom(past, 'Asia/Singapore', '@Dodgerblueee')).toBe(1);
 });
 
-it('says when it ends and only shows on weeks it touches', () => {
-  expect(bonusBanner('Asia/Singapore')).toBe('🐾 <b>Poppy bonus</b>: @Dodgerblueee\'s chores count ×2 until Sun, Nov 22');
+it('runs from tonight, not back-dated, to the end of 30 Jun 2027, Singapore time', () => {
+  expect(pointsFor('@Dodgerblueee', Date.parse('2026-10-01T09:00:00+08:00'))).toBe(1);
+  expect(pointsFor('@Dodgerblueee', Date.parse('2026-11-15T19:00:00+08:00'))).toBe(1);
+  expect(pointsFor('@Dodgerblueee', Date.parse('2026-11-15T21:00:00+08:00'))).toBe(2);
+  expect(pointsFor('@Dodgerblueee', Date.parse('2027-06-30T23:59:00+08:00'))).toBe(2);
+  expect(pointsFor('@Dodgerblueee', Date.parse('2027-07-01T00:01:00+08:00'))).toBe(1);
+});
+
+it('says when it ends, in the past tense once it has, and only on weeks it touches', () => {
+  expect(bonusBanner('Asia/Singapore', IN)).toBe('🐾 <b>Poppy bonus</b>: @Dodgerblueee\'s chores count ×2 until Wed, Jun 30, 2027');
+  expect(bonusText('Asia/Singapore', AFTER)).toBe('@Dodgerblueee\'s chores counted ×2 through Wed, Jun 30, 2027');
   expect(bonusLive(POPPY_BONUS.from - 7 * 86400000, BEFORE)).toBe(false);
   expect(bonusLive(BEFORE, IN)).toBe(true);
   expect(bonusLive(POPPY_BONUS.until, AFTER)).toBe(false);

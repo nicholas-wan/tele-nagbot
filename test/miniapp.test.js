@@ -395,9 +395,11 @@ describe('stats', () => {
     });
     const res = await call('stats/week');
     expect(res.people).toEqual([
+      // 10 Oct is before the Poppy bonus, so points are the plain count.
       { name: '@Dodgerblueee', count: 2, solo: 1, points: 2 },
       { name: '@nicholaswan', count: 1, solo: 0, points: 1 },
     ]);
+    expect(res.bonus).toBe(null);
     expect(res.together).toBe(1);
     expect(res.recent.map((r) => r.who)).toEqual(['@Dodgerblueee', '@nicholaswan & @Dodgerblueee']);
   });

@@ -28,7 +28,7 @@ import {
 } from './chores.js';
 import { parseRemind, ParseError, NoTimeError, DEFAULT_NAGS } from './parse.js';
 import { choreStatsStatements, choreStatsFrom, streakStatement, streakFrom } from './stats.js';
-import { POPPY_BONUS, bonusLive } from './bonus.js';
+import { POPPY_BONUS, bonusLive, bonusText } from './bonus.js';
 import { parentChoicesIn, setParent } from './nesting.js';
 import { chatReads } from './context.js';
 
@@ -485,8 +485,7 @@ const routes = [
         name, count: items.length, solo: (s.solo.get(name) || []).length, points: s.score.get(name),
       })),
       bonus: bonusLive(since, view === 'last' ? weekStart(Date.now(), tz) : Date.now())
-        ? { name: POPPY_BONUS.name, who: POPPY_BONUS.who, multiplier: POPPY_BONUS.multiplier, until: fmtShort(POPPY_BONUS.until - 1, tz).replace(/,.*$/, '') }
-        : null,
+        ? `🐾 ${POPPY_BONUS.name}: ${bonusText(tz)}` : null,
       together: s.together.length, expired: s.expired, total: s.total, recent,
     });
   }, { gate: 'stats' }],
