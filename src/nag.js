@@ -410,12 +410,22 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
           { silent: true, ttl: RECEIPT_TTL_MS });
       }
     };
-    // The nag's own sticker goes and the celebration arrives alongside.
-    await Promise.all([
-      card(), receipt(),
+    // The nag's own sticker goes and the celebration arrives alongside. The
+    // celebration then takes the nag sticker's place in last_sticker_id, so
+    // ↩️ Not done deletes it: an undo and a second Done used to leave two
+    // celebrations in the chat. Written only while this Done still stands; an
+    // undo that got in first means the sticker is already stale, and it goes.
+    const [celebration] = await Promise.all([
       pick ? sendCelebration(env, nagChat(firing), pick) : null,
+      card(), receipt(),
       firing.last_sticker_id ? deleteMessage(env, nagChat(firing), firing.last_sticker_id) : null,
     ]);
+    if (celebration || firing.last_sticker_id) {
+      const kept = await env.DB.prepare(
+        "UPDATE firings SET last_sticker_id = ? WHERE id = ? AND state = 'done' AND done_at = ?"
+      ).bind(celebration, firing.id, firing.done_at ?? now).run();
+      if (celebration && !kept.meta.changes) await deleteMessage(env, nagChat(firing), celebration);
+    }
   };
   await Promise.all([stash(), later(env, show)]);
   await updateDashboard(env, firing.chat_id);

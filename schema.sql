@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS firings (
   next_nag_at INTEGER,
   snoozes_used INTEGER NOT NULL DEFAULT 0,
   last_message_id INTEGER,
-  last_sticker_id INTEGER,              -- sticker sent with the first nag, cleaned up later
+  last_sticker_id INTEGER,              -- the firing's sticker on screen: the first nag's, then once done its celebration (↩️ Not done deletes it)
   cat TEXT,                             -- which cat was on that sticker; re-nag lines match
   done_by TEXT,
   done_at INTEGER,

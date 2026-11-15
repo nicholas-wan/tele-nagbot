@@ -404,6 +404,16 @@ export async function undoCompletion(env, firing, by, tz, { onClaim, announce = 
     await env.DB.prepare('DELETE FROM trash WHERE id = ?').bind(trashed.id).run();
   }
   firing = await env.DB.prepare('SELECT * FROM firings WHERE id = ?').bind(firing.id).first() || firing;
+  // The Done's celebration sticker goes with the Done (completeFiring left it
+  // in last_sticker_id), so a second Done does not leave two in the chat.
+  if (firing.last_sticker_id) {
+    await Promise.all([
+      deleteMessage(env, nagChat(firing), firing.last_sticker_id),
+      env.DB.prepare('UPDATE firings SET last_sticker_id = NULL WHERE id = ? AND last_sticker_id = ?')
+        .bind(firing.id, firing.last_sticker_id).run(),
+    ]);
+    firing = { ...firing, last_sticker_id: null };
+  }
   const [html, markup] = firingCard(r, firing, tz, now);
   await redrawNag(env, firing, html, markup);
   // The receipt had been given two hours; as a nag again it gets its day back.

@@ -981,6 +981,49 @@ describe('the chat\'s timezone and stickers', () => {
     expect(ops.some(cached)).toBe(false);
   });
 
+  // 15 Nov 2026: ↩️ Not done left the Done's sticker, and a second Done added
+  // another, so an undo and a redo put two celebrations in the chat.
+  it('go with ↩️ Not done, so an undo and a second Done leave one celebration', async () => {
+    await tap('d:5');
+    await settle();
+    const first = firing().last_sticker_id;
+    expect(first).toBeGreaterThan(0);
+    expect(calls.filter((c) => c.method === 'sendSticker')).toHaveLength(1);
+
+    await tap('nd:5');
+    await settle();
+    expect(firing().state).toBe('nagging');
+    expect(firing().last_sticker_id).toBe(null);
+    expect(calls.filter((c) => c.method === 'deleteMessage').map((c) => c.body.message_id)).toContain(first);
+
+    await tap('d:5');
+    await settle();
+    const second = firing().last_sticker_id;
+    expect(second).toBeGreaterThan(first);
+    expect(calls.filter((c) => c.method === 'sendSticker')).toHaveLength(2);
+    expect(calls.filter((c) => c.method === 'deleteMessage').map((c) => c.body.message_id)).not.toContain(second);
+  });
+
+  it('is taken straight back when the undo beats it to the database', async () => {
+    // The undo lands while the sticker is on its way: the Done finds itself
+    // taken back when it goes to record the sticker, and deletes it.
+    const inner = globalThis.fetch;
+    let stickerId = null;
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const res = await inner(url, init);
+      if (String(url).endsWith('/sendSticker')) {
+        sql.exec("UPDATE firings SET state = 'nagging', done_by = NULL, done_at = NULL WHERE id = 5");
+        stickerId = (await res.clone().json()).result.message_id;
+      }
+      return res;
+    }));
+    await tap('d:5');
+    await settle();
+    expect(stickerId).toBeGreaterThan(0);
+    expect(calls.filter((c) => c.method === 'deleteMessage').map((c) => c.body.message_id)).toContain(stickerId);
+    expect(firing().last_sticker_id).toBe(null);
+  });
+
   it('make a typed /chore one round trip after the intake', async () => {
     await worker.fetch(new Request('https://nag.test/webhook', {
       method: 'POST',

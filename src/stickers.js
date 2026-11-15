@@ -112,13 +112,18 @@ export async function pickCelebration(env, chatId, seed) {
   }
 }
 
-// Celebration stickers are pure décor — a couple of hours is plenty.
+// Celebration stickers are pure décor — a couple of hours is plenty. Returns
+// the sticker's message id (null if it did not go), so ↩️ Not done can take
+// the celebration back with the Done.
 export async function sendCelebration(env, chatId, pick) {
   try {
-    await recordSentMessage(env, chatId, await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id, disable_notification: true }),
+    const res = await recordSentMessage(env, chatId,
+      await tg(env, 'sendSticker', { chat_id: chatId, sticker: pick.id, disable_notification: true }),
       { ttlMs: RECEIPT_TTL_MS });
+    return (res && res.ok && res.result && res.result.message_id) || null;
   } catch (e) {
     console.log(`sendCelebration failed: ${e}`);
+    return null;
   }
 }
 
