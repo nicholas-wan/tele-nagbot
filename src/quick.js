@@ -13,9 +13,10 @@ import { UNDO_WINDOW_MS } from './chores.js';
 
 export const QUICK_MAX = 8;
 const QUICK_TEXT_MAX = 32;
-// Two taps of the same button by the same person this close together are one
-// job tapped twice, not two jobs.
-const DOUBLE_TAP_MS = 60000;
+// The same job by the same person counts once an hour: a double tap is one
+// job, and the pad's eight buttons could otherwise be tapped round every
+// minute for eight points each time (pen test, 16 Nov 2026).
+export const REPEAT_MS = 3600000;
 
 // "🧹 Vacuum": the board's keyword emoji, or the one the text leads with.
 export function quickLabel(text) {
@@ -29,10 +30,19 @@ export function quickLabel(text) {
 // button finds "vacuum", and "/quick add 🧹 vacuum" is not a second Vacuum.
 // An emoji of the person's own choosing ("🪴 water plants") stays.
 export function quickText(typed) {
-  const text = String(typed || '').replace(/\s+/g, ' ').trim();
+  // Invisible format characters (zero-width spaces, joiners) at either end go
+  // too; inside the text they stay, since emoji sequences are built on them.
+  const text = String(typed || '').replace(/\s+/g, ' ').replace(/^[\p{Cf}\s]+|[\p{Cf}\s]+$/gu, '');
   const m = text.match(/^(\p{Extended_Pictographic}️?)\s+(.+)$/u);
   return m && choreEmoji(m[2]).replace(/️/g, '') === m[1].replace(/️/g, '') ? m[2] : text;
 }
+
+// Something a person can see on a button.
+const visible = (text) => /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(text);
+
+// The same job in any case, in any script: SQLite's NOCASE folds ASCII only,
+// so "Äpfel" and "äpfel" were two buttons.
+const sameJob = (a, b) => a.normalize('NFKC').toLocaleLowerCase() === b.normalize('NFKC').toLocaleLowerCase();
 
 const PAD_HTML = '⚡ <b>Quick log</b>\nDone one of these? Tap it: 1 ✅ for whoever taps.';
 
@@ -134,10 +144,14 @@ export async function cmdQuick(env, ctx, args) {
   const m = typed.match(/^(add|remove|rm|del|delete)\s+(.+)$/i);
   if (!m) return sendPrivate(env, ctx, USAGE);
   const text = quickText(m[2]);
+  const { results: rows } = await env.DB.prepare('SELECT id, text FROM quick_taps WHERE chat_id = ?').bind(chatId).all();
+  const match = (rows || []).find((r) => sameJob(r.text, text));
   if (/^add$/i.test(m[1])) {
+    if (!visible(text)) return sendPrivate(env, ctx, 'That job has nothing to show on a button.');
     if (text.length > QUICK_TEXT_MAX) {
       return sendPrivate(env, ctx, `Keep it to ${QUICK_TEXT_MAX} characters or fewer, so it fits a button.`);
     }
+    if (match) return sendPrivate(env, ctx, `${esc(quickLabel(match.text))} is already on the pad.`);
     // Under the cap and not already there, in one conditional write.
     const added = await env.DB.prepare(
       `INSERT INTO quick_taps (chat_id, text, created_at)
@@ -153,12 +167,12 @@ export async function cmdQuick(env, ctx, args) {
     const res = await drawPad(env, chatId);
     return sendPrivate(env, ctx, `Added ${esc(quickLabel(text))} to the quick log pad.${drawNote(res)}`);
   }
-  const removed = await env.DB.prepare('DELETE FROM quick_taps WHERE chat_id = ? AND text = ? COLLATE NOCASE')
-    .bind(chatId, text).run();
-  if (!removed.meta.changes) return sendPrivate(env, ctx, `No ${esc(text)} button on the pad.`);
+  const removed = match && await env.DB.prepare('DELETE FROM quick_taps WHERE id = ? AND chat_id = ?')
+    .bind(match.id, chatId).run();
+  if (!removed || !removed.meta.changes) return sendPrivate(env, ctx, `No ${esc(text)} button on the pad.`);
   const res = await drawPad(env, chatId);
   return sendPrivate(env, ctx,
-    `Took ${esc(quickLabel(text))} off the quick log pad. What it logged stays logged.${res.empty ? '' : drawNote(res)}`);
+    `Took ${esc(quickLabel(match.text))} off the quick log pad. What it logged stays logged.${res.empty ? '' : drawNote(res)}`);
 }
 
 function receiptButtons(firingId) {
@@ -183,14 +197,14 @@ export async function handleQuickCallback(env, cb, ctx, ref) {
            AND NOT EXISTS (SELECT 1 FROM firings f WHERE f.chat_id = qt.chat_id AND f.reminder_id = ?
              AND f.state = 'done' AND f.reminder_text = qt.text AND f.done_by = ? AND f.done_at > ?)
          RETURNING id, reminder_text`
-      ).bind(QUICK_TAP_ID, now, by, now, +tap[1], chatId, QUICK_TAP_ID, by, now - DOUBLE_TAP_MS).run(),
+      ).bind(QUICK_TAP_ID, now, by, now, +tap[1], chatId, QUICK_TAP_ID, by, now - REPEAT_MS).run(),
       getTz(env, chatId),
     ]);
     const log = logged.results && logged.results[0];
     if (!log) {
       const button = await env.DB.prepare('SELECT 1 FROM quick_taps WHERE id = ? AND chat_id = ?')
         .bind(+tap[1], chatId).first();
-      if (button) return answerCallback(env, cb.id, 'Already logged that a moment ago.');
+      if (button) return answerCallback(env, cb.id, 'You logged that in the last hour already.');
       await answerCallback(env, cb.id, 'That button is gone.');
       return drawPad(env, chatId);
     }

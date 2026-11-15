@@ -1024,6 +1024,36 @@ describe('the chat\'s timezone and stickers', () => {
     expect(firing().last_sticker_id).toBe(null);
   });
 
+  it('orphans none when Done, Not done and Done again share one millisecond', async () => {
+    // Pen test, 16 Nov 2026: the first Done's sticker is held until the undo
+    // and a second Done (same frozen clock, so the same done_at) are in.
+    const inner = globalThis.fetch;
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let first = true;
+    const sent = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const sticker = String(url).endsWith('/sendSticker');
+      if (sticker && first) { first = false; await gate; }
+      const res = await inner(url, init);
+      if (sticker) sent.push((await res.clone().json()).result.message_id);
+      return res;
+    }));
+    const pause = async (n) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 5)); };
+    await tap('d:5');
+    await pause(5);
+    await tap('nd:5');
+    await pause(5);
+    await tap('d:5');
+    await pause(10);
+    release();
+    await settle();
+    const kept = firing().last_sticker_id;
+    const deleted = calls.filter((c) => c.method === 'deleteMessage').map((c) => c.body.message_id);
+    expect(sent).toHaveLength(2);
+    expect(sent.filter((id) => id !== kept && !deleted.includes(id))).toEqual([]);
+  });
+
   it('make a typed /chore one round trip after the intake', async () => {
     await worker.fetch(new Request('https://nag.test/webhook', {
       method: 'POST',

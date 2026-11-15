@@ -41,8 +41,12 @@ export function primeTz(env, chatId, tz) {
   byChat.set(chatId, { tz: tz || 'Asia/Singapore', at: Date.now() });
 }
 
+// "@username", else the first name. A first name may not pose as a username
+// ("@Dodgerblueee" as a display name was credited as her, bonus and all), so
+// its leading @s go.
 export function senderName(from) {
-  return from.username ? `@${from.username}` : from.first_name || 'someone';
+  if (from.username) return `@${from.username}`;
+  return String(from.first_name || '').replace(/^[\s@＠]+/u, '').trim() || 'someone';
 }
 
 // Typed shortcuts for assignees, from the NICKNAMES var: "nic=@nicholaswan,

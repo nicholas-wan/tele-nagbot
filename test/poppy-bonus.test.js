@@ -53,9 +53,10 @@ describe('the window', () => {
     expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN }, '@Dodgerblueee')).toBe(1);
   });
 
-  it('doubles only her chores, whatever the case', () => {
+  it('doubles only her chores, spelled as her username', () => {
     expect(pointsFor({ done_by: '@Dodgerblueee', done_at: IN, reminder_id: 8 }, '@Dodgerblueee')).toBe(2);
-    expect(pointsFor({ done_by: '@dodgerblueee', done_at: IN, reminder_id: 8 }, '@dodgerblueee')).toBe(2);
+    // Exact: only her username starts with @, so another spelling is not her.
+    expect(pointsFor({ done_by: '@dodgerblueee', done_at: IN, reminder_id: 8 }, '@dodgerblueee')).toBe(1);
     expect(pointsFor({ done_by: '@nicholaswan', done_at: IN, reminder_id: 8 }, '@nicholaswan')).toBe(1);
     expect(pointsFor({ done_by: '@Dodgerblueee', done_at: BEFORE, reminder_id: 8 }, '@Dodgerblueee')).toBe(1);
     expect(pointsFor({ done_by: '@Dodgerblueee', done_at: AFTER, reminder_id: 8 }, '@Dodgerblueee')).toBe(1);

@@ -652,11 +652,19 @@ export async function completeEarly(env, r, credit, tz, { onClaim } = {}) {
     : nextOccurrence(r.schedule_kind, detail, r.next_fire_at, tz);
   // D1 batches are transactions. Each dependent statement is gated by the
   // preceding write, so a lost slot is a no-op and any error rolls it all back.
+  // A chore finished within half a cycle is not done early again: each Done
+  // early consumes the next slot, so ten /done dishes used to log ten chores
+  // and skip ten days of nags, and an interval chore (whose restart counts
+  // from now) could be logged without end (pen test, 16 Nov 2026). Half the
+  // gap to the slot after next: 12h for a daily chore, 3.5 days for a weekly.
+  const gap = r.schedule_kind === 'interval' && detail.days ? detail.days * 86400000
+    : nextFireAt != null && r.next_fire_at != null ? nextFireAt - r.next_fire_at : 0;
+  const recent = `NOT EXISTS (SELECT 1 FROM firings WHERE reminder_id = ? AND state = 'done' AND done_at > ?)`;
   const consume = r.schedule_kind === 'once'
-    ? env.DB.prepare('DELETE FROM reminders WHERE id = ? AND next_fire_at = ?')
-        .bind(r.id, r.next_fire_at)
-    : env.DB.prepare('UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ?')
-        .bind(nextFireAt, r.id, r.next_fire_at);
+    ? env.DB.prepare(`DELETE FROM reminders WHERE id = ? AND next_fire_at = ? AND ${recent}`)
+        .bind(r.id, r.next_fire_at, r.id, now - gap / 2)
+    : env.DB.prepare(`UPDATE reminders SET next_fire_at = ? WHERE id = ? AND next_fire_at = ? AND ${recent}`)
+        .bind(nextFireAt, r.id, r.next_fire_at, r.id, now - gap / 2);
   const nested = readNested(env, r.chat_id);
   const [claim, ins] = await env.DB.batch([
     consume,

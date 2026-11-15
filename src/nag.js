@@ -422,8 +422,8 @@ export async function completeFiring(env, firing, reminder, byName, tz, { onClai
     ]);
     if (celebration || firing.last_sticker_id) {
       const kept = await env.DB.prepare(
-        "UPDATE firings SET last_sticker_id = ? WHERE id = ? AND state = 'done' AND done_at = ?"
-      ).bind(celebration, firing.id, firing.done_at ?? now).run();
+        "UPDATE firings SET last_sticker_id = ? WHERE id = ? AND state = 'done' AND done_at = ? AND last_sticker_id IS ?"
+      ).bind(celebration, firing.id, firing.done_at ?? now, firing.last_sticker_id ?? null).run();
       if (celebration && !kept.meta.changes) await deleteMessage(env, nagChat(firing), celebration);
     }
   };

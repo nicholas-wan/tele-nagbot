@@ -9,7 +9,7 @@ import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc, okBut
 import { parseRemind, ParseError, NoTimeError, refusalHtml } from './parse.js';
 import { nextOccurrence, fmtLocal, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, householdNames, householdNamesFrom, canonName,
-         creditTogether, rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP } from './household.js';
+         creditTogether, rememberMember, forgetMember, isMember, nicknames, CREDIT_SEP, QUICK_TAP_ID } from './household.js';
 import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firingCard,
          editNag, deleteNag, sendNag, deleteNagRef, nagChat, isEphemeralNag,
          isHouseholdDeferred, nagBelongsTo,
@@ -18,7 +18,7 @@ import { nagButtons, snoozedButtons, snoozeButtons, nagHtml, snoozedHtml, firing
 import { updateDashboard, choreListHtml, fmtWhen, clip } from './dashboard.js';
 import { findReminder, createReminder, confirmNewChore, fireIfDue,
          deleteReminder, deleteTapped, removeReminder, restoreReminder, undoCompletion, undoEarly, earlyReceipt,
-         setReminderPaused, completeEarly, wakeChat, skipPastPostponement, undoReads } from './chores.js';
+         setReminderPaused, completeEarly, wakeChat, skipPastPostponement, undoReads, UNDO_WINDOW_MS } from './chores.js';
 import { handleEditorCallback, handleManageCallback, editorText, editorButtons } from './manage.js';
 import { startWizard, startTextPrompt, tryDraftTime, handleWizardCallback } from './wizard.js';
 import { cmdStats, handleStatsCallback } from './stats.js';
@@ -1031,12 +1031,23 @@ async function handleCallback(env, cb) {
       coveredStatement(env, chatId, +gm[1]),
     ]), getTz(env, chatId)]);
     const firing = (f.results || [])[0];
-    if (!firing) return answerCallback(env, cb.id, 'That one is gone.');
+    if (!firing || firing.reminder_id === QUICK_TAP_ID) return answerCallback(env, cb.id, 'That one is gone.');
+    // Only the person credited may share their credit, and only while the
+    // receipt is live: anyone could once halve anyone's solo Done, last
+    // week's included, and swing the board (pen test, 16 Nov 2026).
     const names = String(firing.done_by || '').split(CREDIT_SEP).filter(Boolean);
+    if (names.length !== 1 || names[0] !== senderName(cb.from)) {
+      return answerCallback(env, cb.id, names.length === 1 ? `Only ${names[0]} can share that credit.` : 'Already shared 🤝');
+    }
+    if (firing.done_at == null || Date.now() - firing.done_at > UNDO_WINDOW_MS) {
+      return answerCallback(env, cb.id, 'Too late to change that one.');
+    }
     const { roster } = householdNamesFrom(m.results);
-    const credit = creditTogether(names[0] || senderName(cb.from), [...names.slice(1), ...roster]);
-    await env.DB.prepare("UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done'")
-      .bind(credit, firing.id).run();
+    const credit = creditTogether(names[0], [...roster]);
+    const widened = await env.DB.prepare(
+      "UPDATE firings SET done_by = ? WHERE id = ? AND state = 'done' AND done_by = ? AND reminder_id != ?"
+    ).bind(credit, firing.id, firing.done_by, QUICK_TAP_ID).run();
+    if (!widened.meta.changes) return answerCallback(env, cb.id, 'That one changed meanwhile.');
     await answerCallback(env, cb.id, 'Shared credit 🤝');
     const next = (n.results || [])[0] || null;
     const covered = coveredNamesFrom((c.results || [])[0] || null);

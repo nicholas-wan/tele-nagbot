@@ -273,7 +273,7 @@ describe('chat UX', () => {
               async first() {
                 if (sql.includes('FROM firings WHERE id')) {
                   return { id: 27, chat_id: 1, reminder_id: 8, state: 'done',
-                    done_by: '@nick', reminder_text: 'cat fountain' };
+                    done_by: '@nick', done_at: Date.now() - 60000, reminder_text: 'cat fountain' };
                 }
                 if (sql.includes('SELECT next_fire_at')) return { next_fire_at: Date.now() + 86400000 };
                 if (sql.includes('SELECT tz')) return { tz: 'Asia/Singapore' };
@@ -294,7 +294,7 @@ describe('chat UX', () => {
     });
     await handleUpdate({ BOT_TOKEN: 'token', ALLOWED_CHATS: '1', DB: db }, {
       callback_query: {
-        id: 'cb7', data: 'g:27', from: { id: 2, first_name: 'Nick' },
+        id: 'cb7', data: 'g:27', from: { id: 2, first_name: 'Nick', username: 'nick' },
         message: { message_id: 55, chat: { id: 1 }, text: 'receipt' },
       },
     });

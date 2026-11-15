@@ -211,11 +211,13 @@ function assigneeUserIdFrom(r, roster) {
 // person. The leaderboard keeps its own scored filter in stats.js.
 //
 // The tally is counted in SQL, one row per distinct credit, rather than every
-// done row of the last six months coming back to be counted here.
+// done row of the last six months coming back to be counted here. Quick-log
+// taps (reminder_id 0) are left out: one unverified tap used to buy the tapper
+// out of the next rotating chore (pen test, 16 Nov 2026).
 function rotationStatement(env, chatId, tz) {
   return env.DB.prepare(
     `SELECT done_by, COUNT(*) AS total, SUM(CASE WHEN done_at > ? THEN 1 ELSE 0 END) AS week
-     FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL GROUP BY done_by`
+     FROM firings WHERE chat_id = ? AND state = 'done' AND done_by IS NOT NULL AND reminder_id != 0 GROUP BY done_by`
   ).bind(weekStart(Date.now(), tz), chatId);
 }
 

@@ -410,6 +410,9 @@ describe('firing lifecycle fixes', () => {
         zonedEpoch(2026, 9, 18, 19, 0, TZ),
         r.id,
         due,
+        // Not done within half its 14-day cycle already (pen test, 16 Nov 2026).
+        r.id,
+        markedAt - 7 * 86400000,
       ]);
     });
   });

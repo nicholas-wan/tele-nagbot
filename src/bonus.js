@@ -8,15 +8,16 @@ import { CREDIT_SEP, QUICK_TAP_ID } from './household.js';
 
 export const POPPY_BONUS = {
   name: 'Poppy bonus',
-  // The roster spelling, compared case-insensitively. firings.done_by keeps
-  // names, not user ids, so a change of Telegram username ends the bonus.
+  // The roster spelling, matched exactly: done_by keeps names, not user ids,
+  // and only a username starts with @ (senderName), so nobody else can match.
+  // A change of Telegram username ends the bonus.
   who: '@Dodgerblueee',
   multiplier: 2,
   from: Date.parse('2026-11-15T19:45:00+08:00'), // when it went live; not back-dated
   until: Date.parse('2027-07-01T00:00:00+08:00'), // nine months on from 1 Oct 2026: Wed 30 Jun 2027 is its last day
 };
 
-const isBonusPerson = (who) => String(who || '').toLowerCase() === POPPY_BONUS.who.toLowerCase();
+const isBonusPerson = (who) => who === POPPY_BONUS.who;
 
 // Points `who` earns for one done firing row ({ done_by, done_at,
 // reminder_id }): doubled only for a chore she did alone, after the start, up

@@ -129,14 +129,17 @@ describe('a tap', () => {
     expect(sentTo('editMessageText').at(-1).body.text).toBe('↩️ <b>🧹 Vacuum</b> — not done after all, says @nicholaswan.');
   });
 
-  it('counts a double tap once, but the same job by someone else twice', async () => {
+  it('counts the same job by the same person once an hour, but by someone else twice', async () => {
     await setUp();
     const id = buttons()[1].id;
     await tap(`q:${id}`);
     await tap(`q:${id}`);
-    expect(toast()).toBe('Already logged that a moment ago.');
+    expect(toast()).toBe('You logged that in the last hour already.');
     await tap(`q:${id}`, nick);
-    Date.now.mockReturnValue(NOW + 2 * 60000);
+    Date.now.mockReturnValue(NOW + 59 * 60000);
+    await tap(`q:${id}`);
+    expect(toast()).toBe('You logged that in the last hour already.');
+    Date.now.mockReturnValue(NOW + 61 * 60000);
     await tap(`q:${id}`);
     expect(quickLogs().map((f) => f.done_by)).toEqual(['@Dodgerblueee', '@nicholaswan', '@Dodgerblueee']);
   });
