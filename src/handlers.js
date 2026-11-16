@@ -1117,6 +1117,10 @@ async function handleCallback(env, cb) {
     const { won, firing, reminder: r, removed } = await deleteTapped(env, +xm[1], cb.message.chat.id, cb.from.id);
     if (!won) {
       if (!firing) return answerCallback(env, cb.id, 'Already gone.');
+      // 🗑 is a live nag's button. On a firing that is done or expired (an old
+      // card, a forged tap) it used to delete the chore anyway (pen test,
+      // 16 Nov 2026); deleting a chore on purpose is the board's Manage.
+      if (firing.state !== 'nagging') return answerCallback(env, cb.id, 'Already handled 👍 Delete it from the board if you meant to.');
       if (!nagBelongsTo(firing, cb.from)) return answerCallback(env, cb.id, NOT_YOUR_NAG);
       return answerCallback(env, cb.id, 'That chore is already gone.');
     }

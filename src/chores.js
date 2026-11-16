@@ -290,7 +290,7 @@ export async function deleteTapped(env, firingId, chatId, userId) {
       `INSERT INTO trash (chat_id, payload, created_at)
        SELECT r.chat_id, json_object(${REMINDER_COLUMNS.map((c) => `'${c}', r.${c}`).join(', ')}), ?
        FROM reminders r JOIN firings f ON f.reminder_id = r.id AND r.chat_id = f.chat_id
-       WHERE f.id = ? AND f.chat_id = ?
+       WHERE f.id = ? AND f.chat_id = ? AND f.state = 'nagging'
          AND (f.last_message_ephemeral = 0 OR f.nag_user_id IS NULL OR f.nag_user_id = ?)`
     ).bind(Date.now(), firingId, chatId, userId),
     env.DB.prepare(`DELETE FROM reminders WHERE id = ${reminderOf} AND changes() = 1`).bind(firingId, chatId),
