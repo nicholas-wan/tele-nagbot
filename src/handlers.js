@@ -5,7 +5,7 @@
 
 import { sendMessage, deleteMessage, editReplyMarkup, answerCallback, esc, okButton,
          replyCtx, sendPrivate, editRef, deleteRef, callbackRef,
-         isPublicMessage, sendPrivateLong, keepSourceMessage, tg } from './tg.js';
+         isPublicMessage, sendPrivateLong, keepSourceMessage, tg, recordForSweep } from './tg.js';
 import { parseRemind, ParseError, NoTimeError, refusalHtml } from './parse.js';
 import { nextOccurrence, fmtLocal, deferQuietHours } from './time.js';
 import { getTz, senderName, isScored, householdRoster, householdNames, householdNamesFrom, canonName,
@@ -147,6 +147,17 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
 
   const msg = update.message;
   if (!msg) return;
+  // "Nag-Bot pinned this message": Telegram posts a notice for each of the
+  // bot's own pins (the board, the quick log pad) and the bot never sent it,
+  // so nothing recorded it and it stayed forever. It goes on the daily sweep
+  // like everything else the bot leaves in the chat. A person's pin, and its
+  // notice, are theirs to keep.
+  if (msg.pinned_message) {
+    if (from && from.is_bot && String(from.id) === String(env.BOT_TOKEN || '').split(':')[0]) {
+      await recordForSweep(env, chat.id, msg.message_id);
+    }
+    return;
+  }
   if (msg.new_chat_members && msg.new_chat_members.length) return handleNewMembers(env, msg);
   if (!msg.text) return;
   if (!msg.text.startsWith('/')) return handlePlainText(env, msg);
