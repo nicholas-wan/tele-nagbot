@@ -8,7 +8,7 @@ import { sendMessage, editMessage, deleteMessage, pinMessage, unpinMessage, answ
          sendPrivate, editRef, messageIsGone, esc, okButton, RECEIPT_TTL_MS } from './tg.js';
 import { senderName, QUICK_TAP_ID, getTz } from './household.js';
 import { choreEmoji } from './dashboard.js';
-import { fmtClock } from './time.js';
+import { fmtClock, fmtLocal } from './time.js';
 import { UNDO_WINDOW_MS } from './chores.js';
 
 export const QUICK_MAX = 8;
@@ -46,6 +46,20 @@ const sameJob = (a, b) => a.normalize('NFKC').toLocaleLowerCase() === b.normaliz
 
 const PAD_HTML = '⚡ <b>Quick log</b>\nDone one of these? Tap it: 1 ✅ for whoever taps.';
 
+// The pad lists every tap of the last week under its buttons, newest first:
+// the receipts are swept after two hours, and this is where the household
+// looks back at who did what and when. Capped so the pin stays readable.
+export const LOG_DAYS = 7;
+export const LOG_LINES = 20;
+
+function padHtml(logs, total, tz) {
+  const lines = logs.slice(0, LOG_LINES).map((l) =>
+    `${esc(quickLabel(l.reminder_text || 'job'))} — ${esc(l.done_by || 'someone')}, ${fmtLocal(l.done_at, tz)}`);
+  if (!lines.length) lines.push(`<i>Nothing logged in the last ${LOG_DAYS} days.</i>`);
+  else if (total > lines.length) lines.push(`<i>…and ${total - lines.length} more</i>`);
+  return `${PAD_HTML}\n\n<b>Last ${LOG_DAYS} days</b>\n${lines.join('\n')}`;
+}
+
 function padButtons(rows) {
   const keyboard = [];
   for (let i = 0; i < rows.length; i += 2) {
@@ -73,12 +87,18 @@ async function pinUnderBoard(env, chatId, padId, boardId) {
 // blip never pins a second one. Kept off the sweep (keep: true); the other
 // message ?board's repair spares. Returns { ok, pinned, empty }.
 export async function drawPad(env, chatId, { repin = false } = {}) {
-  const [taps, settings] = await env.DB.batch([
+  const since = Date.now() - LOG_DAYS * 86400000;
+  const logWhere = `FROM firings WHERE chat_id = ? AND reminder_id = ? AND state = 'done' AND done_at > ?`;
+  const [taps, settings, logs, count] = await env.DB.batch([
     env.DB.prepare('SELECT id, text FROM quick_taps WHERE chat_id = ? ORDER BY id').bind(chatId),
-    env.DB.prepare('SELECT quick_msg_id, dashboard_msg_id FROM settings WHERE chat_id = ?').bind(chatId),
+    env.DB.prepare('SELECT quick_msg_id, dashboard_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
+    env.DB.prepare(`SELECT reminder_text, done_by, done_at ${logWhere} ORDER BY done_at DESC, id DESC LIMIT ?`)
+      .bind(chatId, QUICK_TAP_ID, since, LOG_LINES),
+    env.DB.prepare(`SELECT COUNT(*) AS n ${logWhere}`).bind(chatId, QUICK_TAP_ID, since),
   ]);
   const rows = taps.results || [];
   const row = settings.results[0] || {};
+  const html = padHtml(logs.results || [], (count.results[0] || {}).n || 0, row.tz || 'Asia/Singapore');
   const msgId = row.quick_msg_id || null;
   if (!rows.length) {
     if (msgId) {
@@ -90,7 +110,7 @@ export async function drawPad(env, chatId, { repin = false } = {}) {
     return { ok: true, empty: true };
   }
   if (msgId) {
-    const res = await editMessage(env, chatId, msgId, PAD_HTML, padButtons(rows));
+    const res = await editMessage(env, chatId, msgId, html, padButtons(rows));
     if (res.ok || String(res.description || '').includes('not modified')) {
       return { ok: true, pinned: repin ? await pinUnderBoard(env, chatId, msgId, row.dashboard_msg_id) : true };
     }
@@ -99,7 +119,7 @@ export async function drawPad(env, chatId, { repin = false } = {}) {
       return { ok: false };
     }
   }
-  const sent = await sendMessage(env, chatId, PAD_HTML, padButtons(rows), { silent: true, keep: true });
+  const sent = await sendMessage(env, chatId, html, padButtons(rows), { silent: true, keep: true });
   if (!sent.ok) {
     console.log(`quick pad send failed for chat ${chatId}: ${sent.description || 'unknown'}`);
     return { ok: false };
@@ -210,8 +230,12 @@ export async function handleQuickCallback(env, cb, ctx, ref) {
     }
     const label = quickLabel(log.reminder_text);
     await answerCallback(env, cb.id, `${label}: logged, 1 ✅`);
-    await sendMessage(env, chatId, `😻 <s>${esc(label)}</s> — done by ${esc(by)} at ${fmtClock(now, tz)}.`,
-      receiptButtons(log.id), { silent: true, ttl: RECEIPT_TTL_MS });
+    // The receipt, and the pad redrawn with this tap at the top of its week.
+    await Promise.all([
+      sendMessage(env, chatId, `😻 <s>${esc(label)}</s> — done by ${esc(by)} at ${fmtClock(now, tz)}.`,
+        receiptButtons(log.id), { silent: true, ttl: RECEIPT_TTL_MS }),
+      drawPad(env, chatId),
+    ]);
     return;
   }
   const undo = data.match(/^qu:(\d+)$/);
@@ -231,6 +255,7 @@ export async function handleQuickCallback(env, cb, ctx, ref) {
     await editRef(env, ctx, chatId, ref,
       `↩️ <b>${esc(quickLabel(row.reminder_text || 'job'))}</b> — not done after all, says ${esc(by)}.`,
       { inline_keyboard: [[okButton()]] });
+    await drawPad(env, chatId);
     return;
   }
   return answerCallback(env, cb.id, '');

@@ -6,6 +6,7 @@ import { getTz, isScored, primeTz } from './household.js';
 import { nagButtons, nagHtml, overdueHtml, nagChat, sendNag, deleteNag, deleteNagRef, isOverdue,
          OVERDUE_NAG_MIN } from './nag.js';
 import { updateDashboard, deferBoards, flushBoards } from './dashboard.js';
+import { drawPad } from './quick.js';
 import { choreStats, winnerStreak, tallyText } from './stats.js';
 import { bonusLine } from './bonus.js';
 import { wakeChat, UNDO_WINDOW_MS } from './chores.js';
@@ -348,6 +349,8 @@ export async function sendDigests(env, now, paused = null, chats = null) {
       // Once-a-day dashboard refresh keeps the pinned countdowns honest even
       // when no chore event has touched it.
       await updateDashboard(env, chat_id);
+      // The quick log pad too, so taps older than its week drop off it.
+      await drawPad(env, chat_id);
 
       // The pinned board is refreshed this same minute and already carries
       // today's agenda, so a routine bulletin would only repeat it. The digest

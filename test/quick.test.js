@@ -126,7 +126,8 @@ describe('a tap', () => {
     await tap(undo.callback_data, nick, 501);
     expect(quickLogs()).toEqual([]);
     expect(toast()).toBe('Taken back ↩️');
-    expect(sentTo('editMessageText').at(-1).body.text).toBe('↩️ <b>🧹 Vacuum</b> — not done after all, says @nicholaswan.');
+    expect(sentTo('editMessageText').find((c) => c.body.message_id === 501).body.text)
+      .toBe('↩️ <b>🧹 Vacuum</b> — not done after all, says @nicholaswan.');
   });
 
   it('counts the same job by the same person once an hour, but by someone else twice', async () => {
@@ -211,6 +212,71 @@ describe('a tap', () => {
     // Two taps against one: hers count 2, not 4, so she won it outright.
     expect(streakFrom(results, TZ, '@Dodgerblueee')).toBe(1);
     expect(streakFrom([...results, { done_by: '@nicholaswan', done_at: lastWeek, reminder_id: 0 }], TZ, '@Dodgerblueee')).toBe(0);
+  });
+});
+
+describe('the last week on the pad', () => {
+  const padText = () => sentTo('editMessageText').filter((c) => c.body.message_id === padId()).at(-1).body.text;
+  const logLines = () => padText().split('<b>Last 7 days</b>\n')[1].split('\n');
+
+  it('lists every tap of the week under the buttons, newest first, with who and when', async () => {
+    await setUp();
+    await tap(`q:${buttons()[0].id}`);
+    expect(logLines()).toEqual(['🧹 Vacuum — @Dodgerblueee, Wed, Nov 25, 12:00 PM']);
+    Date.now.mockReturnValue(NOW + 3 * 3600000 + 5 * 60000);
+    await tap(`q:${buttons()[1].id}`, nick);
+    expect(padText()).toMatch(/^⚡ <b>Quick log<\/b>\nDone one of these\?/);
+    expect(logLines()).toEqual([
+      '🧺 Laundry — @nicholaswan, Wed, Nov 25, 3:05 PM',
+      '🧹 Vacuum — @Dodgerblueee, Wed, Nov 25, 12:00 PM',
+    ]);
+  });
+
+  it("drops a tap taken back, and keeps a removed button's taps", async () => {
+    await setUp();
+    await tap(`q:${buttons()[0].id}`);
+    await tap(`q:${buttons()[1].id}`);
+    const laundry = quickLogs().find((f) => f.reminder_text === 'laundry');
+    await tap(`qu:${laundry.id}`, yx, 502);
+    expect(logLines()).toEqual(['🧹 Vacuum — @Dodgerblueee, Wed, Nov 25, 12:00 PM']);
+    await command('/quick remove vacuum');
+    expect(logLines()).toEqual(['🧹 Vacuum — @Dodgerblueee, Wed, Nov 25, 12:00 PM']);
+  });
+
+  it('shows only the last 7 days, and says so when there is nothing', async () => {
+    await setUp();
+    const old = NOW - 7 * 86400000 - 60000;
+    sql.prepare(`INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
+      VALUES (0, 1, 'laundry', ?, 'done', '@nicholaswan', ?, 1)`).run(old, old);
+    await command('/quick add mop');
+    expect(logLines()).toEqual(['<i>Nothing logged in the last 7 days.</i>']);
+    const sixDays = NOW - 6 * 86400000;
+    sql.prepare(`INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
+      VALUES (0, 1, 'laundry', ?, 'done', 'Nick <3', ?, 1)`).run(sixDays, sixDays);
+    await command('/quick remove mop');
+    expect(logLines()).toEqual(['🧺 Laundry — Nick &lt;3, Thu, Nov 19, 12:00 PM']);
+  });
+
+  it('keeps to 20 lines and counts the rest', async () => {
+    await setUp();
+    const insert = sql.prepare(`INSERT INTO firings (reminder_id, chat_id, reminder_text, fired_at, state, done_by, done_at, scored)
+      VALUES (0, 1, 'vacuum', ?, 'done', '@nicholaswan', ?, 1)`);
+    for (let i = 1; i <= 23; i++) insert.run(NOW - i * 3600000, NOW - i * 3600000);
+    await command('/quick add mop');
+    expect(logLines()).toHaveLength(21);
+    expect(logLines()[0]).toBe('🧹 Vacuum — @nicholaswan, Wed, Nov 25, 11:00 AM');
+    expect(logLines().at(-1)).toBe('<i>…and 3 more</i>');
+  });
+
+  it("is redrawn at 8am, so last week's taps drop off", async () => {
+    await setUp();
+    await tap(`q:${buttons()[0].id}`);
+    calls.length = 0;
+    const { sendDigests } = await import('../src/cron.js');
+    const eightAm = Date.parse('2026-12-03T08:00:30+08:00');
+    Date.now.mockReturnValue(eightAm);
+    await sendDigests(env, eightAm);
+    expect(logLines()).toEqual(['<i>Nothing logged in the last 7 days.</i>']);
   });
 });
 
