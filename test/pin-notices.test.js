@@ -1,5 +1,7 @@
-// "Nag-Bot pinned this message" (18 Nov 2026): the notice Telegram posts for
-// the bot's own pins goes with the daily sweep; a person's pin notice stays.
+// "Nag-Bot pinned this message": the notice Telegram posts for the bot's own
+// pins is deleted as soon as it arrives (19 Nov 2026; it waited a day for the
+// sweep before), falling back to the sweep if Telegram refuses. A person's pin
+// notice stays.
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { beforeEach, afterEach, it, expect, vi } from 'vitest';
@@ -26,7 +28,16 @@ const notice = (from, messageId = 742) => handleUpdate(env, { message: {
 } });
 const swept = () => sql.prepare('SELECT chat_id, message_id, is_ephemeral, delete_after FROM sent_messages').all();
 
-it("puts the bot's own pin notice on the daily sweep", async () => {
+const calls = () => fetch.mock.calls.map(([url, init]) => [url.split('/').pop(), JSON.parse(init.body)]);
+
+it("deletes the bot's own pin notice at once", async () => {
+  await notice(BOT);
+  expect(calls()).toEqual([['deleteMessage', { chat_id: 1, message_id: 742 }]]);
+  expect(swept()).toEqual([]);
+});
+
+it('puts the notice on the daily sweep when Telegram will not delete it', async () => {
+  fetch.mockImplementation(async () => new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: message can't be deleted" })));
   await notice(BOT);
   expect(swept()).toEqual([{ chat_id: 1, message_id: 742, is_ephemeral: 0, delete_after: NOW + SENT_TTL_MS }]);
 });
@@ -35,4 +46,5 @@ it("leaves a person's pin notice, and another bot's", async () => {
   await notice({ id: 2, is_bot: false, first_name: 'Nick', username: 'nicholaswan' }, 743);
   await notice({ id: 99, is_bot: true, first_name: 'Other', username: 'otherbot' }, 744);
   expect(swept()).toEqual([]);
+  expect(calls()).toEqual([]);
 });

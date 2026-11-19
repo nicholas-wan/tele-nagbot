@@ -149,12 +149,13 @@ export async function handleUpdate(env, update, { memberRecorded = false } = {})
   if (!msg) return;
   // "Nag-Bot pinned this message": Telegram posts a notice for each of the
   // bot's own pins (the board, the quick log pad) and the bot never sent it,
-  // so nothing recorded it and it stayed forever. It goes on the daily sweep
-  // like everything else the bot leaves in the chat. A person's pin, and its
-  // notice, are theirs to keep.
+  // so nothing recorded it and it stayed forever. It is deleted the moment
+  // its update arrives; only if Telegram refuses does it fall back to the
+  // daily sweep. A person's pin, and its notice, are theirs to keep.
   if (msg.pinned_message) {
     if (from && from.is_bot && String(from.id) === String(env.BOT_TOKEN || '').split(':')[0]) {
-      await recordForSweep(env, chat.id, msg.message_id);
+      const gone = await deleteMessage(env, chat.id, msg.message_id);
+      if (!gone.ok) await recordForSweep(env, chat.id, msg.message_id);
     }
     return;
   }
