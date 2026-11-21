@@ -129,6 +129,12 @@ const SLOW_TICK_MS = 3000;
 // card goes with the next pass. Both id spaces are matched, as everywhere.
 // Six deletes at a time, and the rows dropped in one statement after.
 const SWEEP_PARALLEL = 6;
+// Telegram answering that the message is gone, or will never be deletable.
+// Anything else (a timeout, a 429, a 5xx) keeps the row for the next tick,
+// because forgetting it leaves the message in the chat for good. A day past due
+// it is dropped anyway, so one wedged row cannot hold a place in every window.
+const SWEEP_DONE = /not found|MESSAGE_ID_INVALID|can.t be deleted/i;
+const SWEEP_GIVE_UP_MS = 86400000;
 
 async function sweepSentMessages(env, now) {
   const { results } = await env.DB.prepare(
@@ -142,13 +148,12 @@ async function sweepSentMessages(env, now) {
   for (let i = 0; i < results.length; i += SWEEP_PARALLEL) {
     await Promise.all(results.slice(i, i + SWEEP_PARALLEL).map(async (row) => {
       try {
-        if (row.is_ephemeral) {
-          // deleteEphemeral only reads chatId/userId off the ctx.
-          await deleteEphemeral(env, { chatId: row.chat_id, userId: row.receiver_user_id }, row.message_id);
-        } else {
-          await deleteMessage(env, row.chat_id, row.message_id);
-        }
-        swept.push(row.id);
+        // deleteEphemeral only reads chatId/userId off the ctx.
+        const res = row.is_ephemeral
+          ? await deleteEphemeral(env, { chatId: row.chat_id, userId: row.receiver_user_id }, row.message_id)
+          : await deleteMessage(env, row.chat_id, row.message_id);
+        if (res.ok || SWEEP_DONE.test(String(res.description || ''))
+          || row.delete_after <= now - SWEEP_GIVE_UP_MS) swept.push(row.id);
       } catch (e) {
         console.log(`sweep of sent message ${row.id} failed: ${e.stack || e}`);
       }

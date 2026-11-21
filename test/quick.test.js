@@ -86,9 +86,83 @@ describe('the pad', () => {
     await command('/quick remove VACUUM');
     expect(buttons().map((b) => b.text)).toEqual(['laundry']);
     await command('/quick remove laundry');
-    expect(sentTo('unpinChatMessage').map((c) => c.body.message_id)).toEqual([pad]);
     expect(sentTo('deleteMessage').map((c) => c.body.message_id)).toContain(pad);
     expect(padId()).toBe(null);
+  });
+
+  it('is blanked and kept when Telegram will not delete it, then reused', async () => {
+    await setUp();
+    const pad = padId();
+    await command('/quick remove vacuum');
+    fetch.mockImplementation(async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push({ url: String(url), body });
+      if (String(url).endsWith('/deleteMessage') && body.message_id === pad) {
+        return new Response(JSON.stringify({ ok: false, description: "Bad Request: message can't be deleted" }));
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextId++ } }));
+    });
+    await command('/quick remove laundry');
+    expect(padId()).toBe(pad);
+    const blank = sentTo('editMessageText').at(-1);
+    expect(blank.body).toMatchObject({ message_id: pad, reply_markup: { inline_keyboard: [] } });
+    expect(blank.body.text).toContain('No buttons yet');
+    await command('/quick add dust');
+    expect(padId()).toBe(pad);
+    expect(sentTo('sendMessage').filter((c) => /Quick log/.test(c.body.text))).toHaveLength(0);
+  });
+
+  describe('sitting under the board', () => {
+    const ids = () => sql.prepare('SELECT dashboard_msg_id AS board, quick_msg_id AS pad FROM settings WHERE chat_id = 1').get();
+    const addChore = () => sql.prepare(`INSERT INTO reminders (id, chat_id, display_num, text, schedule_kind, schedule_detail,
+      nag_intervals, next_fire_at, paused, created_at, scored) VALUES (8, 1, 1, 'slutbed', 'interval',
+      '{"days":7,"h":19,"mi":0}', '[15,30,60]', ?, 0, ?, 1)`).run(NOW + 86400000, NOW - 86400000);
+    const textOf = (id) => sentTo('editMessageText').filter((c) => c.body.message_id === id).at(-1).body.text;
+
+    it('trades messages with an older board, so the board is the top pin', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: pad, pad: 42 });
+      expect(textOf(pad)).toContain('Chores');
+      expect(textOf(42)).toContain('Quick log');
+      // In order now: an ordinary redraw edits the board alone.
+      calls.length = 0;
+      await updateDashboard(env, 1);
+      expect(sentTo('editMessageText').map((c) => c.body.message_id)).toEqual([pad]);
+    });
+
+    it('keeps both as they were when the board cannot be drawn into the pad', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        calls.push({ url: String(url), body });
+        if (String(url).endsWith('/editMessageText') && body.message_id === pad) {
+          return new Response(JSON.stringify({ ok: false, description: 'Too Many Requests' }));
+        }
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextId++ } }));
+      });
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: 42, pad });
+      // The ordinary draw has put the board back over the pad drawn on it.
+      expect(textOf(42)).toContain('Chores');
+    });
+
+    it('swaps straight away when a new pad lands after the board', async () => {
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      await command('/quick add vacuum');
+      const { board, pad } = ids();
+      expect(pad).toBe(42);
+      expect(board).toBeGreaterThan(pad);
+    });
   });
 
   it('is re-pinned by a bare /quick, and replaced only when it is gone', async () => {
@@ -283,11 +357,18 @@ describe('the last week on the pad', () => {
 describe('pins', () => {
   it('keeps the chore board the top pin: the pad goes under it', async () => {
     sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+    // A chore, so the board has something to show and stays.
+    sql.prepare(`INSERT INTO reminders (id, chat_id, display_num, text, schedule_kind, schedule_detail,
+      nag_intervals, next_fire_at, paused, created_at, scored) VALUES (8, 1, 1, 'slutbed', 'interval',
+      '{"days":7,"h":19,"mi":0}', '[15,30,60]', ?, 0, ?, 1)`).run(NOW + 86400000, NOW - 86400000);
     await command('/quick add vacuum');
-    expect(sentTo('pinChatMessage').map((c) => c.body.message_id)).toEqual([padId(), 42]);
+    // Telegram tops the newest message, so the board now lives in the newer one.
+    const board = () => sql.prepare('SELECT dashboard_msg_id AS id FROM settings WHERE chat_id = 1').get().id;
+    expect(padId()).toBe(42);
+    expect(board()).toBeGreaterThan(padId());
     calls.length = 0;
     await command('/quick');
-    expect(sentTo('pinChatMessage').map((c) => c.body.message_id)).toEqual([padId(), 42]);
+    expect(sentTo('pinChatMessage').map((c) => c.body.message_id)).toEqual([padId(), board()]);
     expect(sentTo('sendMessage').at(-1).body.text).toBe('📌 Quick log pad pinned, under the chore board.');
   });
 
@@ -328,13 +409,13 @@ describe('pins', () => {
     const worker = (await import('../src/index.js')).default;
     await setUp();
     const pad = padId();
-    sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+    sql.exec('UPDATE settings SET dashboard_msg_id = 900 WHERE chat_id = 1');
     // A chore, so the board has something to show and stays.
     sql.prepare(`INSERT INTO reminders (id, chat_id, display_num, text, schedule_kind, schedule_detail,
       nag_intervals, next_fire_at, paused, created_at, scored) VALUES (8, 1, 1, 'slutbed', 'interval',
       '{"days":7,"h":19,"mi":0}', '[15,30,60]', ?, 0, ?, 1)`).run(NOW + 86400000, NOW - 86400000);
     // The pin stack, top first: the board, the pad, a stale board.
-    const stack = [42, pad, 41];
+    const stack = [900, pad, 41];
     fetch.mockImplementation(async (url, init) => {
       const body = JSON.parse(init.body);
       calls.push({ url: String(url), body });
@@ -352,7 +433,7 @@ describe('pins', () => {
     }), { ...env, ADMIN_SECRET: 's3cret' }, { waitUntil: () => {} });
     expect(await res.text()).toContain(`quick_msg_id=${pad}`);
     expect(sentTo('deleteMessage').map((c) => c.body.message_id)).toEqual([41]);
-    expect(sentTo('pinChatMessage').map((c) => c.body.message_id).slice(-2)).toEqual([pad, 42]);
+    expect(sentTo('pinChatMessage').map((c) => c.body.message_id).slice(-2)).toEqual([pad, 900]);
   });
 });
 

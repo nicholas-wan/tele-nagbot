@@ -419,6 +419,24 @@ export function messageIsGone(description) {
   return GONE.test(String(description || ''));
 }
 
+// Takes down a pinned message with nothing left to show. True when it is gone
+// and its id can be forgotten. Telegram can refuse a message past 48 hours; the
+// id used to be forgotten anyway, leaving a stale copy in the chat beside the
+// next one. A refused message is blanked and kept, to be drawn over when there
+// is something to show again. A transient failure keeps the id for a retry.
+export async function removePinned(env, chatId, messageId, emptyHtml) {
+  const removed = await deleteMessage(env, chatId, messageId);
+  const why = String(removed.description || '');
+  if (removed.ok || /message to delete not found/i.test(why)) return true;
+  if (!/message can.t be deleted/i.test(why)) return false;
+  const edited = await editMessage(env, chatId, messageId, emptyHtml, { inline_keyboard: [] });
+  if (!edited.ok && messageIsGone(edited.description)) {
+    await unpinMessage(env, chatId, messageId);
+    return true;
+  }
+  return false;
+}
+
 // Edit/delete a stored message without the caller caring which kind it is.
 export function editRef(env, ctx, chatId, ref, html, replyMarkup) {
   if (!ref) return Promise.resolve({ ok: false, description: 'no message ref' });

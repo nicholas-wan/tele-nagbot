@@ -1,7 +1,7 @@
 // The pinned dashboard: the chore-list card shared by /list and the pin, and
 // the schedule/emoji text helpers everything renders chores with.
 
-import { sendMessage, editMessage, deleteMessage, esc, pinMessage, unpinMessage, messageIsGone,
+import { sendMessage, editMessage, esc, pinMessage, removePinned, messageIsGone,
          SWEEP_QUEUE, flushSweepRecords } from './tg.js';
 import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './time.js';
 import { isScored } from './household.js';
@@ -153,7 +153,7 @@ export async function loadBoard(env, chatId, { members = false, before = [] } = 
 export function boardStatements(env, chatId, { members = false } = {}) {
   const statements = [
     env.DB.prepare('SELECT * FROM reminders WHERE chat_id = ? ORDER BY id').bind(chatId),
-    env.DB.prepare('SELECT paused_until, dashboard_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
+    env.DB.prepare('SELECT paused_until, dashboard_msg_id, quick_msg_id, tz FROM settings WHERE chat_id = ?').bind(chatId),
     env.DB.prepare(
       "SELECT reminder_id, fired_at, next_nag_at, snoozed_until FROM firings WHERE chat_id = ? AND state = 'nagging'"
     ).bind(chatId),
@@ -352,6 +352,32 @@ export async function updateDashboard(env, chatId) {
   await drawDashboard(env, chatId);
 }
 
+// Telegram shows the most recently SENT pin on top, however recently the others
+// were pinned, so a pad posted after the board sat above it for good. The two
+// messages trade jobs instead. The saved ids move only once both are drawn; a
+// failure on the way leaves them as they were, and the next draw tries again.
+// True when the board now lives in the newer message, already drawn.
+async function moveBoardAbovePad(env, chatId, boardId, padId, html) {
+  // Loaded here because quick.js imports this module.
+  const { drawPad } = await import('./quick.js');
+  const pad = await drawPad(env, chatId, { into: boardId });
+  if (!pad.ok) return false;
+  const board = await editMessage(env, chatId, padId, html, dashboardButtons(env, chatId));
+  // The caller's ordinary draw puts the board back over the pad just drawn.
+  if (!board.ok && !String(board.description || '').includes('not modified')) return false;
+  try {
+    const swapped = await env.DB.prepare(
+      `UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = ?
+       WHERE chat_id = ? AND dashboard_msg_id = ? AND quick_msg_id = ?`
+    ).bind(padId, boardId, chatId, boardId, padId).run();
+    if (swapped.meta.changes) return true;
+  } catch (e) {
+    console.log(`board and pad swap failed for chat ${chatId}: ${e}`);
+  }
+  await drawPad(env, chatId);
+  return false;
+}
+
 async function drawDashboard(env, chatId) {
   try {
     const loaded = await loadBoard(env, chatId);
@@ -361,9 +387,7 @@ async function drawDashboard(env, chatId) {
     let html = await choreListHtml(env, chatId, tz, loaded);
 
     if (!html) {
-      if (msgId) {
-        await unpinMessage(env, chatId, msgId);
-        await deleteMessage(env, chatId, msgId);
+      if (msgId && await removePinned(env, chatId, msgId, '🐾 <b>Chores</b>\n\nNothing on the list.')) {
         await env.DB.prepare('UPDATE settings SET dashboard_msg_id = NULL WHERE chat_id = ?').bind(chatId).run();
       }
       return;
@@ -372,6 +396,9 @@ async function drawDashboard(env, chatId) {
     if (html.length > 4000) {
       html = html.slice(0, html.lastIndexOf('\n', 3980)) + '\n… more — /list';
     }
+
+    if (msgId && row.quick_msg_id > msgId
+      && await moveBoardAbovePad(env, chatId, msgId, row.quick_msg_id, html)) return;
 
     if (msgId) {
       const res = await editMessage(env, chatId, msgId, html, dashboardButtons(env, chatId));

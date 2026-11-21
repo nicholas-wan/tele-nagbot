@@ -4,10 +4,10 @@
 // whoever tapped, worth one ✅ on the leaderboard and never a bonus
 // (bonus.js). /quick pins the pad, /quick add and /quick remove change it.
 
-import { sendMessage, editMessage, deleteMessage, pinMessage, unpinMessage, answerCallback,
+import { sendMessage, editMessage, deleteMessage, pinMessage, removePinned, answerCallback,
          sendPrivate, editRef, messageIsGone, esc, okButton, RECEIPT_TTL_MS } from './tg.js';
 import { senderName, QUICK_TAP_ID, getTz } from './household.js';
-import { choreEmoji } from './dashboard.js';
+import { choreEmoji, updateDashboard } from './dashboard.js';
 import { fmtClock, fmtLocal } from './time.js';
 import { UNDO_WINDOW_MS } from './chores.js';
 
@@ -45,6 +45,7 @@ const visible = (text) => /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(text);
 const sameJob = (a, b) => a.normalize('NFKC').toLocaleLowerCase() === b.normalize('NFKC').toLocaleLowerCase();
 
 const PAD_HTML = '⚡ <b>Quick log</b>\nDone one of these? Tap it: 1 ✅ for whoever taps.';
+const EMPTY_PAD_HTML = '⚡ <b>Quick log</b>\nNo buttons yet. Add one with /quick add vacuum.';
 
 // The pad lists every tap of the last week under its buttons, newest first:
 // the receipts are swept after two hours, and this is where the household
@@ -68,8 +69,8 @@ function padButtons(rows) {
   return { inline_keyboard: keyboard };
 }
 
-// Pin the pad, then the board back over it: the board stays the top pin, as
-// POST /admin?board leaves them, and the pad is one tap down the pin bar.
+// Pin the pad and make sure the board is still pinned. Which is on top depends
+// on send date, not this order: drawDashboard keeps the board in the newer one.
 async function pinUnderBoard(env, chatId, padId, boardId) {
   const pinned = await pinMessage(env, chatId, padId);
   if (!pinned.ok) {
@@ -85,8 +86,9 @@ async function pinUnderBoard(env, chatId, padId, boardId) {
 // pins the one that is there (/quick). An empty pad is unpinned and removed.
 // Mirrors drawDashboard: only a pad Telegram says is gone is replaced, so a
 // blip never pins a second one. Kept off the sweep (keep: true); the other
-// message ?board's repair spares. Returns { ok, pinned, empty }.
-export async function drawPad(env, chatId, { repin = false } = {}) {
+// message ?board's repair spares. Returns { ok, pinned, empty }. `into` draws
+// the pad over another message instead, for the board swap, and does nothing else.
+export async function drawPad(env, chatId, { repin = false, into = null } = {}) {
   const since = Date.now() - LOG_DAYS * 86400000;
   const logWhere = `FROM firings WHERE chat_id = ? AND reminder_id = ? AND state = 'done' AND done_at > ?`;
   const [taps, settings, logs, count] = await env.DB.batch([
@@ -99,11 +101,10 @@ export async function drawPad(env, chatId, { repin = false } = {}) {
   const rows = taps.results || [];
   const row = settings.results[0] || {};
   const html = padHtml(logs.results || [], (count.results[0] || {}).n || 0, row.tz || 'Asia/Singapore');
-  const msgId = row.quick_msg_id || null;
+  if (into && !rows.length) return { ok: false };
+  const msgId = into || row.quick_msg_id || null;
   if (!rows.length) {
-    if (msgId) {
-      await unpinMessage(env, chatId, msgId);
-      await deleteMessage(env, chatId, msgId);
+    if (msgId && await removePinned(env, chatId, msgId, EMPTY_PAD_HTML)) {
       await env.DB.prepare('UPDATE settings SET quick_msg_id = NULL WHERE chat_id = ? AND quick_msg_id = ?')
         .bind(chatId, msgId).run();
     }
@@ -111,7 +112,9 @@ export async function drawPad(env, chatId, { repin = false } = {}) {
   }
   if (msgId) {
     const res = await editMessage(env, chatId, msgId, html, padButtons(rows));
-    if (res.ok || String(res.description || '').includes('not modified')) {
+    const drawn = res.ok || String(res.description || '').includes('not modified');
+    if (into) return { ok: drawn };
+    if (drawn) {
       return { ok: true, pinned: repin ? await pinUnderBoard(env, chatId, msgId, row.dashboard_msg_id) : true };
     }
     if (!messageIsGone(res.description)) {
@@ -136,7 +139,10 @@ export async function drawPad(env, chatId, { repin = false } = {}) {
     await deleteMessage(env, chatId, newId);
     return { ok: true, pinned: true };
   }
-  return { ok: true, pinned: await pinUnderBoard(env, chatId, newId, row.dashboard_msg_id) };
+  const pinned = await pinUnderBoard(env, chatId, newId, row.dashboard_msg_id);
+  // A new pad is the newest message, so the board's draw trades places with it.
+  if (row.dashboard_msg_id) await updateDashboard(env, chatId);
+  return { ok: true, pinned };
 }
 
 const USAGE = '⚡ <b>Quick log</b>\n' +

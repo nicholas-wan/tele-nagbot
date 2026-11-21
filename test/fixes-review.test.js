@@ -194,6 +194,29 @@ describe('the sweep spares a live nag\'s card', () => {
     expect(deleted(77)).toBe(true);
   });
 
+  const rows = () => sql.prepare('SELECT message_id FROM sent_messages').all();
+
+  it('keeps a row whose delete failed for now, and clears it on the next pass', async () => {
+    recorded(78);
+    refuse = (method) => (method === 'deleteMessage' ? 'Internal Server Error' : null);
+    await runCron(env);
+    expect(rows()).toEqual([{ message_id: 78 }]);
+    refuse = () => null;
+    await runCron(env);
+    expect(rows()).toEqual([]);
+  });
+
+  it('drops a row Telegram will never delete, or one a day past due', async () => {
+    recorded(78);
+    refuse = (method) => (method === 'deleteMessage' ? "Bad Request: message can't be deleted" : null);
+    await runCron(env);
+    expect(rows()).toEqual([]);
+    recorded(79, { delete_after: NOW - 25 * HOUR });
+    refuse = (method) => (method === 'deleteMessage' ? 'Internal Server Error' : null);
+    await runCron(env);
+    expect(rows()).toEqual([]);
+  });
+
   it('re-sends the card on resume when Telegram says it is gone', async () => {
     const r = reminder({ paused: 1 });
     nagging({ fired_at: NOW - 30 * HOUR, last_message_id: 77 });
