@@ -160,13 +160,13 @@ describe('↩️ Not done', () => {
     expect(firing(5)).toMatchObject({ last_message_id: null, last_message_ephemeral: 0 });
     const receipt = sent(/done by @nicholaswan/)[0];
     expect(receipt.body.text).toContain('done by @nicholaswan at 2:00 PM. The cats purr approvingly.');
-    expect(receipt.body.receiver_user_id).toBeUndefined();
+    expect(receipt.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
     expect(buttons(receipt.body.reply_markup)).toEqual(['nd:5', 'ok']);
     calls.length = 0;
     await tap('nd:5', { text: receipt.body.text, message_id: 99 });
     expect(firing(5).state).toBe('nagging');
     expect(edits(99)[0].body.text).toContain('not done after all');
-    const renag = calls.find((c) => c.url.endsWith('/sendMessage') && c.body.receiver_user_id === 2);
+    const renag = calls.find((c) => c.url.endsWith('/sendMessage') && c.body.ephemeral_message_parameters?.receiver_user_id === 2);
     expect(renag.body.text).toContain('clear poop');
     expect(buttons(renag.body.reply_markup)).toContain('d:5');
   });

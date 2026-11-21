@@ -47,7 +47,7 @@ describe('ephemeral interactions', () => {
       const body = init && init.body ? JSON.parse(init.body) : null;
       calls.push({ url: String(url), body });
       // Mirror Telegram: an ephemeral send reports message_id 0 plus its own id.
-      const result = body && body.receiver_user_id
+      const result = body && body.ephemeral_message_parameters?.receiver_user_id
         ? { message_id: 0, ephemeral_message_id: 77 }
         : { message_id: 99 };
       return new Response(JSON.stringify({ ok: true, result }), {
@@ -82,7 +82,7 @@ describe('ephemeral interactions', () => {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/help' },
     });
     const sent = find('sendMessage');
-    expect(sent.body.receiver_user_id).toBe(2);
+    expect(sent.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
     expect(sent.body.chat_id).toBe(1);
   });
 
@@ -126,7 +126,7 @@ describe('ephemeral interactions', () => {
     expect(first.text).toContain('Water plants');
     expect(first.text).not.toContain('#3');
     // Manage is a shared surface: nothing about it is sent privately.
-    expect(calls.some((c) => c.url.endsWith('/sendMessage') && c.body.receiver_user_id)).toBe(false);
+    expect(calls.some((c) => c.url.endsWith('/sendMessage') && c.body.ephemeral_message_parameters?.receiver_user_id)).toBe(false);
   });
 
   it('deletes a legacy public command but never an ephemeral one', async () => {
@@ -157,12 +157,12 @@ describe('ephemeral interactions', () => {
       },
     });
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
-    const announcement = sends.find((c) => !c.body.receiver_user_id && /added/.test(c.body.text || ''));
+    const announcement = sends.find((c) => !c.body.ephemeral_message_parameters?.receiver_user_id && /added/.test(c.body.text || ''));
     expect(announcement).toBeTruthy();
     expect(announcement.body.text).toContain('water plants');
     // The Undo rides on the public line rather than a second private copy.
     expect(JSON.stringify(announcement.body.reply_markup)).toContain('u:');
-    expect(sends.some((c) => c.body.receiver_user_id)).toBe(false);
+    expect(sends.some((c) => c.body.ephemeral_message_parameters?.receiver_user_id)).toBe(false);
   });
 
   // An assigned chore nags privately, so announcing it would leak exactly what
@@ -175,15 +175,15 @@ describe('ephemeral interactions', () => {
       },
     });
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
-    expect(sends.some((c) => !c.body.receiver_user_id && /added/.test(c.body.text || ''))).toBe(false);
-    expect(sends.some((c) => c.body.receiver_user_id)).toBe(true);
+    expect(sends.some((c) => !c.body.ephemeral_message_parameters?.receiver_user_id && /added/.test(c.body.text || ''))).toBe(false);
+    expect(sends.some((c) => c.body.ephemeral_message_parameters?.receiver_user_id)).toBe(true);
   });
 
   it('falls back to a public reply when ephemeral delivery is refused', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       const body = init && init.body ? JSON.parse(init.body) : null;
       calls.push({ url: String(url), body });
-      if (body && body.receiver_user_id) {
+      if (body && body.ephemeral_message_parameters?.receiver_user_id) {
         return new Response(JSON.stringify({ ok: false, error_code: 400, description: 'user is offline' }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -196,8 +196,8 @@ describe('ephemeral interactions', () => {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/help' },
     });
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
-    expect(sends.some((c) => c.body.receiver_user_id)).toBe(true);
-    expect(sends.some((c) => !c.body.receiver_user_id)).toBe(true);
+    expect(sends.some((c) => c.body.ephemeral_message_parameters?.receiver_user_id)).toBe(true);
+    expect(sends.some((c) => !c.body.ephemeral_message_parameters?.receiver_user_id)).toBe(true);
   });
 
   // An assigned chore nags only its assignee; an unassigned one is everyone's.
@@ -240,7 +240,7 @@ describe('ephemeral interactions', () => {
     await fireReminder(env, { ...CHORE, assignee_name: '@nicholaswan', assignee_user_id: null },
       1_600_000_000_000, 'Asia/Singapore');
     const nag = calls.find((c) => c.url.endsWith('/sendMessage') && /clear poop/.test(c.body.text || ''));
-    expect(nag.body.receiver_user_id).toBe(246334575);
+    expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(246334575);
     // A visible sticker beside an invisible nag would give the chore away.
     expect(calls.some((c) => c.url.endsWith('/sendSticker'))).toBe(false);
   });
@@ -250,14 +250,14 @@ describe('ephemeral interactions', () => {
     await fireReminder(env, { ...CHORE, assignee_name: null, assignee_user_id: null },
       1_600_000_000_000, 'Asia/Singapore');
     const nag = calls.find((c) => c.url.endsWith('/sendMessage') && /clear poop/.test(c.body.text || ''));
-    expect(nag.body.receiver_user_id).toBeUndefined();
+    expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
   });
 
   it('EPHEMERAL=0 turns everything back to public', async () => {
     await handleUpdate({ ...env(), EPHEMERAL: '0' }, {
       message: { message_id: 5, chat: { id: 1 }, from: { id: 2, first_name: 'Nick' }, text: '/help' },
     });
-    expect(find('sendMessage').body.receiver_user_id).toBeUndefined();
+    expect(find('sendMessage').body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
   });
 
   // Ephemeral and public message ids are separate sequences that can collide.

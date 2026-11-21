@@ -214,7 +214,7 @@ beforeEach(() => {
     const id = nextId++;
     entry.id = id;
     const result = method === 'getMe' ? { id: 1000, username: 'bot' }
-      : body.receiver_user_id ? { message_id: 0, ephemeral_message_id: id } : { message_id: id };
+      : body.ephemeral_message_parameters?.receiver_user_id ? { message_id: 0, ephemeral_message_id: id } : { message_id: id };
     return new Response(JSON.stringify({ ok: true, result }));
   }));
 });
@@ -278,7 +278,7 @@ describe('marking done in words', () => {
     expect(firing().state).toBe('nagging');
     const note = sent('sendMessage').at(-1);
     expect(note.body.text).toMatch(/Nothing of yours is nagging/);
-    expect(note.body.receiver_user_id).toBe(2);
+    expect(note.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
   });
 
   it('keeps "done together" a together when it has to ask which one', async () => {

@@ -147,7 +147,7 @@ describe('household roster comes from members, not from past credits', () => {
     // …and the replier is told privately, with the roster to choose from.
     const note = calls.find((c) => c.url.endsWith('/sendMessage') && /Not in this household/.test(c.body.text || ''));
     expect(note).toBeTruthy();
-    expect(note.body.receiver_user_id).toBe(2);
+    expect(note.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
     expect(note.body.text).toContain('brian');
     expect(note.body.text).toContain('@jane');
     expect(note.body.text).toContain('Bob');

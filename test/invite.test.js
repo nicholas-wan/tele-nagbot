@@ -106,7 +106,7 @@ describe('cmdInvite', () => {
     const sent = calls.find((c) => c.url.endsWith('/sendDocument'));
     expect(sent).toBeTruthy();
     expect(sent.body).toBeInstanceOf(FormData);
-    expect(sent.body.get('receiver_user_id')).toBeNull();
+    expect(sent.body.get('ephemeral_message_parameters')).toBeNull();
     const file = sent.body.get('document');
     expect(file.name).toBe('dentist.ics');
     expect(await file.text()).toContain('SUMMARY:dentist');

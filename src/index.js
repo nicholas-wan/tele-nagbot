@@ -157,7 +157,7 @@ export default {
         // bot is configured — commands simply vanished. Privacy is worth more
         // than hiding the command text, and the bot deletes the command message
         // straight after handling it anyway. Reply privacy is unaffected: it
-        // comes from receiver_user_id on the send, not from this flag.
+        // comes from ephemeral_message_parameters on the send, not this flag.
         body: JSON.stringify({
           commands: [
             { command: 'chore', description: 'New chore — counts on the leaderboard' },

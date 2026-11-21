@@ -203,7 +203,7 @@ describe('assignee shortcuts', () => {
     // the one other send, and it goes to the pinned message, not the group.
     const sends = calls.filter((c) => c.url.endsWith('/sendMessage'));
     expect(sends.length).toBe(1);
-    expect(sends[0].body.receiver_user_id).toBe(2);
+    expect(sends[0].body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
     expect(sends[0].body.text).toContain('for @Dodgerblueee');
   });
 

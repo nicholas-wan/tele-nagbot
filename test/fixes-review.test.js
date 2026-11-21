@@ -37,7 +37,7 @@ beforeEach(() => {
     if (description) return new Response(JSON.stringify({ ok: false, error_code: 400, description }));
     const id = nextId++;
     entry.id = id;
-    const result = body.receiver_user_id
+    const result = body.ephemeral_message_parameters?.receiver_user_id
       ? { message_id: 0, ephemeral_message_id: id }
       : { message_id: id };
     return new Response(JSON.stringify({ ok: true, result }));
@@ -152,7 +152,7 @@ describe('a typed time resolves only the typer\'s own draft', () => {
     refuse = (method) => (method === 'editEphemeralMessageText' ? 'Bad Request: message to edit not found' : null);
     await say(anne, '10am', 42);
     expect(sql.prepare('SELECT text FROM reminders').get()).toEqual({ text: 'fold the laundry' });
-    const confirmation = sent('sendMessage').find((c) => c.body.receiver_user_id === 2 && /First nag/.test(c.body.text));
+    const confirmation = sent('sendMessage').find((c) => c.body.ephemeral_message_parameters?.receiver_user_id === 2 && /First nag/.test(c.body.text));
     expect(confirmation, 'a private confirmation was sent instead').toBeTruthy();
     expect(JSON.stringify(confirmation.body.reply_markup)).toContain('Undo');
   });

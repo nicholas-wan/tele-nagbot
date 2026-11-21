@@ -65,7 +65,7 @@ describe('editor, board, and setup fixes', () => {
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       const body = init && init.body ? JSON.parse(init.body) : null;
       calls.push({ url: String(url), body });
-      const result = body && body.receiver_user_id
+      const result = body && body.ephemeral_message_parameters?.receiver_user_id
         ? { message_id: 0, ephemeral_message_id: 42 }
         : { message_id: 99 };
       return new Response(JSON.stringify({ ok: true, result }), {

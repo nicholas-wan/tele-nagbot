@@ -281,7 +281,7 @@ describe('a Telegram call that never answers', () => {
     const res = await sendPrivate(env, replyCtx(env, 1, 2), 'only for Nick');
     expect(res.ok).toBe(false);
     expect(seen).toHaveLength(1);
-    expect(seen[0].receiver_user_id).toBe(2);
+    expect(seen[0].ephemeral_message_parameters?.receiver_user_id).toBe(2);
   });
 });
 
@@ -832,13 +832,13 @@ describe('the cron, round trips per job', () => {
     const seen = [];
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       seen.push({ method: String(url).split('/').pop(), body: JSON.parse(init.body) });
-      if (JSON.parse(init.body).receiver_user_id) throw new DOMException('The operation timed out.', 'TimeoutError');
+      if (JSON.parse(init.body).ephemeral_message_parameters?.receiver_user_id) throw new DOMException('The operation timed out.', 'TimeoutError');
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
     }));
     await fireReminder(env, r, NOW, 'Asia/Singapore');
     const sends = seen.filter((c) => /^send/.test(c.method));
     expect(sends).toHaveLength(1);
-    expect(sends[0].body.receiver_user_id).toBe(2);
+    expect(sends[0].body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
   });
 
   it('re-nags from one read, taking the old card down beside the new send', async () => {

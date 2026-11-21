@@ -171,7 +171,7 @@ describe('deletion logs to the group however it was asked', () => {
     seedReminder({});
     await say(5, '/delete clear poop');
     const log = sent(/deleted <s>clear poop<\/s>/)[0];
-    expect(log.body.receiver_user_id).toBeUndefined();
+    expect(log.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
     expect(log.body.text).toContain('@nicholaswan deleted');
     expect(buttons(log.body.reply_markup)[0]).toMatch(/^t:\d+$/);
   });

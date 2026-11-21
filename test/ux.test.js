@@ -210,7 +210,7 @@ describe('chat UX', () => {
     expect(runs.some((u) => u.sql.includes('snoozes_used'))).toBe(false);
     const hint = calls.find((c) => c.url.endsWith('/sendMessage'));
     expect(hint.body.text).toContain('snooze 2h');
-    expect(hint.body.receiver_user_id).toBe(2);
+    expect(hint.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
   });
 
   // Doing a chore ahead of the nag earns the credit instead of "is not
@@ -256,7 +256,7 @@ describe('chat UX', () => {
     expect(insert.args).toContain('Nick');
     // The receipt is public and names the next occurrence.
     const receipt = calls.find((c) => c.url.endsWith('/sendMessage') && /done early/.test(c.body.text || ''));
-    expect(receipt.body.receiver_user_id).toBeUndefined();
+    expect(receipt.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
     expect(receipt.body.text).toContain('Next:');
     // A solo done-early is fixable in place: the receipt offers Together too.
     expect(JSON.stringify(receipt.body.reply_markup)).toContain('g:');
@@ -498,7 +498,7 @@ describe('chat UX', () => {
     expect(calls.some((c) => c.url.endsWith('/deleteMessage') && c.body.message_id === 5)).toBe(true);
     const reply = calls.find((c) => c.url.endsWith('/sendMessage'));
     expect(reply.body.text).toContain('Unknown command');
-    expect(reply.body.receiver_user_id).toBe(2);
+    expect(reply.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
   });
 
   it('shows exact date choices and Cancel without redundant timezone copy', async () => {
@@ -588,7 +588,7 @@ describe('chat UX', () => {
     const log = calls.find((c) => c.url.endsWith('/sendMessage') && /deleted/i.test(c.body.text || ''));
     expect(log).toBeTruthy();
     // Public and attributed, even if the nag itself was private.
-    expect(log.body.receiver_user_id).toBeUndefined();
+    expect(log.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
     expect(log.body.text).toContain('@nicholaswan');
     expect(log.body.text).toContain('clear poop');
     expect(log.body.reply_markup.inline_keyboard[0].map((b) => b.text)).toEqual(['↩️ Undo', '✅ OK']);

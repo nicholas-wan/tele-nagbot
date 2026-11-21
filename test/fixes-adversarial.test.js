@@ -30,7 +30,7 @@ beforeEach(() => {
     let result = true;
     if (method === 'getMe') result = { id: 999, username: 'test_bot' };
     else if (method === 'getStickerSet') result = { stickers: [] };
-    else if (method === 'sendMessage') result = body.receiver_user_id
+    else if (method === 'sendMessage') result = body.ephemeral_message_parameters?.receiver_user_id
       ? { message_id: 0, ephemeral_message_id: id } : { message_id: id };
     return Response.json({ ok: true, result });
   }));
@@ -132,15 +132,15 @@ describe('active assignment', () => {
     setup(); await tap('e:setassign:10:3');
     expect(r().assignee_user_id).toBe(3);
     expect(f()).toMatchObject({ nag_user_id: 3, next_nag_at: NOW + 2 * HOUR, snoozes_used: 1 });
-    expect(sends('😴').at(-1).body.receiver_user_id).toBe(3);
+    expect(sends('😴').at(-1).body.ephemeral_message_parameters?.receiver_user_id).toBe(3);
     expect(calls.some((c) => c.method === 'deleteEphemeralMessage' && c.body.receiver_user_id === 2)).toBe(true);
     Date.now.mockReturnValue(NOW + 2 * HOUR); await renagPending(env, Date.now());
-    expect(sends('🐱').at(-1).body.receiver_user_id).toBe(3);
+    expect(sends('🐱').at(-1).body.ephemeral_message_parameters?.receiver_user_id).toBe(3);
   });
   it('makes the replacement public when assignment is cleared', async () => {
     setup(); await tap('e:setassign:10:0');
     expect(f().nag_user_id).toBeNull();
-    expect(sends('😴').at(-1).body.receiver_user_id).toBeUndefined();
+    expect(sends('😴').at(-1).body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
   });
   it('keeps the replacement paused', async () => {
     setup({ paused: 1 }); await tap('e:setassign:10:3');
@@ -155,8 +155,8 @@ describe('active assignment', () => {
       }
     };
     await renagPending(env, NOW);
-    const old = sends('🐱').find((c) => c.body.receiver_user_id === 2);
-    const current = sends('🐱').find((c) => c.body.receiver_user_id === 3);
+    const old = sends('🐱').find((c) => c.body.ephemeral_message_parameters?.receiver_user_id === 2);
+    const current = sends('🐱').find((c) => c.body.ephemeral_message_parameters?.receiver_user_id === 3);
     expect(f().last_message_id).toBe(current.id);
     expect(calls.some((c) => c.method === 'deleteEphemeralMessage' && c.body.ephemeral_message_id === old.id)).toBe(true);
   });

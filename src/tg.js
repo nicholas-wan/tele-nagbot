@@ -331,17 +331,20 @@ export function msgRef(res) {
 
 export async function sendPrivate(env, ctx, html, replyMarkup, opts = {}) {
   if (!ctx.ephemeral) return sendMessage(env, ctx.chatId, html, replyMarkup, opts);
+  const cbId = takeCallbackId(ctx);
   const body = {
     chat_id: ctx.chatId,
-    receiver_user_id: ctx.userId,
+    // Bot API 10.3 moved these two out of the send method's own parameters.
+    ephemeral_message_parameters: {
+      receiver_user_id: ctx.userId,
+      ...(cbId ? { callback_query_id: cbId } : {}),
+    },
     text: html,
     parse_mode: 'HTML',
   };
   const markup = withOk(replyMarkup, opts);
   if (markup) body.reply_markup = markup;
   if (opts.silent) body.disable_notification = true;
-  const cbId = takeCallbackId(ctx);
-  if (cbId) body.callback_query_id = cbId;
   if (ctx.replyEphemeralId) body.reply_parameters = { ephemeral_message_id: ctx.replyEphemeralId };
   const res = await tg(env, 'sendMessage', body);
   if (res.ok) {
@@ -371,7 +374,9 @@ export async function sendDocument(env, ctx, filename, content, caption, opts = 
   const upload = async (ephemeral) => {
     const form = new FormData();
     form.append('chat_id', String(ctx.chatId));
-    if (ephemeral) form.append('receiver_user_id', String(ctx.userId));
+    if (ephemeral) {
+      form.append('ephemeral_message_parameters', JSON.stringify({ receiver_user_id: ctx.userId }));
+    }
     form.append('document', new Blob([content], { type: 'text/calendar' }), filename);
     if (caption) {
       form.append('caption', caption);

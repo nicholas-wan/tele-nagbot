@@ -118,7 +118,7 @@ describe('firing lifecycle fixes', () => {
     vi.stubGlobal('fetch', vi.fn(async (url, init) => {
       const body = init && init.body ? JSON.parse(init.body) : null;
       calls.push({ url: String(url), body });
-      const result = body && body.receiver_user_id
+      const result = body && body.ephemeral_message_parameters?.receiver_user_id
         ? { message_id: 0, ephemeral_message_id: 77 }
         : { message_id: 99 };
       return new Response(JSON.stringify({ ok: true, result }), {
@@ -430,19 +430,19 @@ describe('firing lifecycle fixes', () => {
 
     it('matches a member who has no username by first name', async () => {
       const nag = await fire('Jane', [{ user_id: 42, username: null, first_name: 'Jane', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBe(42);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(42);
       // A sticker beside a private nag would announce the chore it hides.
       expect(sentTo('sendSticker').length).toBe(0);
     });
 
     it('still matches an @handle by username', async () => {
       const nag = await fire('@jane', [{ user_id: 7, username: 'jane', first_name: 'Jane', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBe(7);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(7);
     });
 
     it('falls back to the username for a bare handle', async () => {
       const nag = await fire('jane', [{ user_id: 7, username: 'jane', first_name: 'Janet', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBe(7);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(7);
     });
 
     it('prefers the most recently seen of two members sharing a first name', async () => {
@@ -450,12 +450,12 @@ describe('firing lifecycle fixes', () => {
         { user_id: 1, username: null, first_name: 'Jane', last_seen: 100 },
         { user_id: 2, username: null, first_name: 'Jane', last_seen: 900 },
       ]);
-      expect(nag.body.receiver_user_id).toBe(2);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(2);
     });
 
     it('keeps a nag public when nobody matches', async () => {
       const nag = await fire('Ghost', [{ user_id: 42, username: 'jane', first_name: 'Jane', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBeUndefined();
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBeUndefined();
     });
 
     // D1 is plain SQLite, whose lower() is ASCII-only: lower('Élodie') is
@@ -463,13 +463,13 @@ describe('firing lifecycle fixes', () => {
     // assigned nag went public — with a sticker beside it.
     it('matches an accented first name', async () => {
       const nag = await fire('Élodie', [{ user_id: 8, username: null, first_name: 'Élodie', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBe(8);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(8);
       expect(sentTo('sendSticker').length).toBe(0);
     });
 
     it('matches an accented name across case', async () => {
       const nag = await fire('élodie', [{ user_id: 8, username: null, first_name: 'Élodie', last_seen: 1 }]);
-      expect(nag.body.receiver_user_id).toBe(8);
+      expect(nag.body.ephemeral_message_parameters?.receiver_user_id).toBe(8);
     });
   });
 
