@@ -217,6 +217,16 @@ describe('the sweep spares a live nag\'s card', () => {
     expect(rows()).toEqual([]);
   });
 
+  it('keeps a row on a bare Not Found, and drops one the bot can no longer reach', async () => {
+    recorded(78);
+    refuse = (method) => (method === 'deleteMessage' ? 'Not Found' : null);
+    await runCron(env);
+    expect(rows()).toEqual([{ message_id: 78 }]);
+    refuse = (method) => (method === 'deleteMessage' ? 'Forbidden: bot was kicked from the supergroup chat' : null);
+    await runCron(env);
+    expect(rows()).toEqual([]);
+  });
+
   it('re-sends the card on resume when Telegram says it is gone', async () => {
     const r = reminder({ paused: 1 });
     nagging({ fired_at: NOW - 30 * HOUR, last_message_id: 77 });

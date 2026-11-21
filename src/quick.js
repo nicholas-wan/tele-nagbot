@@ -101,7 +101,11 @@ export async function drawPad(env, chatId, { repin = false, into = null } = {}) 
   const rows = taps.results || [];
   const row = settings.results[0] || {};
   const html = padHtml(logs.results || [], (count.results[0] || {}).n || 0, row.tz || 'Asia/Singapore');
-  if (into && !rows.length) return { ok: false };
+  if (into && !rows.length) {
+    // A blanked pad trades places too, or "No buttons yet" stays the top pin.
+    const blank = await editMessage(env, chatId, into, EMPTY_PAD_HTML, { inline_keyboard: [] });
+    return { ok: blank.ok || String(blank.description || '').includes('not modified') };
+  }
   const msgId = into || row.quick_msg_id || null;
   if (!rows.length) {
     if (msgId && await removePinned(env, chatId, msgId, EMPTY_PAD_HTML)) {
@@ -115,6 +119,13 @@ export async function drawPad(env, chatId, { repin = false, into = null } = {}) 
     const drawn = res.ok || String(res.description || '').includes('not modified');
     if (into) return { ok: drawn };
     if (drawn) {
+      // A pad newer than the board is due to trade places. If that happened
+      // since this draw's read, the edit above landed on the board: redraw it.
+      if (row.dashboard_msg_id && msgId > row.dashboard_msg_id) {
+        const now = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
+          .bind(chatId).first();
+        if (now && now.dashboard_msg_id === msgId) await updateDashboard(env, chatId);
+      }
       return { ok: true, pinned: repin ? await pinUnderBoard(env, chatId, msgId, row.dashboard_msg_id) : true };
     }
     if (!messageIsGone(res.description)) {

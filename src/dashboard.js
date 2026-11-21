@@ -363,19 +363,45 @@ async function moveBoardAbovePad(env, chatId, boardId, padId, html) {
   const pad = await drawPad(env, chatId, { into: boardId });
   if (!pad.ok) return false;
   const board = await editMessage(env, chatId, padId, html, dashboardButtons(env, chatId));
-  // The caller's ordinary draw puts the board back over the pad just drawn.
-  if (!board.ok && !String(board.description || '').includes('not modified')) return false;
+  if (!board.ok && !String(board.description || '').includes('not modified')) {
+    // The caller's ordinary draw puts the board back over the pad just drawn.
+    // A pad deleted by hand is forgotten, or every draw would repeat this. Any
+    // other failure may still have landed, so the pad is drawn back over it.
+    if (messageIsGone(board.description)) {
+      await env.DB.prepare('UPDATE settings SET quick_msg_id = NULL WHERE chat_id = ? AND quick_msg_id = ?')
+        .bind(chatId, padId).run();
+    } else {
+      await drawPad(env, chatId);
+    }
+    return false;
+  }
+  let swapped = false;
   try {
-    const swapped = await env.DB.prepare(
+    const res = await env.DB.prepare(
       `UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = ?
        WHERE chat_id = ? AND dashboard_msg_id = ? AND quick_msg_id = ?`
     ).bind(padId, boardId, chatId, boardId, padId).run();
-    if (swapped.meta.changes) return true;
+    swapped = Boolean(res.meta.changes);
   } catch (e) {
     console.log(`board and pad swap failed for chat ${chatId}: ${e}`);
   }
+  // No change saved: a concurrent draw got there first, or the answer was lost
+  // after the write landed. Drawing on with the old id would overwrite the pad.
+  let current = padId;
+  if (!swapped) {
+    const row = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
+      .bind(chatId).first();
+    current = row ? row.dashboard_msg_id : null;
+  }
+  if (current === padId) {
+    // Either message may have lost its pin, and nothing else would restore it.
+    await pinMessage(env, chatId, boardId);
+    await pinMessage(env, chatId, padId);
+    return true;
+  }
   await drawPad(env, chatId);
-  return false;
+  // A board replaced meanwhile is already drawn; the old id must not be edited.
+  return current !== boardId;
 }
 
 async function drawDashboard(env, chatId) {
@@ -387,8 +413,19 @@ async function drawDashboard(env, chatId) {
     let html = await choreListHtml(env, chatId, tz, loaded);
 
     if (!html) {
-      if (msgId && await removePinned(env, chatId, msgId, '🐾 <b>Chores</b>\n\nNothing on the list.')) {
-        await env.DB.prepare('UPDATE settings SET dashboard_msg_id = NULL WHERE chat_id = ?').bind(chatId).run();
+      if (msgId) {
+        // Claimed before the delete, and only if it is still the board and the
+        // list is still empty: a chore added and swapped in since this draw's
+        // read has made this id the pad, which must not be deleted.
+        const claim = await env.DB.prepare(
+          `UPDATE settings SET dashboard_msg_id = NULL WHERE chat_id = ? AND dashboard_msg_id = ?
+             AND NOT EXISTS (SELECT 1 FROM reminders WHERE chat_id = ?)`
+        ).bind(chatId, msgId, chatId).run();
+        if (claim.meta.changes
+          && !await removePinned(env, chatId, msgId, '🐾 <b>Chores</b>\n\nNothing on the list.')) {
+          await env.DB.prepare('UPDATE settings SET dashboard_msg_id = ? WHERE chat_id = ? AND dashboard_msg_id IS NULL')
+            .bind(msgId, chatId).run();
+        }
       }
       return;
     }

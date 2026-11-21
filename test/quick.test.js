@@ -155,6 +155,69 @@ describe('the pad', () => {
       expect(textOf(42)).toContain('Chores');
     });
 
+    it('pins both after a swap, since either may have lost its pin', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      calls.length = 0;
+      await updateDashboard(env, 1);
+      expect(sentTo('pinChatMessage').map((c) => c.body.message_id).sort((a, b) => a - b)).toEqual([42, pad]);
+    });
+
+    it('never draws the board over the pad when another draw already swapped', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      // The other draw's swap lands just before this draw's board edit returns.
+      const real = fetch.getMockImplementation();
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (String(url).endsWith('/editMessageText') && body.message_id === pad) {
+          sql.prepare('UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = 42 WHERE chat_id = 1').run(pad);
+        }
+        return real(url, init);
+      });
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: pad, pad: 42 });
+      expect(textOf(42)).toContain('Quick log');
+      expect(textOf(pad)).toContain('Chores');
+    });
+
+    it('forgets a pad deleted by hand instead of flipping the board on every draw', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        calls.push({ url: String(url), body });
+        if (String(url).endsWith('/editMessageText') && body.message_id === pad) {
+          return new Response(JSON.stringify({ ok: false, description: 'Bad Request: message to edit not found' }));
+        }
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextId++ } }));
+      });
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: 42, pad: null });
+      expect(textOf(42)).toContain('Chores');
+    });
+
+    it('moves a blanked pad under the board too', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      sql.exec('DELETE FROM quick_taps');
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: pad, pad: 42 });
+      expect(textOf(42)).toContain('No buttons yet');
+    });
+
     it('swaps straight away when a new pad lands after the board', async () => {
       addChore();
       sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
