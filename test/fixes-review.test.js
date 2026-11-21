@@ -227,6 +227,13 @@ describe('the sweep spares a live nag\'s card', () => {
     expect(rows()).toEqual([]);
   });
 
+  it('drops a private message someone already dismissed', async () => {
+    recorded(78);
+    refuse = (method) => (method === 'deleteMessage' ? 'Bad Request: MESSAGE_NOT_FOUND' : null);
+    await runCron(env);
+    expect(rows()).toEqual([]);
+  });
+
   it('re-sends the card on resume when Telegram says it is gone', async () => {
     const r = reminder({ paused: 1 });
     nagging({ fired_at: NOW - 30 * HOUR, last_message_id: 77 });

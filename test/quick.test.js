@@ -187,6 +187,131 @@ describe('the pad', () => {
       expect(textOf(pad)).toContain('Chores');
     });
 
+    it('draws the board over the saved id when a failed swap lost to another draw', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      const real = fetch.getMockImplementation();
+      let failed = false;
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (!failed && String(url).endsWith('/editMessageText') && body.message_id === pad) {
+          failed = true;
+          calls.push({ url: String(url), body });
+          sql.prepare('UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = 42 WHERE chat_id = 1').run(pad);
+          return new Response(JSON.stringify({ ok: false, description: 'Too Many Requests' }));
+        }
+        return real(url, init);
+      });
+      await updateDashboard(env, 1);
+      expect(ids()).toEqual({ board: pad, pad: 42 });
+      expect(textOf(42)).toContain('Quick log');
+      expect(textOf(pad)).toContain('Chores');
+    });
+
+    it('does not delete the board when a swap beat the removal of the last button', async () => {
+      const { drawPad } = await import('../src/quick.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('DELETE FROM quick_taps');
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      const batch = env.DB.batch.bind(env.DB);
+      env.DB.batch = async (statements) => {
+        const out = await batch(statements);
+        sql.prepare('UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = 42 WHERE chat_id = 1').run(pad);
+        return out;
+      };
+      await drawPad(env, 1);
+      expect(sentTo('deleteMessage')).toEqual([]);
+      expect(ids()).toEqual({ board: pad, pad: 42 });
+    });
+
+    it('redraws the pad when a swap raced its draw, so a tap is not lost', async () => {
+      const { drawPad } = await import('../src/quick.js');
+      await setUp();
+      const pad = padId();
+      addChore();
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      const real = fetch.getMockImplementation();
+      let swapped = false;
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (!swapped && String(url).endsWith('/editMessageText') && body.message_id === pad) {
+          swapped = true;
+          sql.prepare('UPDATE settings SET dashboard_msg_id = ?, quick_msg_id = 42 WHERE chat_id = 1').run(pad);
+        }
+        return real(url, init);
+      });
+      await drawPad(env, 1);
+      expect(textOf(pad)).toContain('Chores');
+      expect(textOf(42)).toContain('Quick log');
+    });
+
+    it('unpins a refused pad when a new pad took its place meanwhile', async () => {
+      const { drawPad } = await import('../src/quick.js');
+      await setUp();
+      const pad = padId();
+      sql.exec('DELETE FROM quick_taps');
+      const real = fetch.getMockImplementation();
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (String(url).endsWith('/deleteMessage') && body.message_id === pad) {
+          sql.exec('UPDATE settings SET quick_msg_id = 777 WHERE chat_id = 1');
+          calls.push({ url: String(url), body });
+          return new Response(JSON.stringify({ ok: false, description: "Bad Request: message can't be deleted" }));
+        }
+        return real(url, init);
+      });
+      await drawPad(env, 1);
+      expect(padId()).toBe(777);
+      expect(sentTo('unpinChatMessage').map((c) => c.body.message_id)).toEqual([pad]);
+    });
+
+    it('unpins a refused board when a new board took its place meanwhile', async () => {
+      const { updateDashboard } = await import('../src/dashboard.js');
+      sql.exec('UPDATE settings SET dashboard_msg_id = 42 WHERE chat_id = 1');
+      const real = fetch.getMockImplementation();
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        if (String(url).endsWith('/deleteMessage') && body.message_id === 42) {
+          sql.exec('UPDATE settings SET dashboard_msg_id = 777 WHERE chat_id = 1');
+          calls.push({ url: String(url), body });
+          return new Response(JSON.stringify({ ok: false, description: "Bad Request: message can't be deleted" }));
+        }
+        return real(url, init);
+      });
+      await updateDashboard(env, 1);
+      expect(ids().board).toBe(777);
+      expect(sentTo('unpinChatMessage').map((c) => c.body.message_id)).toEqual([42]);
+    });
+
+    it('tries blanking a refused pad twice when the first edit hits a blip', async () => {
+      const { drawPad } = await import('../src/quick.js');
+      await setUp();
+      const pad = padId();
+      sql.exec('DELETE FROM quick_taps');
+      calls.length = 0;
+      let edits = 0;
+      fetch.mockImplementation(async (url, init) => {
+        const body = JSON.parse(init.body);
+        calls.push({ url: String(url), body });
+        if (String(url).endsWith('/deleteMessage')) {
+          return new Response(JSON.stringify({ ok: false, description: "Bad Request: message can't be deleted" }));
+        }
+        if (String(url).endsWith('/editMessageText') && ++edits === 1) {
+          return new Response(JSON.stringify({ ok: false, description: 'Internal Server Error' }));
+        }
+        return new Response(JSON.stringify({ ok: true, result: { message_id: pad } }));
+      });
+      await drawPad(env, 1);
+      expect(edits).toBe(2);
+      expect(textOf(pad)).toContain('No buttons yet');
+      expect(padId()).toBe(pad);
+    });
+
     it('forgets a pad deleted by hand instead of flipping the board on every draw', async () => {
       const { updateDashboard } = await import('../src/dashboard.js');
       await setUp();

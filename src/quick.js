@@ -4,7 +4,7 @@
 // whoever tapped, worth one ✅ on the leaderboard and never a bonus
 // (bonus.js). /quick pins the pad, /quick add and /quick remove change it.
 
-import { sendMessage, editMessage, deleteMessage, pinMessage, removePinned, answerCallback,
+import { sendMessage, editMessage, deleteMessage, pinMessage, unpinMessage, removePinned, answerCallback,
          sendPrivate, editRef, messageIsGone, esc, okButton, RECEIPT_TTL_MS } from './tg.js';
 import { senderName, QUICK_TAP_ID, getTz } from './household.js';
 import { choreEmoji, updateDashboard } from './dashboard.js';
@@ -108,9 +108,19 @@ export async function drawPad(env, chatId, { repin = false, into = null } = {}) 
   }
   const msgId = into || row.quick_msg_id || null;
   if (!rows.length) {
-    if (msgId && await removePinned(env, chatId, msgId, EMPTY_PAD_HTML)) {
-      await env.DB.prepare('UPDATE settings SET quick_msg_id = NULL WHERE chat_id = ? AND quick_msg_id = ?')
-        .bind(chatId, msgId).run();
+    if (msgId) {
+      // Claimed before the delete, and only if it is still the pad and still
+      // empty: a swap since this draw's read has made this id the board.
+      const claim = await env.DB.prepare(
+        `UPDATE settings SET quick_msg_id = NULL WHERE chat_id = ? AND quick_msg_id = ?
+           AND NOT EXISTS (SELECT 1 FROM quick_taps WHERE chat_id = ?)`
+      ).bind(chatId, msgId, chatId).run();
+      if (claim.meta.changes && !await removePinned(env, chatId, msgId, EMPTY_PAD_HTML)) {
+        const back = await env.DB.prepare('UPDATE settings SET quick_msg_id = ? WHERE chat_id = ? AND quick_msg_id IS NULL')
+          .bind(msgId, chatId).run();
+        // A new pad took the slot meanwhile, so nothing tracks this one now.
+        if (!back.meta.changes) await unpinMessage(env, chatId, msgId);
+      }
     }
     return { ok: true, empty: true };
   }
@@ -124,7 +134,11 @@ export async function drawPad(env, chatId, { repin = false, into = null } = {}) 
       if (row.dashboard_msg_id && msgId > row.dashboard_msg_id) {
         const now = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
           .bind(chatId).first();
-        if (now && now.dashboard_msg_id === msgId) await updateDashboard(env, chatId);
+        if (now && now.dashboard_msg_id === msgId) {
+          await updateDashboard(env, chatId);
+          // The swap drew the pad from its own read, perhaps before this tap.
+          return drawPad(env, chatId, { repin });
+        }
       }
       return { ok: true, pinned: repin ? await pinUnderBoard(env, chatId, msgId, row.dashboard_msg_id) : true };
     }

@@ -434,7 +434,14 @@ export async function removePinned(env, chatId, messageId, emptyHtml) {
   const why = String(removed.description || '');
   if (removed.ok || /message to delete not found/i.test(why)) return true;
   if (!/message can.t be deleted/i.test(why)) return false;
-  const edited = await editMessage(env, chatId, messageId, emptyHtml, { inline_keyboard: [] });
+  const blank = () => editMessage(env, chatId, messageId, emptyHtml, { inline_keyboard: [] });
+  let edited = await blank();
+  // Nothing redraws an emptied pin until the 8am refresh, so a blip gets one
+  // more try. A timeout may have landed, and has already held the update long.
+  if (!edited.ok && !edited.timedOut && !messageIsGone(edited.description)
+    && !String(edited.description || '').includes('not modified')) {
+    edited = await blank();
+  }
   if (!edited.ok && messageIsGone(edited.description)) {
     await unpinMessage(env, chatId, messageId);
     return true;

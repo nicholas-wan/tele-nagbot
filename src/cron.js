@@ -133,7 +133,7 @@ const SWEEP_PARALLEL = 6;
 // Anything else (a timeout, a 429, a 5xx) keeps the row for the next tick,
 // because forgetting it leaves the message in the chat for good. A day past due
 // it is dropped anyway, so one wedged row cannot hold a place in every window.
-const SWEEP_DONE = /message.*not found|MESSAGE_ID_INVALID|can.t be deleted|chat not found|forbidden|upgraded to a supergroup/i;
+const SWEEP_DONE = /message.*not found|MESSAGE_NOT_FOUND|MESSAGE_ID_INVALID|can.t be deleted|chat not found|forbidden|upgraded to a supergroup/i;
 const SWEEP_GIVE_UP_MS = 86400000;
 
 async function sweepSentMessages(env, now) {

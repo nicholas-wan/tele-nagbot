@@ -1,7 +1,7 @@
 // The pinned dashboard: the chore-list card shared by /list and the pin, and
 // the schedule/emoji text helpers everything renders chores with.
 
-import { sendMessage, editMessage, esc, pinMessage, removePinned, messageIsGone,
+import { sendMessage, editMessage, esc, pinMessage, unpinMessage, removePinned, messageIsGone,
          SWEEP_QUEUE, flushSweepRecords } from './tg.js';
 import { fmtLocal, fmtShort, fmtClock, fmtTime, localParts, DAY_NAMES } from './time.js';
 import { isScored } from './household.js';
@@ -423,8 +423,10 @@ async function drawDashboard(env, chatId) {
         ).bind(chatId, msgId, chatId).run();
         if (claim.meta.changes
           && !await removePinned(env, chatId, msgId, '🐾 <b>Chores</b>\n\nNothing on the list.')) {
-          await env.DB.prepare('UPDATE settings SET dashboard_msg_id = ? WHERE chat_id = ? AND dashboard_msg_id IS NULL')
+          const back = await env.DB.prepare('UPDATE settings SET dashboard_msg_id = ? WHERE chat_id = ? AND dashboard_msg_id IS NULL')
             .bind(msgId, chatId).run();
+          // A new board took the slot meanwhile, so nothing tracks this one now.
+          if (!back.meta.changes) await unpinMessage(env, chatId, msgId);
         }
       }
       return;
@@ -434,11 +436,19 @@ async function drawDashboard(env, chatId) {
       html = html.slice(0, html.lastIndexOf('\n', 3980)) + '\n… more — /list';
     }
 
-    if (msgId && row.quick_msg_id > msgId
-      && await moveBoardAbovePad(env, chatId, msgId, row.quick_msg_id, html)) return;
+    let boardId = msgId;
+    if (msgId && row.quick_msg_id > msgId) {
+      if (await moveBoardAbovePad(env, chatId, msgId, row.quick_msg_id, html)) return;
+      // Another draw may have swapped while this one failed, making the id read
+      // above the pad. Only the saved id is safe to draw the board over.
+      const now = await env.DB.prepare('SELECT dashboard_msg_id FROM settings WHERE chat_id = ?')
+        .bind(chatId).first();
+      boardId = now && now.dashboard_msg_id;
+      if (!boardId) return;
+    }
 
-    if (msgId) {
-      const res = await editMessage(env, chatId, msgId, html, dashboardButtons(env, chatId));
+    if (boardId) {
+      const res = await editMessage(env, chatId, boardId, html, dashboardButtons(env, chatId));
       if (res.ok || String(res.description || '').includes('not modified')) return;
       // Only a board that is genuinely gone earns a replacement. Anything else
       // — a network blip, a 429 that outlived tg()'s one retry, any other
