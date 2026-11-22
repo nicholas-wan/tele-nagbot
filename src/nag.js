@@ -8,6 +8,7 @@ import { pickCelebration, sendCelebration } from './stickers.js';
 import { isScored } from './household.js';
 import { coverChildren, coverLine, nestedReads } from './nesting.js';
 import { updateDashboard, later, fmtWhen, fmtSince } from './dashboard.js';
+import { nagLine } from './nag-lines.js';
 
 export const MAX_SNOOZES = 3;
 // How long a nag has before it counts as overdue. Nothing expires at this
@@ -126,29 +127,6 @@ export function snoozeButtons(firingId, tz) {
   };
 }
 
-// Escalating nag lines, matched to whichever cat is on the sticker that
-// accompanies the message.
-const NAG_LINES = {
-  latte: [
-    'Mrow! A humble request from Latte 🐾',
-    'Latte is staring at you. Intensely. 👀',
-    'Latte just knocked a pen off the desk in protest 😾',
-    'Latte is now sitting on this chore. It has not done itself 🙀',
-  ],
-  mocha: [
-    'Mrow! A humble request from Mocha 🐾',
-    'Mocha is watching you. Unblinking. 👀',
-    'Mocha just shoved a glass toward the edge of the table 😾',
-    'Mocha is now sitting on this chore. It has not done itself 🙀',
-  ],
-  both: [
-    'Mrow! A humble request from Latte &amp; Mocha 🐾',
-    'Latte &amp; Mocha are staring at you. Intensely. 👀',
-    'Mocha just knocked a pen off the desk. Latte approved. 😾',
-    'Both cats are now sitting on this chore. It has not done itself 🙀',
-  ],
-};
-
 // The title line every card leads with. A /remind looks exactly like a
 // /chore, so the one that never reaches the leaderboard is the one marked —
 // and marked on every card state, not just the nag: the 😴 and ⏰ cards used
@@ -162,8 +140,7 @@ const assignedLine = (reminder) => (reminder.assignee_name
 
 export function nagHtml(reminder, nagCount, cat = 'both') {
   const head = `${titleHtml('🐱', reminder)}${nagCount > 0 ? ` — nag #${nagCount + 1}` : ''}`;
-  const lines = NAG_LINES[cat] || NAG_LINES.both;
-  const line = lines[Math.min(nagCount, lines.length - 1)];
+  const line = nagLine(reminder.text, nagCount, cat);
   // The nag itself leads with the mention, so the person is pinged.
   const who = reminder.assignee_name
     ? `${mentionHtml(reminder.assignee_name, reminder.assignee_user_id)} — `
